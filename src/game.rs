@@ -330,6 +330,72 @@ impl Game {
         Some(new_rec)
     }
 
+    /// Every legal player move, ranked for use as hints: suit completions
+    /// first, then moves that turn a card over, same-suit joins, plain moves,
+    /// moves that break a same-suit run, moves into an empty column, and the
+    /// deal last. Only whole movable runs are offered for empty columns.
+    pub fn hint_moves(&self) -> Vec<Move> {
+        let mut out: Vec<(i32, Move)> = Vec::new();
+        let first_empty = self.columns.iter().position(|c| c.is_empty());
+        for from in 0..NUM_COLS {
+            let run = self.run_len(from);
+            if run == 0 {
+                continue;
+            }
+            let src = &self.columns[from];
+            for to in 0..NUM_COLS {
+                if to == from {
+                    continue;
+                }
+                let count = if self.columns[to].is_empty() {
+                    if first_empty != Some(to) || run == src.len() {
+                        continue;
+                    }
+                    run
+                } else {
+                    match self.required_count(from, to) {
+                        Some(k) => k,
+                        None => continue,
+                    }
+                };
+                out.push((self.hint_score(from, to, count), Move::Move { from, to, count }));
+            }
+        }
+        out.sort_by_key(|&(score, _)| -score);
+        let mut moves: Vec<Move> = out.into_iter().map(|(_, m)| m).collect();
+        if self.check_deal().is_ok() {
+            moves.push(Move::Deal);
+        }
+        moves
+    }
+
+    fn hint_score(&self, from: usize, to: usize, count: usize) -> i32 {
+        let src = &self.columns[from];
+        let bottom = src[src.len() - count];
+        let dest = &self.columns[to];
+        let mut score = 0;
+        match dest.last() {
+            None => score -= 3,
+            Some(top) if top.suit() == bottom.suit() => {
+                score += 2;
+                // The joined run is K..A exactly when it starts at the ace and
+                // has thirteen cards.
+                if bottom.rank() == 0 && run_len(dest, self.face_down[to]) + count == 13 {
+                    score += 20;
+                }
+            }
+            Some(_) => {}
+        }
+        if count == self.face_up_count(from) {
+            // Empties the column or turns a card over.
+            score += if self.face_down[from] > 0 { 3 } else { 1 };
+        } else if src.len() > count && src[src.len() - count - 1].suit() == bottom.suit() && src[src.len() - count - 1].rank() == bottom.rank() + 1 {
+            // Breaks a same-suit run.
+            score -= 4;
+        }
+        score
+    }
+
     /// Any legal move at all? (Used to report a stuck game.)
     pub fn has_any_move(&self) -> bool {
         if self.check_deal().is_ok() {

@@ -35,6 +35,10 @@ struct App {
     solver_on: bool,
     solver: Option<SolverHandle>,
     solver_result: Option<SolveResult>,
+    /// Ranked legal moves for the hint key, computed lazily per position.
+    hints: Option<Vec<Move>>,
+    /// Index into `hints` of the hint currently shown.
+    hint_idx: Option<usize>,
     budget: u64,
     threads: usize,
     quit: bool,
@@ -52,6 +56,8 @@ impl App {
             solver_on,
             solver: None,
             solver_result: None,
+            hints: None,
+            hint_idx: None,
             budget,
             threads,
             quit: false,
@@ -72,6 +78,8 @@ impl App {
     fn restart_solver(&mut self) {
         self.solver = None;
         self.solver_result = None;
+        self.hints = None;
+        self.hint_idx = None;
         if self.solver_on && !self.game.is_won() {
             self.solver = Some(SolverHandle::spawn_with(&self.game, self.budget, Config::portfolio(self.threads)));
         }
@@ -82,6 +90,9 @@ impl App {
             if let Some(r) = h.result() {
                 self.solver_result = Some(r);
                 self.solver = None;
+                // Re-rank hints so the winning line's first move leads.
+                self.hints = None;
+                self.hint_idx = None;
             }
         }
     }
@@ -244,7 +255,12 @@ impl App {
                 return;
             }
         }
+        if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
+            self.hint_idx = None;
+        }
         match key.code {
+            KeyCode::Tab => self.hint(1),
+            KeyCode::BackTab => self.hint(-1),
             KeyCode::Char(c @ '0'..='9') => {
                 let col = if c == '0' { 9 } else { c as usize - '1' as usize };
                 self.column_key(col);
@@ -256,6 +272,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('-') => self.adjust_sel(-1),
             KeyCode::Esc => {
                 self.sel = None;
+                self.hint_idx = None;
                 self.msg.clear();
             }
             KeyCode::Char('d') => self.deal(),
@@ -276,6 +293,72 @@ impl App {
         }
     }
 
+    /// Show the next hint. Hints are ranked legal moves; when the solver has
+    /// found a winning line, its first move comes first. The hinted move is
+    /// left selected with the cursor on its destination so Enter plays it.
+    fn hint(&mut self, step: isize) {
+        if self.game.is_won() {
+            self.msg = "The game is won; nothing left to do.".into();
+            return;
+        }
+        if self.hints.is_none() {
+            let mut hints = self.game.hint_moves();
+            if let Some(r) = &self.solver_result {
+                if r.verdict == Verdict::Solvable {
+                    if let Some(&first) = r.line.first() {
+                        hints.retain(|&m| m != first);
+                        hints.insert(0, first);
+                    }
+                }
+            }
+            self.hints = Some(hints);
+        }
+        let hints = self.hints.as_ref().unwrap();
+        if hints.is_empty() {
+            self.msg = "No legal moves. Undo or start a new game.".into();
+            return;
+        }
+        let n = hints.len() as isize;
+        let i = match self.hint_idx {
+            Some(i) => (i as isize + step).rem_euclid(n) as usize,
+            None if step < 0 => hints.len() - 1,
+            None => 0,
+        };
+        self.hint_idx = Some(i);
+        let mv = hints[i];
+        let solver_move = i == 0 && matches!(&self.solver_result, Some(r) if r.verdict == Verdict::Solvable);
+        let what = match mv {
+            Move::Deal => {
+                self.sel = None;
+                "deal".to_string()
+            }
+            Move::Move { from, to, count } => {
+                self.sel = Some((from, count));
+                self.cursor = to;
+                let col = &self.game.columns[from];
+                let top = col[col.len() - 1];
+                let bottom = col[col.len() - count];
+                let cards = if count == 1 {
+                    format!("{}{}", top.rank_str(), top.suit_char())
+                } else {
+                    format!("{}{}..{}{}", top.rank_str(), top.suit_char(), bottom.rank_str(), bottom.suit_char())
+                };
+                let onto = match self.game.columns[to].last() {
+                    Some(c) => format!("onto {}{} in column {}", c.rank_str(), c.suit_char(), label(to)),
+                    None => format!("to empty column {}", label(to)),
+                };
+                format!("{cards} from column {} {onto}", label(from))
+            }
+        };
+        self.msg = format!(
+            "Hint {}/{}{}: {what}.  {} plays it, Tab/Shift-Tab cycle.",
+            i + 1,
+            hints.len(),
+            if solver_move { " (solver's winning move)" } else { "" },
+            if mv == Move::Deal { "d" } else { "Enter" }
+        );
+    }
+
     fn adjust_sel(&mut self, delta: i32) {
         if let Some((col, count)) = self.sel {
             let run = self.game.run_len(col) as i32;
@@ -290,6 +373,17 @@ impl App {
 
 fn label(col: usize) -> String {
     if col == 9 { "0".into() } else { (col + 1).to_string() }
+}
+
+/// Round a count to a short human form: 850, 12K, 0.7M, 2.3M.
+fn fmt_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn random_seed() -> u64 {
@@ -366,7 +460,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
     if g.is_won() {
         queue!(out, SetForegroundColor(Color::Green), Print("game won"), ResetColor)?;
     } else if !app.solver_on {
-        queue!(out, SetForegroundColor(Color::DarkGrey), Print("off  (press s to peek at whether this game is still winnable)"), ResetColor)?;
+        queue!(out, SetForegroundColor(Color::DarkGrey), Print("off  (s to peek at whether this game is still winnable)"), ResetColor)?;
     } else if let Some(r) = &app.solver_result {
         let (color, text) = match r.verdict {
             Verdict::Solvable => (Color::Green, "SOLVABLE"),
@@ -375,22 +469,21 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         };
         queue!(out, SetForegroundColor(color), SetAttribute(Attribute::Bold), Print(text), SetAttribute(Attribute::Reset), ResetColor)?;
         let detail = match r.verdict {
-            Verdict::Solvable => format!("  a winning line exists ({} moves)", r.line.len()),
-            Verdict::Unsolvable => "  no winning line exists from here".to_string(),
-            Verdict::Unknown => "  search budget exhausted without a verdict".to_string(),
+            Verdict::Solvable | Verdict::Unsolvable => "",
+            Verdict::Unknown => "  budget exhausted",
         };
         queue!(
             out,
             Print(detail),
             SetForegroundColor(Color::DarkGrey),
-            Print(format!("  [{} classes, {} positions, {:.2}s, {}]", r.classes, r.nodes, r.elapsed.as_secs_f64(), r.config)),
+            Print(format!("  {} positions, {:.1}s, {}", fmt_count(r.nodes), r.elapsed.as_secs_f64(), r.config)),
             ResetColor
         )?;
     } else if let Some(hnd) = &app.solver {
         queue!(
             out,
             SetForegroundColor(Color::Cyan),
-            Print(format!("thinking…  {} positions on {} thread{}, {:.1}s", hnd.work(), hnd.threads(), if hnd.threads() == 1 { "" } else { "s" }, hnd.elapsed().as_secs_f64())),
+            Print(format!("thinking…  {:.1}M positions, {} thread{}, {:.0}s", hnd.work() as f64 / 1e6, hnd.threads(), if hnd.threads() == 1 { "" } else { "s" }, hnd.elapsed().as_secs_f64())),
             ResetColor
         )?;
     }
@@ -458,7 +551,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
         SetForegroundColor(Color::DarkGrey),
-        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  d deal  u undo  r redo  s solver  n new  R restart  ? help  q quit"),
+        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  n new  R restart  ? help  q quit"),
         ResetColor
     )?;
 
@@ -492,6 +585,7 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "  1-9, 0     select a column, then a destination column",
         "  ←/→ h/l    move the cursor;  Enter/Space acts on the cursor column",
         "  ↑/↓ +/-    change how many cards are selected (for empty destinations)",
+        "  Tab        hint: cycle through the legal moves, best first (Shift-Tab back)",
         "  Esc        clear the selection",
         "  d          deal from the stock",
         "  u / r      undo / redo (undoing past a reveal asks for confirmation)",
