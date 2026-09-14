@@ -90,9 +90,6 @@ impl App {
             if let Some(r) = h.result() {
                 self.solver_result = Some(r);
                 self.solver = None;
-                // Re-rank hints so the winning line's first move leads.
-                self.hints = None;
-                self.hint_idx = None;
             }
         }
     }
@@ -293,25 +290,16 @@ impl App {
         }
     }
 
-    /// Show the next hint. Hints are ranked legal moves; when the solver has
-    /// found a winning line, its first move comes first. The hinted move is
-    /// left selected with the cursor on its destination so Enter plays it.
+    /// Show the next hint. Hints are the legal moves ranked by visible
+    /// information only (never the solver's line, which peeks). The hinted
+    /// move is left selected with the cursor on its destination so Enter plays it.
     fn hint(&mut self, step: isize) {
         if self.game.is_won() {
             self.msg = "The game is won; nothing left to do.".into();
             return;
         }
         if self.hints.is_none() {
-            let mut hints = self.game.hint_moves();
-            if let Some(r) = &self.solver_result {
-                if r.verdict == Verdict::Solvable {
-                    if let Some(&first) = r.line.first() {
-                        hints.retain(|&m| m != first);
-                        hints.insert(0, first);
-                    }
-                }
-            }
-            self.hints = Some(hints);
+            self.hints = Some(self.game.hint_moves());
         }
         let hints = self.hints.as_ref().unwrap();
         if hints.is_empty() {
@@ -326,7 +314,6 @@ impl App {
         };
         self.hint_idx = Some(i);
         let mv = hints[i];
-        let solver_move = i == 0 && matches!(&self.solver_result, Some(r) if r.verdict == Verdict::Solvable);
         let what = match mv {
             Move::Deal => {
                 self.sel = None;
@@ -351,10 +338,9 @@ impl App {
             }
         };
         self.msg = format!(
-            "Hint {}/{}{}: {what}.  {} plays it, Tab/Shift-Tab cycle.",
+            "Hint {}/{}: {what}.  {} plays it, Tab/Shift-Tab cycle.",
             i + 1,
             hints.len(),
-            if solver_move { " (solver's winning move)" } else { "" },
             if mv == Move::Deal { "d" } else { "Enter" }
         );
     }

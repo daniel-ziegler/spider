@@ -17,7 +17,7 @@ cargo run --release -- --solver             # start with the solver on
 | `1`-`9`, `0`   | select a column, then a destination column                    |
 | `←` `→` / `h` `l` | move the cursor; `Enter` or `Space` acts on the cursor column |
 | `↑` `↓` / `+` `-` | change how many cards are selected (matters for empty columns) |
-| `Tab` / `Shift-Tab` | hint: cycle through the legal moves, best first (suit completions, card reveals, same-suit joins, …, deal last). With a SOLVABLE verdict the solver's own next move comes first. The hinted move is left selected, so `Enter` plays it |
+| `Tab` / `Shift-Tab` | hint: cycle through the legal moves, best first (suit completions, card reveals, same-suit joins, …, deal last). Ranked from visible cards only; it never uses the solver's peek. The hinted move is left selected, so `Enter` plays it |
 | `Esc`          | clear the selection                                           |
 | `d`            | deal ten cards from the stock (not allowed with an empty column) |
 | `u` / `r`      | undo / redo. Undoing past a move that revealed information (a card flip or a deal) asks for confirmation |
