@@ -17,7 +17,7 @@ cargo run --release -- --solver             # start with the solver on
 | `1`-`9`, `0`   | select a column, then a destination column                    |
 | `←` `→` / `h` `l` | move the cursor; `Enter` or `Space` acts on the cursor column |
 | `↑` `↓` / `+` `-` | change how many cards are selected (matters for empty columns) |
-| `Tab` / `Shift-Tab` | hint: cycle through the legal moves, best first (suit completions, card reveals, same-suit joins, …, deal last). Ranked from visible cards only; it never uses the solver's peek. The hinted move is left selected, so `Enter` plays it |
+| `Tab` / `Shift-Tab` | hint: cycle through the legal moves, greediest first. Each move is scored by its destination (suit completion, same-suit linkage, cross-suit linkage, empty column) plus what it frees at the source (a card flip, an emptied column, a non-linkage, a cross-suit linkage, or a broken same-suit run), so cross→same-suit joins outrank non-linkage→linkage moves, which outrank plain shuffles; the deal comes last. Ranked from visible cards only; it never uses the solver's peek. The hinted move is left selected, so `Enter` plays it |
 | `Esc`          | clear the selection                                           |
 | `d`            | deal ten cards from the stock (not allowed with an empty column) |
 | `u` / `r`      | undo / redo. Undoing past a move that revealed information (a card flip or a deal) asks for confirmation |

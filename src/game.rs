@@ -363,12 +363,18 @@ impl Game {
         Some(new_rec)
     }
 
-    /// Every legal player move, ranked for use as hints: suit completions
-    /// first, then moves that turn a card over, same-suit joins, plain moves,
-    /// moves that break a same-suit run, moves into an empty column, and the
-    /// deal last. Only whole movable runs are offered for empty columns.
+    /// Every legal player move, ranked greedily for use as hints.
+    ///
+    /// Each move is scored by what it does at the destination plus what it
+    /// frees at the source, so for example a run moved off a cross-suit
+    /// linkage onto a same-suit one ranks above a run moved off a non-linkage
+    /// (a card that is not one rank higher) onto a cross-suit linkage, which in
+    /// turn ranks above a plain cross-to-cross shuffle. Suit completions come
+    /// first, moves that break a same-suit run or spend an empty column come
+    /// last, and the deal is after all card moves. Only whole movable runs are
+    /// offered for empty columns.
     pub fn hint_moves(&self) -> Vec<Move> {
-        let mut out: Vec<(i32, Move)> = Vec::new();
+        let mut out: Vec<(i32, usize, Move)> = Vec::new();
         let first_empty = self.columns.iter().position(|c| c.is_empty());
         for from in 0..NUM_COLS {
             let run = self.run_len(from);
@@ -391,42 +397,57 @@ impl Game {
                         None => continue,
                     }
                 };
-                out.push((self.hint_score(from, to, count), Move::Move { from, to, count }));
+                out.push((self.hint_score(from, to, count), count, Move::Move { from, to, count }));
             }
         }
-        out.sort_by_key(|&(score, _)| -score);
-        let mut moves: Vec<Move> = out.into_iter().map(|(_, m)| m).collect();
+        // Best score first; among equals, the longer run.
+        out.sort_by_key(|&(score, count, _)| (-score, std::cmp::Reverse(count)));
+        let mut moves: Vec<Move> = out.into_iter().map(|(_, _, m)| m).collect();
         if self.check_deal().is_ok() {
             moves.push(Move::Deal);
         }
         moves
     }
 
+    /// Greedy value of moving `count` cards from `from` to `to`.
+    ///
+    /// Destination: completes a suit +100, same-suit linkage +15, cross-suit
+    /// linkage 0, empty column -15.
+    /// Source (what the bottom card was sitting on): a face-down card that
+    /// will flip +12, nothing (column becomes empty) +10, a non-linkage +8,
+    /// a cross-suit linkage 0, a same-suit linkage -20 (breaks a run).
     fn hint_score(&self, from: usize, to: usize, count: usize) -> i32 {
         let src = &self.columns[from];
         let bottom = src[src.len() - count];
         let dest = &self.columns[to];
-        let mut score = 0;
-        match dest.last() {
-            None => score -= 3,
+        let dst_score = match dest.last() {
+            None => -15,
             Some(top) if top.suit() == bottom.suit() => {
-                score += 2;
                 // The joined run is K..A exactly when it starts at the ace and
                 // has thirteen cards.
                 if bottom.rank() == 0 && run_len(dest, self.face_down[to]) + count == 13 {
-                    score += 20;
+                    100
+                } else {
+                    15
                 }
             }
-            Some(_) => {}
-        }
-        if count == self.face_up_count(from) {
-            // Empties the column or turns a card over.
-            score += if self.face_down[from] > 0 { 3 } else { 1 };
-        } else if src.len() > count && src[src.len() - count - 1].suit() == bottom.suit() && src[src.len() - count - 1].rank() == bottom.rank() + 1 {
-            // Breaks a same-suit run.
-            score -= 4;
-        }
-        score
+            Some(_) => 0,
+        };
+        let src_score = if count == src.len() {
+            10
+        } else if count == self.face_up_count(from) {
+            12
+        } else {
+            let parent = src[src.len() - count - 1];
+            if parent.rank() != bottom.rank() + 1 {
+                8
+            } else if parent.suit() == bottom.suit() {
+                -20
+            } else {
+                0
+            }
+        };
+        dst_score + src_score
     }
 
     /// Any legal move at all? (Used to report a stuck game.)
