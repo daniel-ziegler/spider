@@ -190,10 +190,10 @@ impl Game {
         let completed: usize = parts.next()?.parse().ok()?;
         let mut columns = Vec::new();
         let mut face_down = [0; NUM_COLS];
-        for c in 0..NUM_COLS {
+        for fd in face_down.iter_mut() {
             let part = parts.next()?;
             let (d, cards) = part.split_once('/')?;
-            face_down[c] = d.parse().ok()?;
+            *fd = d.parse().ok()?;
             let col: Vec<Card> = if cards.is_empty() {
                 Vec::new()
             } else {

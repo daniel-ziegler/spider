@@ -32,8 +32,8 @@ pub fn stuck_certificate(cols: &[&[u8]]) -> bool {
     }
     let top_of = |stuck: &Vec<Vec<bool>>, c: usize| stuck[c].iter().rposition(|&b| b).map(|i| i as i32).unwrap_or(-1);
     let mut top_stuck: [i32; NUM_COLS] = [0; NUM_COLS];
-    for c in 0..NUM_COLS {
-        top_stuck[c] = top_of(&stuck, c);
+    for (c, t) in top_stuck.iter_mut().enumerate() {
+        *t = top_of(&stuck, c);
     }
     let mut changed = true;
     while changed {

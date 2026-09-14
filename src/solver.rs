@@ -376,17 +376,19 @@ impl Config {
     }
 
     /// Diverse configurations; the first `n` are meant to run in parallel.
+    /// Chosen so that the union of what they solve is largest (on 4-suit
+    /// seeds 1-100 the first four solve 97 deals; the base alone 91).
     pub fn portfolio(n: usize) -> Vec<Config> {
         let base = Config::default();
         let mut v = vec![
             base.clone(),
-            Config { name: "runsq", weights: Weights { run_sq: 8, ..base.weights }, ..base.clone() },
-            Config { name: "tax", sibling_tax: 3, ..base.clone() },
-            Config { name: "hidden", weights: Weights { hidden: 20, ..base.weights }, ..base.clone() },
-            Config { name: "dpc1", deals_per_class: 1, ..base.clone() },
-            Config { name: "bonus", deal_bonus: 20, ..base.clone() },
-            Config { name: "empty", weights: Weights { empty: 15, ..base.weights }, ..base.clone() },
+            Config { name: "wide", stage_cap: Some(100_000), end_cap: Some(100_000), sub_alloc: 6, ..base.clone() },
+            Config { name: "runsq8", weights: Weights { run_sq: 8, ..base.weights }, ..base.clone() },
+            Config { name: "bestfirst", depth_w: 0, ..base.clone() },
             Config { name: "same", weights: Weights { same: 8, diff: 0, ..base.weights }, ..base.clone() },
+            Config { name: "alloc20", sub_alloc: 20, ..base.clone() },
+            Config { name: "hidden", weights: Weights { hidden: 20, ..base.weights }, ..base.clone() },
+            Config { name: "empty", weights: Weights { empty: 15, ..base.weights }, ..base.clone() },
         ];
         v.truncate(n.max(1));
         v
@@ -534,8 +536,6 @@ const NO_PARENT: u32 = u32::MAX;
 /// then most recently pushed first (keeps equal-score exploration depth-first).
 struct Pending {
     key: i32,
-    /// Plain evaluation (the key may add a depth term).
-    eval: i32,
     seq: u64,
     parent: u32,
     path: Box<[u8]>,
@@ -928,10 +928,8 @@ impl Solver {
         let node = &self.nodes[entry as usize];
         let state = node.state.to_state();
         let mut heap = BinaryHeap::new();
-        let eval = state.eval(&self.cfg.weights);
         heap.push(Pending {
-            key: eval,
-            eval,
+            key: state.eval(&self.cfg.weights),
             seq: 0,
             parent: node.parent,
             path: Box::new([]),
@@ -1026,7 +1024,6 @@ impl Solver {
                     self.work += 1;
                     heap.push(Pending {
                         key: k + self.cfg.depth_w * (p.depth as i32 + 1),
-                        eval: k,
                         seq: self.seq,
                         parent: nid,
                         path: encode_path(&cls, ei),
