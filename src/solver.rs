@@ -116,6 +116,17 @@ impl State {
         s
     }
 
+    /// Same text form as `Game::to_position_text`.
+    #[allow(dead_code)]
+    fn to_text(&self) -> String {
+        let mut out = format!("{}", self.completed);
+        for c in 0..NUM_COLS {
+            let cards: Vec<String> = self.cols[c][..self.len[c] as usize].iter().map(|k| k.to_string()).collect();
+            out.push_str(&format!(";{}/{}", self.down[c], cards.join(",")));
+        }
+        out
+    }
+
     fn rehash(&mut self, c: usize) {
         let mut h = mix(0x51_7CC1_B727_220A, self.len[c] as u64 | (self.down[c] as u64) << 8);
         let col = &self.cols[c][..self.len[c] as usize];
@@ -276,7 +287,7 @@ pub struct Weights {
 
 impl Default for Weights {
     fn default() -> Weights {
-        Weights { completed: 1000, hidden: 12, same: 4, diff: 1, wrong: 2, empty: 30, king_base: 3, run_sq: 0 }
+        Weights { completed: 1000, hidden: 12, same: 4, diff: 1, wrong: 2, empty: 30, king_base: 3, run_sq: 16 }
     }
 }
 
@@ -289,16 +300,29 @@ pub struct Config {
     pub weights: Weights,
     /// Max deal points taken from one class (the best by post-deal score).
     pub deals_per_class: usize,
+    /// Deal points a stage releases to the global queue per run; the rest
+    /// wait until the stage is resumed.
+    pub deals_per_stage: usize,
     /// Added to a deal candidate's key per stock stage already dealt.
     pub deal_bonus: i32,
     /// Penalty per failed sibling deal from the same stage exploration.
     pub sibling_tax: i32,
+    /// Penalty per resumption on a suspended stage's candidate key.
+    pub resume_tax: i32,
+    /// A new stage's subtree allowance, in stage caps; it multiplies by
+    /// `sub_growth` each time the stage is resumed.
+    pub sub_alloc: u32,
+    pub sub_growth: u32,
     /// Work cap per stage exploration; None = budget / STAGE_CAP_DIV.
     pub stage_cap: Option<u64>,
     /// Work cap for the final (stock-empty) stage; None = budget / END_CAP_DIV.
     pub end_cap: Option<u64>,
     /// Treat same-suit joins as reversible once the stock is empty.
     pub end_splits: bool,
+    /// Added to a child's key per level of depth within a stage: 0 is pure
+    /// best-first, a large value is depth-first with siblings ordered by
+    /// evaluation.
+    pub depth_w: i32,
 }
 
 impl Default for Config {
@@ -307,11 +331,16 @@ impl Default for Config {
             name: "base",
             weights: Weights::default(),
             deals_per_class: DEALS_PER_CLASS,
+            deals_per_stage: DEALS_PER_STAGE,
             deal_bonus: DEAL_BONUS,
             sibling_tax: SIBLING_TAX,
+            resume_tax: RESUME_TAX,
+            sub_alloc: SUB_ALLOC,
+            sub_growth: SUB_GROWTH,
             stage_cap: None,
             end_cap: None,
             end_splits: false,
+            depth_w: DEPTH_W,
         }
     }
 }
@@ -333,11 +362,16 @@ impl Config {
                 run_sq: env_or("SPIDER_W_RUNSQ", w.run_sq),
             },
             deals_per_class: env_or("SPIDER_DEALS_PER_CLASS", d.deals_per_class),
+            deals_per_stage: env_or("SPIDER_DEALS_PER_STAGE", d.deals_per_stage),
             deal_bonus: env_or("SPIDER_DEAL_BONUS", d.deal_bonus),
             sibling_tax: env_or("SPIDER_SIBLING_TAX", d.sibling_tax),
+            resume_tax: env_or("SPIDER_RESUME_TAX", d.resume_tax),
+            sub_alloc: env_or("SPIDER_SUB_ALLOC", d.sub_alloc),
+            sub_growth: env_or("SPIDER_SUB_GROWTH", d.sub_growth),
             stage_cap: std::env::var("SPIDER_STAGE_CAP").ok().and_then(|v| v.parse().ok()),
             end_cap: std::env::var("SPIDER_END_CAP").ok().and_then(|v| v.parse().ok()),
             end_splits: env_or::<u8>("SPIDER_END_SPLITS", 0) != 0,
+            depth_w: env_or("SPIDER_DEPTH_W", d.depth_w),
         }
     }
 
@@ -454,8 +488,44 @@ struct Class {
 /// the parent class that led here (for reconstructing the winning line).
 struct SNode {
     parent: u32,
-    exit_idx: u32,
+    /// Moves from the parent node's position to this one (see `encode_path`).
+    path: Box<[u8]>,
     state: Compact,
+}
+
+/// Encode the moves through a class from its entry to exit `ei`.
+fn encode_path(cls: &Class, ei: usize) -> Box<[u8]> {
+    let ex = &cls.exits[ei];
+    let mut moves = vec![ex.mv];
+    let mut m = ex.member;
+    while m != 0 {
+        moves.push(cls.members[m as usize].mv);
+        m = cls.members[m as usize].parent;
+    }
+    let mut out = Vec::with_capacity(moves.len() * 2);
+    for mv in moves.iter().rev() {
+        match *mv {
+            Move::Deal => out.push(255),
+            Move::Move { from, to, count } => {
+                out.push((from * NUM_COLS + to) as u8);
+                out.push(count as u8);
+            }
+        }
+    }
+    out.into_boxed_slice()
+}
+
+fn decode_path(path: &[u8], out: &mut Vec<Move>) {
+    let mut i = 0;
+    while i < path.len() {
+        if path[i] == 255 {
+            out.push(Move::Deal);
+            i += 1;
+        } else {
+            out.push(Move::Move { from: path[i] as usize / NUM_COLS, to: path[i] as usize % NUM_COLS, count: path[i + 1] as usize });
+            i += 2;
+        }
+    }
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -464,9 +534,12 @@ const NO_PARENT: u32 = u32::MAX;
 /// then most recently pushed first (keeps equal-score exploration depth-first).
 struct Pending {
     key: i32,
+    /// Plain evaluation (the key may add a depth term).
+    eval: i32,
     seq: u64,
     parent: u32,
-    exit_idx: u32,
+    path: Box<[u8]>,
+    depth: u16,
     state: Compact,
 }
 impl PartialEq for Pending {
@@ -497,60 +570,96 @@ enum Outcome {
 
 /// Fraction of the budget spent enumerating one stage's classes before moving
 /// on to deals (too large starves later stages, too small deals blindly).
-const STAGE_CAP_DIV: u64 = 10;
+const STAGE_CAP_DIV: u64 = 100;
 const STAGE_CAP_MIN: u64 = 20_000;
-const END_CAP_DIV: u64 = 10;
+const END_CAP_DIV: u64 = 100;
 const DEALS_PER_CLASS: usize = 4;
+const DEALS_PER_STAGE: usize = 8;
 const DEAL_BONUS: i32 = 0;
 /// Score penalty applied to a deal candidate for every sibling (same parent
 /// exploration) that has already been tried without success; spreads the
 /// search across branches instead of exhausting one bad stage's deal points.
 const SIBLING_TAX: i32 = 0;
+const RESUME_TAX: i32 = 30;
+const SUB_ALLOC: u32 = 8;
+const SUB_GROWTH: u32 = 2;
+const DEPTH_W: i32 = 100_000;
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// A queued deal point, ordered by score then most recent first.
-struct DealCand {
+/// A queued unit of work: a deal point to open a new stage, or a suspended
+/// stage to resume. Ordered by key, then most recent first.
+struct Cand {
     key: i32,
     seq: u64,
-    nid: u32,
-    ei: u32,
-    /// Stage exploration that produced this candidate.
+    kind: CandKind,
+    /// Stage whose exploration produced this candidate (for the sibling tax).
     origin: u32,
     /// How many of `origin`'s failures have already been charged to `key`.
     charged: u32,
 }
-impl PartialEq for DealCand {
+enum CandKind {
+    Deal { nid: u32, path: Box<[u8]>, state: Compact },
+    Resume(u32),
+}
+impl PartialEq for Cand {
     fn eq(&self, o: &Self) -> bool {
         self.key == o.key && self.seq == o.seq
     }
 }
-impl Eq for DealCand {}
-impl PartialOrd for DealCand {
+impl Eq for Cand {}
+impl PartialOrd for Cand {
     fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(o))
     }
 }
-impl Ord for DealCand {
+impl Ord for Cand {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
         (self.key, self.seq).cmp(&(o.key, o.seq))
     }
 }
 
+/// One stock stage's exploration, kept alive while suspended so it can be
+/// resumed with a larger allowance later.
+struct Stage {
+    heap: BinaryHeap<Pending>,
+    /// Deal candidates found but not yet released to the global queue.
+    pending_deals: BinaryHeap<Cand>,
+    /// Candidates parked because this subtree is over its allowance.
+    frozen: Vec<Cand>,
+    entry: u32,
+    /// Key of the candidate that opened this stage; resumptions are keyed
+    /// from it so a stage competes with its siblings, not its children.
+    base_key: i32,
+    origin: u32,
+    /// Work spent in this stage and everything below it, and how much it
+    /// may spend before its candidates are frozen.
+    subtree: u64,
+    allowance: u64,
+    resumes: u32,
+    failures: u32,
+    resume_queued: bool,
+    end: bool,
+}
+
+/// Pending entries kept when a stage is suspended (the rest are dropped,
+/// which makes the search incomplete).
+const SUSPEND_KEEP: usize = 20_000;
+
 pub struct Solver {
     deals: Vec<[u8; DEAL_SIZE]>,
     /// Class id -> id of the stage exploration that expanded it.
     seen: HashMap<u64, u32, IdBuild>,
-    /// Whether each stage exploration enumerated its whole stage.
-    search_complete: Vec<bool>,
     /// Position hash -> id of the (already expanded) class it belongs to.
     member_of: HashMap<u64, u64, IdBuild>,
-    deal_queue: BinaryHeap<DealCand>,
+    queue: BinaryHeap<Cand>,
+    stages: Vec<Stage>,
+    /// Something was cut short (deal truncation, dropped frontier), so an
+    /// exhausted search is not a proof.
+    incomplete: bool,
     cfg: Config,
-    /// Failed deal attempts per stage exploration id.
-    failures: Vec<u32>,
     nodes: Vec<SNode>,
     work: u64,
     classes: u64,
@@ -563,7 +672,10 @@ pub struct Solver {
     /// Work cap for exploring the final (stock-empty) stage.
     end_cap: u64,
     seq: u64,
-    win: Option<(u32, u32)>,
+    /// Node holding the won position.
+    win: Option<u32>,
+    class_cap: usize,
+    debug: bool,
 }
 
 impl Solver {
@@ -587,13 +699,13 @@ impl Solver {
         Solver {
             deals,
             seen: HashMap::default(),
-            search_complete: Vec::new(),
             member_of: HashMap::default(),
-            deal_queue: BinaryHeap::new(),
+            queue: BinaryHeap::new(),
+            stages: Vec::new(),
+            incomplete: false,
             stage_cap: cfg.stage_cap.unwrap_or((budget / STAGE_CAP_DIV).max(STAGE_CAP_MIN)),
             end_cap: cfg.end_cap.unwrap_or((budget / END_CAP_DIV).max(STAGE_CAP_MIN)),
             cfg,
-            failures: Vec::new(),
             nodes: Vec::new(),
             work: 0,
             classes: 0,
@@ -604,6 +716,8 @@ impl Solver {
             splits: false,
             seq: 0,
             win: None,
+            class_cap: env_or("SPIDER_CLASS_CAP", CLASS_CAP),
+            debug: std::env::var_os("SPIDER_DEBUG").is_some(),
         }
     }
 
@@ -613,7 +727,7 @@ impl Solver {
         let mut outcome = if root.completed == 8 {
             Outcome::Solvable
         } else {
-            let root_id = self.push_node(NO_PARENT, 0, &root);
+            let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
             self.search(root_id)
         };
         let mut proof_pass = false;
@@ -623,9 +737,10 @@ impl Solver {
             self.seen.clear();
             self.member_of.clear();
             self.nodes.clear();
-            self.search_complete.clear();
-            self.deal_queue.clear();
-            let root_id = self.push_node(NO_PARENT, 0, &root);
+            self.stages.clear();
+            self.queue.clear();
+            self.incomplete = false;
+            let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
             outcome = self.search(root_id);
         }
         let verdict = match outcome {
@@ -650,8 +765,8 @@ impl Solver {
         (s.deals_done as usize) < self.deals.len()
     }
 
-    fn push_node(&mut self, parent: u32, exit_idx: u32, s: &State) -> u32 {
-        self.nodes.push(SNode { parent, exit_idx, state: Compact::from_state(s) });
+    fn push_node(&mut self, parent: u32, path: Box<[u8]>, s: &State) -> u32 {
+        self.nodes.push(SNode { parent, path, state: Compact::from_state(s) });
         (self.nodes.len() - 1) as u32
     }
 
@@ -745,6 +860,7 @@ impl Solver {
         local.insert(min_hash, 0);
         let mut moves = Vec::with_capacity(48);
         let mut win = None;
+        let mut truncated = false;
         let mut i = 0;
         'bfs: while i < members.len() {
             let s = members[i].state.clone();
@@ -760,15 +876,26 @@ impl Solver {
                     break 'bfs;
                 }
                 if self.reversible(&s, &t, mv) {
-                    if members.len() >= CLASS_CAP {
+                    let h = t.hash();
+                    if local.contains_key(&h) {
                         continue;
                     }
-                    let h = t.hash();
-                    if let std::collections::hash_map::Entry::Vacant(e) = local.entry(h) {
-                        e.insert(members.len() as u32);
-                        min_hash = min_hash.min(h);
-                        members.push(Member { state: t, parent: i as u32, mv });
+                    if self.member_of.contains_key(&h) {
+                        // Already enumerated as part of an earlier chunk of
+                        // this class (or of a class entered elsewhere).
+                        truncated = true;
+                        continue;
                     }
+                    if members.len() >= self.class_cap {
+                        // Class too big to enumerate: hand the rest of it to
+                        // the search as ordinary exits, so nothing is lost.
+                        truncated = true;
+                        exits.push(Exit { member: i as u32, mv, result: t });
+                        continue;
+                    }
+                    local.insert(h, members.len() as u32);
+                    min_hash = min_hash.min(h);
+                    members.push(Member { state: t, parent: i as u32, mv });
                 } else {
                     exits.push(Exit { member: i as u32, mv, result: t });
                 }
@@ -789,81 +916,104 @@ impl Solver {
         }
         self.work += members.len() as u64;
         self.classes += 1;
-        let complete = members.len() < CLASS_CAP;
-        let id = if complete { min_hash } else { entry.hash() };
+        let id = if truncated { entry.hash() } else { min_hash };
         for (h, _) in local {
             self.member_of.insert(h, id);
         }
         Class { members, exits, id, win }
     }
 
-    /// Explore one stock stage from class node `entry`: best-first over all
-    /// classes reachable without dealing, up to a per-stage work cap. Deal
-    /// exits are pushed onto the global candidate queue. Returns whether the
-    /// stage was enumerated completely (needed for an Unsolvable proof).
-    fn explore_stage(&mut self, entry: u32) -> Outcome {
-        let search_id = self.search_complete.len() as u32;
-        self.search_complete.push(false);
-        self.failures.push(0);
-        let mut heap: BinaryHeap<Pending> = BinaryHeap::new();
-        let mut complete = true;
-        let entry_node = &self.nodes[entry as usize];
-        let entry_state = entry_node.state.to_state();
-        let w = self.cfg.weights;
+    /// Open a stage rooted at class node `entry`.
+    fn new_stage(&mut self, entry: u32, base_key: i32, origin: u32) -> u32 {
+        let node = &self.nodes[entry as usize];
+        let state = node.state.to_state();
+        let mut heap = BinaryHeap::new();
+        let eval = state.eval(&self.cfg.weights);
         heap.push(Pending {
-            key: entry_state.eval(&w),
+            key: eval,
+            eval,
             seq: 0,
-            parent: entry_node.parent,
-            exit_idx: entry_node.exit_idx,
-            state: entry_node.state.clone(),
+            parent: node.parent,
+            path: Box::new([]),
+            depth: 0,
+            state: node.state.clone(),
         });
-        let debug = std::env::var_os("SPIDER_DEBUG").is_some();
-        let (mut dup, start_work) = (0u64, self.work);
-        let (mut classes, mut members_total, mut biggest, mut deals) = (0u64, 0u64, 0usize, 0u64);
+        let end = !self.stock_left(&state);
+        let allowance = if self.stages.is_empty() { u64::MAX } else { self.stage_cap * self.cfg.sub_alloc as u64 };
+        self.stages.push(Stage {
+            heap,
+            pending_deals: BinaryHeap::new(),
+            frozen: Vec::new(),
+            entry,
+            base_key,
+            origin,
+            subtree: 0,
+            allowance,
+            resumes: 0,
+            failures: 0,
+            resume_queued: false,
+            end,
+        });
+        (self.stages.len() - 1) as u32
+    }
+
+    /// Explore stage `sid` (best-first or depth-first over its classes)
+    /// for one allowance of work. Deal exits go onto the global candidate
+    /// queue. Returns Unsolvable if the stage is exhausted, NotFound if it was
+    /// suspended (a resume candidate is queued).
+    fn explore_stage(&mut self, sid: u32) -> Outcome {
+        let mut heap = std::mem::take(&mut self.stages[sid as usize].heap);
+        let stage = &self.stages[sid as usize];
+        let (entry, origin, resumes, end) = (stage.entry, stage.origin, stage.resumes, stage.end);
+        let allowance = if end { self.end_cap } else { self.stage_cap };
+        let entry_state = self.nodes[entry as usize].state.to_state();
+        let w = self.cfg.weights;
+        let start_work = self.work;
+        let mut next_report = 0;
+        let (mut classes, mut dup, mut deals) = (0u64, 0u64, 0u64);
         let indent = "  ".repeat(entry_state.deals_done as usize);
+        let mut suspended = false;
+        let mut found_deals: BinaryHeap<Cand> = std::mem::take(&mut self.stages[sid as usize].pending_deals);
 
         while let Some(p) = heap.pop() {
             if self.tick() {
+                self.stages[sid as usize].heap = heap;
                 return Outcome::Unknown;
             }
-            let cap = if self.stock_left(&entry_state) { self.stage_cap } else { self.end_cap };
-            if self.work - start_work > cap {
-                complete = false;
+            if self.work - start_work > allowance {
+                heap.push(p);
+                suspended = true;
                 break;
             }
             let s = p.state.to_state();
-            let known = self.member_of.get(&s.hash()).copied();
-            let status = known.and_then(|id| self.seen.get(&id).copied());
-            match status {
-                Some(id) if id == search_id => {
+            if let Some(id) = self.member_of.get(&s.hash()) {
+                if self.seen.contains_key(id) {
                     dup += 1;
                     continue;
                 }
-                Some(id) => {
-                    if !self.search_complete[id as usize] {
-                        complete = false;
-                    }
-                    continue;
-                }
-                None => {}
             }
             let cls = self.expand_class(&s);
             classes += 1;
-            members_total += cls.members.len() as u64;
-            biggest = biggest.max(cls.members.len());
-            if let Some(&st) = self.seen.get(&cls.id) {
-                // Entered a known class through a position not yet recorded.
-                if st == search_id {
-                    dup += 1;
-                } else if !self.search_complete[st as usize] {
-                    complete = false;
-                }
+            if self.debug && self.work >= next_report {
+                next_report = self.work + 50_000;
+                let hidden: u32 = s.down.iter().map(|&d| d as u32).sum();
+                eprintln!(
+                    "{indent}  work {:>9} key {:>6} done {} hidden {:>2} empty {} heap {:>8} classes {:>7} members {:>5} exits {:>3}",
+                    self.work, p.key, s.completed, hidden, s.len.iter().filter(|&&l| l == 0).count(),
+                    heap.len(), classes, cls.members.len(), cls.exits.len()
+                );
+            }
+            if self.seen.contains_key(&cls.id) {
+                dup += 1;
                 continue;
             }
-            self.seen.insert(cls.id, search_id);
-            let nid = if p.seq == 0 { entry } else { self.push_node(p.parent, p.exit_idx, &s) };
+            self.seen.insert(cls.id, sid);
+            let nid = if p.seq == 0 { entry } else { self.push_node(p.parent, p.path, &s) };
             if let Some(w) = cls.win {
-                self.win = Some((nid, w as u32));
+                let path = encode_path(&cls, w);
+                let win_node = self.push_node(nid, path, &cls.exits[w].result);
+                self.win = Some(win_node);
+                self.stages[sid as usize].heap = heap;
                 return Outcome::Solvable;
             }
             let mut class_deals: Vec<(i32, u32)> = Vec::new();
@@ -875,10 +1025,12 @@ impl Solver {
                     self.seq += 1;
                     self.work += 1;
                     heap.push(Pending {
-                        key: k,
+                        key: k + self.cfg.depth_w * (p.depth as i32 + 1),
+                        eval: k,
                         seq: self.seq,
                         parent: nid,
-                        exit_idx: ei as u32,
+                        path: encode_path(&cls, ei),
+                        depth: p.depth + 1,
                         state: Compact::from_state(&ex.result),
                     });
                 }
@@ -886,105 +1038,206 @@ impl Solver {
             if class_deals.len() > self.cfg.deals_per_class {
                 class_deals.sort_unstable_by(|a, b| b.cmp(a));
                 class_deals.truncate(self.cfg.deals_per_class);
-                complete = false;
+                self.incomplete = true;
             }
             for (k, ei) in class_deals {
                 self.seq += 1;
                 deals += 1;
-                self.deal_queue.push(DealCand {
+                found_deals.push(Cand {
                     key: k + self.cfg.deal_bonus * (entry_state.deals_done as i32 + 1),
                     seq: self.seq,
-                    nid,
-                    ei,
-                    origin: search_id,
+                    kind: CandKind::Deal {
+                        nid,
+                        path: encode_path(&cls, ei as usize),
+                        state: Compact::from_state(&cls.exits[ei as usize].result),
+                    },
+                    origin: sid,
                     charged: 0,
                 });
             }
         }
-        if debug {
+        let spent = self.work - start_work;
+        if self.debug {
             eprintln!(
-                "{indent}stage {} entry eval {}: classes {classes} dup {dup} members {members_total} biggest {biggest} deals {deals} work {} complete {complete}",
-                entry_state.deals_done, entry_state.eval(&w), self.work - start_work
+                "{indent}stage {} run {resumes} entry eval {}: classes {classes} dup {dup} deals {deals} work {spent} {}",
+                entry_state.deals_done, entry_state.eval(&w), if suspended { "suspended" } else { "exhausted" }
             );
         }
-        self.search_complete[search_id as usize] = complete;
-        if complete {
-            Outcome::Unsolvable
-        } else {
+        if end {
+            if let Some(path) = std::env::var_os("SPIDER_DUMP_END") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+                    let _ = writeln!(f, "{} {} {}", if suspended { "cut" } else { "dead" }, spent, entry_state.to_text());
+                }
+            }
+        }
+        // Release only the best few deal points now; the rest wait for a
+        // resumption, so one stage cannot flood the queue with siblings.
+        for _ in 0..self.cfg.deals_per_stage {
+            match found_deals.pop() {
+                Some(c) => self.queue.push(c),
+                None => break,
+            }
+        }
+        let more_deals = !found_deals.is_empty();
+        // Charge the work to this stage and all its ancestors.
+        let mut a = sid;
+        loop {
+            self.stages[a as usize].subtree += spent;
+            if a == 0 {
+                break;
+            }
+            a = self.stages[a as usize].origin;
+        }
+        let st = &mut self.stages[sid as usize];
+        st.pending_deals = found_deals;
+        if suspended && heap.len() > SUSPEND_KEEP {
+            let mut v = heap.into_vec();
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            v.truncate(SUSPEND_KEEP);
+            heap = BinaryHeap::from(v);
+            self.incomplete = true;
+        }
+        st.heap = heap;
+        let _ = (origin, resumes);
+        if suspended || more_deals {
+            self.queue_resume(sid);
             Outcome::NotFound
+        } else {
+            Outcome::Unsolvable
         }
     }
 
-    /// Global best-first search over deal points: explore the root stage, then
-    /// repeatedly take the most promising queued deal and explore the stage
-    /// after it.
+    /// Queue a resumption of stage `sid`, keyed like a sibling of it.
+    fn queue_resume(&mut self, sid: u32) {
+        let st = &mut self.stages[sid as usize];
+        if st.resume_queued {
+            return;
+        }
+        st.resume_queued = true;
+        let key = st.base_key - self.cfg.resume_tax * (st.resumes as i32 + 1);
+        let origin = st.origin;
+        self.seq += 1;
+        let charged = self.stages[origin as usize].failures;
+        self.queue.push(Cand { key, seq: self.seq, kind: CandKind::Resume(sid), origin, charged });
+    }
+
+    /// The topmost ancestor (including `sid` itself) whose subtree is over
+    /// its allowance, if any.
+    fn over_budget(&self, sid: u32) -> Option<u32> {
+        let mut chain = Vec::new();
+        let mut a = sid;
+        loop {
+            chain.push(a);
+            if a == 0 {
+                break;
+            }
+            a = self.stages[a as usize].origin;
+        }
+        chain.into_iter().rev().find(|&a| {
+            let st = &self.stages[a as usize];
+            st.subtree >= st.allowance
+        })
+    }
+
+    /// Global best-first search over deal points and suspended stages:
+    /// explore the root stage, then repeatedly take the most promising
+    /// candidate, either opening the stage after a deal or resuming one.
     fn search(&mut self, root: u32) -> Outcome {
-        let mut complete = true;
-        match self.explore_stage(root) {
+        let root_state = self.nodes[root as usize].state.to_state();
+        let key = root_state.eval(&self.cfg.weights);
+        let sid = self.new_stage(root, key, 0);
+        match self.explore_stage(sid) {
             Outcome::Solvable => return Outcome::Solvable,
             Outcome::Unknown => return Outcome::Unknown,
-            Outcome::NotFound => complete = false,
-            Outcome::Unsolvable => {}
+            _ => {}
         }
-        while let Some(mut c) = self.deal_queue.pop() {
+        while let Some(mut c) = self.queue.pop() {
             if self.tick() {
                 return Outcome::Unknown;
             }
-            let f = self.failures[c.origin as usize];
+            let f = self.stages[c.origin as usize].failures;
             if c.charged < f {
                 // Siblings failed since this was queued: demote and requeue.
                 c.key -= self.cfg.sibling_tax * (f - c.charged) as i32;
                 c.charged = f;
-                self.deal_queue.push(c);
+                self.queue.push(c);
                 continue;
             }
-            let s = self.nodes[c.nid as usize].state.to_state();
-            let cls = self.expand_class(&s);
-            let child = self.push_node(c.nid, c.ei, &cls.exits[c.ei as usize].result);
-            match self.explore_stage(child) {
+            // A candidate below an exhausted allowance waits until that
+            // ancestor is resumed (with a doubled allowance).
+            let owner = match c.kind {
+                CandKind::Deal { .. } => c.origin,
+                CandKind::Resume(sid) => sid,
+            };
+            if let Some(a) = self.over_budget(owner) {
+                if !(matches!(c.kind, CandKind::Resume(sid) if sid == a)) {
+                    self.stages[a as usize].frozen.push(c);
+                    self.queue_resume(a);
+                    continue;
+                }
+            }
+            let sid = match c.kind {
+                CandKind::Deal { nid, path, state } => {
+                    let child = self.push_node(nid, path, &state.to_state());
+                    self.new_stage(child, c.key, c.origin)
+                }
+                CandKind::Resume(sid) => {
+                    let st = &mut self.stages[sid as usize];
+                    st.resume_queued = false;
+                    st.resumes += 1;
+                    st.allowance = st.allowance.saturating_mul(self.cfg.sub_growth as u64);
+                    let frozen = std::mem::take(&mut st.frozen);
+                    for fc in frozen {
+                        self.queue.push(fc);
+                    }
+                    let st = &self.stages[sid as usize];
+                    if st.heap.is_empty() && st.pending_deals.is_empty() {
+                        continue;
+                    }
+                    sid
+                }
+            };
+            match self.explore_stage(sid) {
                 Outcome::Solvable => return Outcome::Solvable,
                 Outcome::Unknown => return Outcome::Unknown,
-                Outcome::NotFound => complete = false,
-                Outcome::Unsolvable => {}
+                _ => {}
             }
-            self.failures[c.origin as usize] += 1;
+            self.stages[c.origin as usize].failures += 1;
         }
-        if complete {
-            Outcome::Unsolvable
-        } else {
+        if self.incomplete {
             Outcome::NotFound
+        } else {
+            Outcome::Unsolvable
         }
     }
 
-    /// Reconstruct the winning line by re-expanding each class on the path.
-    fn build_line(&mut self) -> Vec<Move> {
-        let (mut nid, mut exit_idx) = match self.win {
+    /// The winning line: the recorded paths from the root to the won node.
+    fn build_line(&self) -> Vec<Move> {
+        let mut nid = match self.win {
             Some(w) => w,
             None => return Vec::new(),
         };
-        let mut segments: Vec<Vec<Move>> = Vec::new();
+        let mut paths: Vec<&[u8]> = Vec::new();
         loop {
-            let s = self.nodes[nid as usize].state.to_state();
-            let cls = self.expand_class(&s);
-            let ex = &cls.exits[exit_idx as usize];
-            let mut seg = vec![ex.mv];
-            let mut m = ex.member;
-            while m != 0 {
-                seg.push(cls.members[m as usize].mv);
-                m = cls.members[m as usize].parent;
-            }
-            seg.reverse();
-            segments.push(seg);
             let n = &self.nodes[nid as usize];
+            paths.push(&n.path);
             if n.parent == NO_PARENT {
                 break;
             }
-            exit_idx = n.exit_idx;
             nid = n.parent;
         }
-        segments.reverse();
-        segments.concat()
+        let mut out = Vec::new();
+        for path in paths.iter().rev() {
+            decode_path(path, &mut out);
+        }
+        out
     }
+}
+
+/// Static evaluation of a game position with the given weights.
+pub fn eval_game(g: &Game, w: &Weights) -> i32 {
+    State::from_game(g).eval(w)
 }
 
 /// Run several configurations in parallel; the first win (or proof) ends it.

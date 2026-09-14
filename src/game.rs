@@ -173,6 +173,46 @@ impl Game {
         }
     }
 
+    /// Compact text form of the tableau (no stock, no history):
+    /// `completed;down/card,card,...;down/...` with cards as packed bytes.
+    pub fn to_position_text(&self) -> String {
+        let mut out = format!("{}", self.completed.len());
+        for c in 0..NUM_COLS {
+            let cards: Vec<String> = self.columns[c].iter().map(|k| k.0.to_string()).collect();
+            out.push_str(&format!(";{}/{}", self.face_down[c], cards.join(",")));
+        }
+        out
+    }
+
+    /// Inverse of `to_position_text`; the stock is empty.
+    pub fn from_position_text(suits: u8, text: &str) -> Option<Game> {
+        let mut parts = text.trim().split(';');
+        let completed: usize = parts.next()?.parse().ok()?;
+        let mut columns = Vec::new();
+        let mut face_down = [0; NUM_COLS];
+        for c in 0..NUM_COLS {
+            let part = parts.next()?;
+            let (d, cards) = part.split_once('/')?;
+            face_down[c] = d.parse().ok()?;
+            let col: Vec<Card> = if cards.is_empty() {
+                Vec::new()
+            } else {
+                cards.split(',').map(|x| x.parse::<u8>().ok().map(Card)).collect::<Option<Vec<_>>>()?
+            };
+            columns.push(col);
+        }
+        Some(Game {
+            columns,
+            face_down,
+            stock: Vec::new(),
+            completed: vec![0; completed],
+            suits,
+            seed: 0,
+            history: Vec::new(),
+            redo_stack: Vec::new(),
+        })
+    }
+
     pub fn deals_remaining(&self) -> usize {
         self.stock.len() / DEAL_SIZE
     }
