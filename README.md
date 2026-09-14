@@ -24,6 +24,7 @@ cargo run --release -- --solver             # start with the solver on
 | `s`            | toggle the peeking solver                                     |
 | `n` / `R`      | new random deal / restart the same deal                        |
 | `?` / `q`      | help / quit                                                   |
+| `Ctrl-R`       | reload: re-exec the program at the current position (history and redo stack included), so a rebuilt binary can be picked up mid-game. Implemented with `--replay MOVES` / `--redo MOVES`, where a move is `F>T:N` (N cards from 0-based column F to T) or `d` |
 
 Rules are the usual ones: a descending same-suit run may move onto any card one
 rank higher or into an empty column; a complete K..A same-suit run is removed

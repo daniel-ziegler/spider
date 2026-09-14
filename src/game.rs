@@ -56,6 +56,35 @@ pub enum Move {
     Deal,
 }
 
+impl Move {
+    /// Compact text form: `d` for a deal, `F>T:N` for moving N cards from
+    /// column F to column T (0-based). See [`Move::parse`].
+    pub fn encode(self) -> String {
+        match self {
+            Move::Deal => "d".into(),
+            Move::Move { from, to, count } => format!("{from}>{to}:{count}"),
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Move> {
+        if s == "d" {
+            return Some(Move::Deal);
+        }
+        let (from, rest) = s.split_once('>')?;
+        let (to, count) = rest.split_once(':')?;
+        Some(Move::Move { from: from.parse().ok()?, to: to.parse().ok()?, count: count.parse().ok()? })
+    }
+}
+
+/// Comma-separated [`Move::encode`] list.
+pub fn encode_moves(moves: impl IntoIterator<Item = Move>) -> String {
+    moves.into_iter().map(Move::encode).collect::<Vec<_>>().join(",")
+}
+
+pub fn parse_moves(s: &str) -> Result<Vec<Move>, String> {
+    s.split(',').filter(|t| !t.is_empty()).map(|t| Move::parse(t).ok_or_else(|| format!("bad move {t:?}"))).collect()
+}
+
 /// Everything needed to reverse one applied move.
 #[derive(Clone, Debug)]
 pub struct Record {
@@ -164,6 +193,10 @@ impl Game {
     }
     pub fn history(&self) -> &[Record] {
         &self.history
+    }
+    /// Moves that `redo` would replay, in redo order (next first).
+    pub fn redo_moves(&self) -> Vec<Move> {
+        self.redo_stack.iter().rev().map(|r| r.mv).collect()
     }
     /// Would the next undo take back a move that revealed information?
     pub fn undo_reveals_info(&self) -> bool {

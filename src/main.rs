@@ -7,9 +7,10 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
-use spider::game::{Card, Game, Move, NUM_COLS};
+use spider::game::{encode_moves, parse_moves, Card, Game, Move, NUM_COLS};
 use spider::solver::{Config, SolveResult, SolverHandle, Verdict};
 use std::io::{self, Write};
+use std::os::unix::process::CommandExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_BUDGET: u64 = 3_000_000;
@@ -42,6 +43,8 @@ struct App {
     budget: u64,
     threads: usize,
     quit: bool,
+    /// Set by Ctrl-R: exec a fresh copy of the binary into this position.
+    reload: bool,
 }
 
 impl App {
@@ -61,9 +64,53 @@ impl App {
             budget,
             threads,
             quit: false,
+            reload: false,
         };
         app.restart_solver();
         app
+    }
+
+    /// Restore a position from a reload: replay `moves`, then push `redo` onto
+    /// the redo stack by applying and undoing it.
+    fn restore(&mut self, moves: &[Move], redo: &[Move]) -> Result<(), String> {
+        for (i, &mv) in moves.iter().enumerate() {
+            self.game.apply(mv).map_err(|e| format!("replay move {}: {e}", i + 1))?;
+        }
+        for (i, &mv) in redo.iter().enumerate() {
+            self.game.apply(mv).map_err(|e| format!("redo move {}: {e}", i + 1))?;
+        }
+        for _ in redo {
+            self.game.undo();
+        }
+        self.msg = format!("Reloaded at move {}.", self.game.move_count());
+        self.restart_solver();
+        Ok(())
+    }
+
+    /// Command line that reproduces the current position and settings.
+    fn reload_args(&self) -> Vec<String> {
+        let mut a = vec![
+            "--suits".into(),
+            self.suits.to_string(),
+            "--seed".into(),
+            self.game.seed.to_string(),
+            "--budget".into(),
+            self.budget.to_string(),
+            "--threads".into(),
+            self.threads.to_string(),
+        ];
+        if self.solver_on {
+            a.push("--solver".into());
+        }
+        let moves = encode_moves(self.game.history().iter().map(|r| r.mv));
+        if !moves.is_empty() {
+            a.extend(["--replay".into(), moves]);
+        }
+        let redo = encode_moves(self.game.redo_moves());
+        if !redo.is_empty() {
+            a.extend(["--redo".into(), redo]);
+        }
+        a
     }
 
     fn new_game(&mut self, seed: u64) {
@@ -273,6 +320,7 @@ impl App {
                 self.msg.clear();
             }
             KeyCode::Char('d') => self.deal(),
+            KeyCode::Char('r') if ctrl => self.reload = true,
             KeyCode::Char('u') => self.undo_requested(),
             KeyCode::Char('r') => self.redo(),
             KeyCode::Char('s') => self.toggle_solver(),
@@ -537,7 +585,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
         SetForegroundColor(Color::DarkGrey),
-        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  n new  R restart  ? help  q quit"),
+        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  n new  R restart  ^R reload  ? help  q quit"),
         ResetColor
     )?;
 
@@ -577,6 +625,7 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "  u / r      undo / redo (undoing past a reveal asks for confirmation)",
         "  s          toggle the peeking solver (uses hidden cards + stock order)",
         "  n / R      new random game / restart this deal;   q quits",
+        "  Ctrl-R     re-exec the program (picks up a rebuilt binary) at this position",
         "",
         "Solver verdicts:  SOLVABLE = a winning line exists from this exact position;",
         "UNSOLVABLE = proven impossible;  UNKNOWN = the work budget ran out first.",
@@ -602,6 +651,8 @@ struct Args {
     budget: u64,
     threads: usize,
     solver: bool,
+    replay: Vec<Move>,
+    redo: Vec<Move>,
 }
 
 fn default_threads() -> usize {
@@ -609,7 +660,7 @@ fn default_threads() -> usize {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { suits: 2, seed: random_seed(), budget: DEFAULT_BUDGET, threads: default_threads(), solver: false };
+    let mut a = Args { suits: 2, seed: random_seed(), budget: DEFAULT_BUDGET, threads: default_threads(), solver: false, replay: Vec::new(), redo: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -624,6 +675,8 @@ fn parse_args() -> Result<Args, String> {
             "--budget" => a.budget = value("--budget")?.parse().map_err(|_| "bad --budget")?,
             "--threads" => a.threads = value("--threads")?.parse::<usize>().map_err(|_| "bad --threads")?.clamp(1, 8),
             "--solver" => a.solver = true,
+            "--replay" => a.replay = parse_moves(&value("--replay")?)?,
+            "--redo" => a.redo = parse_moves(&value("--redo")?)?,
             "-h" | "--help" => {
                 println!("usage: spider [--suits 1|2|4] [--seed N] [--budget WORK] [--threads N] [--solver]");
                 println!("  --suits   number of suits (default 2)");
@@ -631,6 +684,8 @@ fn parse_args() -> Result<Args, String> {
                 println!("  --budget  solver work limit per thread before it answers UNKNOWN (default {DEFAULT_BUDGET})");
                 println!("  --threads solver configurations to run in parallel (default min(cores, 4), max 8)");
                 println!("  --solver  start with the peeking solver switched on");
+                println!("  --replay  moves to replay before starting (as written by Ctrl-R reload)");
+                println!("  --redo    moves to place on the redo stack");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),
@@ -639,14 +694,18 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
-fn run(args: Args) -> io::Result<()> {
+/// Returns the reload command line if the user asked to re-exec.
+fn run(args: Args) -> io::Result<Option<Vec<String>>> {
     let mut out = io::stdout();
     terminal::enable_raw_mode()?;
     execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
-    let result = (|| -> io::Result<()> {
+    let result = (|| -> io::Result<Option<Vec<String>>> {
         let mut app = App::new(args.suits, args.seed, args.budget, args.threads, args.solver);
+        if let Err(e) = app.restore(&args.replay, &args.redo) {
+            return Err(io::Error::other(e));
+        }
         draw(&mut out, &app)?;
-        while !app.quit {
+        while !app.quit && !app.reload {
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(k) => app.handle_key(k),
@@ -657,7 +716,7 @@ fn run(args: Args) -> io::Result<()> {
             app.poll_solver();
             draw(&mut out, &app)?;
         }
-        Ok(())
+        Ok(if app.reload { Some(app.reload_args()) } else { None })
     })();
     execute!(out, cursor::Show, terminal::LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
@@ -672,8 +731,17 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(e) = run(args) {
-        eprintln!("spider: {e}");
-        std::process::exit(1);
+    match run(args) {
+        Err(e) => {
+            eprintln!("spider: {e}");
+            std::process::exit(1);
+        }
+        Ok(Some(reload_args)) => {
+            let exe = std::env::current_exe().unwrap_or_else(|_| std::env::args().next().unwrap_or_default().into());
+            let err = std::process::Command::new(&exe).args(&reload_args).exec();
+            eprintln!("spider: could not re-exec {}: {err}", exe.display());
+            std::process::exit(1);
+        }
+        Ok(None) => {}
     }
 }
