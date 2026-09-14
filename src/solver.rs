@@ -219,7 +219,8 @@ impl State {
 
     /// Static evaluation: higher is closer to winning.
     fn eval(&self) -> i32 {
-        let mut score: i32 = 1000 * self.completed as i32;
+        let w = weights();
+        let mut score: i32 = w.completed * self.completed as i32;
         let mut empties = 0;
         for c in 0..NUM_COLS {
             let n = self.len[c] as usize;
@@ -228,23 +229,61 @@ impl State {
                 continue;
             }
             let d = self.down[c] as usize;
-            score -= 12 * d as i32;
+            score -= w.hidden * d as i32;
             let col = &self.cols[c];
+            let mut run = 1;
             for i in d.max(1)..n {
                 let upper = col[i - 1];
                 let lower = col[i];
                 if upper % 13 == lower % 13 + 1 {
-                    score += if upper / 13 == lower / 13 { 4 } else { 1 };
+                    if upper / 13 == lower / 13 {
+                        score += w.same;
+                        run += 1;
+                    } else {
+                        score += w.diff;
+                        score += w.run_sq * run * run / 16;
+                        run = 1;
+                    }
                 } else {
-                    score -= 2; // a wrong attachment that must be undone
+                    score -= w.wrong;
+                    score += w.run_sq * run * run / 16;
+                    run = 1;
                 }
             }
+            score += w.run_sq * run * run / 16;
             if d == 0 && col[0] % 13 == 12 {
-                score += 3; // a king on the table is a fine permanent base
+                score += w.king_base;
             }
         }
-        score + 30 * empties
+        score + w.empty * empties
     }
+}
+
+/// Evaluation weights (overridable through SPIDER_W_* for experiments).
+struct Weights {
+    completed: i32,
+    hidden: i32,
+    same: i32,
+    diff: i32,
+    wrong: i32,
+    empty: i32,
+    king_base: i32,
+    /// Bonus per same-suit run of length L: run_sq * L^2 / 16.
+    run_sq: i32,
+}
+
+fn weights() -> &'static Weights {
+    static W: std::sync::OnceLock<Weights> = std::sync::OnceLock::new();
+    W.get_or_init(|| Weights {
+        completed: env_or("SPIDER_W_COMPLETED", 1000),
+        hidden: env_or("SPIDER_W_HIDDEN", 12),
+        same: env_or("SPIDER_W_SAME", 4),
+        diff: env_or("SPIDER_W_DIFF", 1),
+        wrong: env_or("SPIDER_W_WRONG", 2),
+        empty: env_or("SPIDER_W_EMPTY", 30),
+        king_base: env_or("SPIDER_W_KING", 3),
+        run_sq: env_or("SPIDER_W_RUNSQ", 0),
+    })
 }
 
 #[inline]
@@ -383,20 +422,65 @@ enum Outcome {
     Unknown,
 }
 
-/// Marker in `seen` for a class whose whole subtree is proven dead.
-const DEAD: u32 = u32::MAX;
 /// Fraction of the budget spent enumerating one stage's classes before moving
 /// on to deals (too large starves later stages, too small deals blindly).
 const STAGE_CAP_DIV: u64 = 10;
 const STAGE_CAP_MIN: u64 = 20_000;
+const DEALS_PER_CLASS: usize = 4;
+const DEAL_BONUS: i32 = 0;
+/// Score penalty applied to a deal candidate for every sibling (same parent
+/// exploration) that has already been tried without success; spreads the
+/// search across branches instead of exhausting one bad stage's deal points.
+const SIBLING_TAX: i32 = 10;
+
+fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// A queued deal point, ordered by score then most recent first.
+struct DealCand {
+    key: i32,
+    seq: u64,
+    nid: u32,
+    ei: u32,
+    /// Stage exploration that produced this candidate.
+    origin: u32,
+    /// How many of `origin`'s failures have already been charged to `key`.
+    charged: u32,
+}
+impl PartialEq for DealCand {
+    fn eq(&self, o: &Self) -> bool {
+        self.key == o.key && self.seq == o.seq
+    }
+}
+impl Eq for DealCand {}
+impl PartialOrd for DealCand {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for DealCand {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        (self.key, self.seq).cmp(&(o.key, o.seq))
+    }
+}
 
 pub struct Solver {
     deals: Vec<[u8; DEAL_SIZE]>,
-    /// Class id -> DEAD, or the id of the stage search that expanded it.
+    /// Class id -> id of the stage exploration that expanded it.
     seen: HashMap<u64, u32, IdBuild>,
+    /// Whether each stage exploration enumerated its whole stage.
+    search_complete: Vec<bool>,
     /// Position hash -> id of the (already expanded) class it belongs to.
     member_of: HashMap<u64, u64, IdBuild>,
-    next_search_id: u32,
+    deal_queue: BinaryHeap<DealCand>,
+    /// Max deal points taken from one class (the best by post-deal score).
+    deals_per_class: usize,
+    /// Added to a deal candidate's key per stock stage already dealt.
+    deal_bonus: i32,
+    sibling_tax: i32,
+    /// Failed deal attempts per stage exploration id.
+    failures: Vec<u32>,
     nodes: Vec<SNode>,
     work: u64,
     classes: u64,
@@ -427,8 +511,13 @@ impl Solver {
         Solver {
             deals,
             seen: HashMap::default(),
+            search_complete: Vec::new(),
             member_of: HashMap::default(),
-            next_search_id: 0,
+            deal_queue: BinaryHeap::new(),
+            deals_per_class: env_or("SPIDER_DEALS_PER_CLASS", DEALS_PER_CLASS),
+            deal_bonus: env_or("SPIDER_DEAL_BONUS", DEAL_BONUS),
+            sibling_tax: env_or("SPIDER_SIBLING_TAX", SIBLING_TAX),
+            failures: Vec::new(),
             nodes: Vec::new(),
             work: 0,
             classes: 0,
@@ -437,10 +526,7 @@ impl Solver {
             work_counter: None,
             aborted: false,
             splits: false,
-            stage_cap: std::env::var("SPIDER_STAGE_CAP")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or((budget / STAGE_CAP_DIV).max(STAGE_CAP_MIN)),
+            stage_cap: env_or("SPIDER_STAGE_CAP", (budget / STAGE_CAP_DIV).max(STAGE_CAP_MIN)),
             seq: 0,
             win: None,
         }
@@ -453,7 +539,7 @@ impl Solver {
             Outcome::Solvable
         } else {
             let root_id = self.push_node(NO_PARENT, 0, &root);
-            self.stage(root_id)
+            self.search(root_id)
         };
         let mut proof_pass = false;
         if outcome == Outcome::Unsolvable && root.completed < 8 {
@@ -462,8 +548,10 @@ impl Solver {
             self.seen.clear();
             self.member_of.clear();
             self.nodes.clear();
+            self.search_complete.clear();
+            self.deal_queue.clear();
             let root_id = self.push_node(NO_PARENT, 0, &root);
-            outcome = self.stage(root_id);
+            outcome = self.search(root_id);
         }
         let verdict = match outcome {
             Outcome::Solvable => Verdict::Solvable,
@@ -631,18 +719,15 @@ impl Solver {
         Class { members, exits, id, win }
     }
 
-    /// Search one stock stage from the class node `entry`: best-first over all
-    /// classes reachable without dealing (up to a per-stage work cap), then
-    /// recurse into the next stage from every deal point, best first.
-    ///
-    /// Returns `Unsolvable` only if the stage was enumerated completely and
-    /// every deal point was itself proven unsolvable; otherwise `NotFound`.
-    fn stage(&mut self, entry: u32) -> Outcome {
-        let search_id = self.next_search_id;
-        self.next_search_id += 1;
+    /// Explore one stock stage from class node `entry`: best-first over all
+    /// classes reachable without dealing, up to a per-stage work cap. Deal
+    /// exits are pushed onto the global candidate queue. Returns whether the
+    /// stage was enumerated completely (needed for an Unsolvable proof).
+    fn explore_stage(&mut self, entry: u32) -> Outcome {
+        let search_id = self.search_complete.len() as u32;
+        self.search_complete.push(false);
+        self.failures.push(0);
         let mut heap: BinaryHeap<Pending> = BinaryHeap::new();
-        let mut deals: Vec<(i32, u32, u32)> = Vec::new();
-        let mut expanded_ids: Vec<u64> = Vec::new();
         let mut complete = true;
         let entry_node = &self.nodes[entry as usize];
         let entry_state = entry_node.state.to_state();
@@ -655,10 +740,8 @@ impl Solver {
         });
         let debug = std::env::var_os("SPIDER_DEBUG").is_some();
         let (mut dup, start_work) = (0u64, self.work);
+        let (mut classes, mut members_total, mut biggest, mut deals) = (0u64, 0u64, 0usize, 0u64);
         let indent = "  ".repeat(entry_state.deals_done as usize);
-        if debug {
-            eprintln!("{indent}enter stage {} eval {}", entry_state.deals_done, entry_state.eval());
-        }
 
         while let Some(p) = heap.pop() {
             if self.tick() {
@@ -672,39 +755,42 @@ impl Solver {
             let known = self.member_of.get(&s.hash()).copied();
             let status = known.and_then(|id| self.seen.get(&id).copied());
             match status {
-                Some(DEAD) => continue,
                 Some(id) if id == search_id => {
                     dup += 1;
                     continue;
                 }
-                Some(_) => {
-                    // Expanded by an earlier, inconclusive search at this level.
-                    complete = false;
+                Some(id) => {
+                    if !self.search_complete[id as usize] {
+                        complete = false;
+                    }
                     continue;
                 }
                 None => {}
             }
             let cls = self.expand_class(&s);
+            classes += 1;
+            members_total += cls.members.len() as u64;
+            biggest = biggest.max(cls.members.len());
             if let Some(&st) = self.seen.get(&cls.id) {
                 // Entered a known class through a position not yet recorded.
                 if st == search_id {
                     dup += 1;
-                } else if st != DEAD {
+                } else if !self.search_complete[st as usize] {
                     complete = false;
                 }
                 continue;
             }
             self.seen.insert(cls.id, search_id);
-            expanded_ids.push(cls.id);
             let nid = if p.seq == 0 { entry } else { self.push_node(p.parent, p.exit_idx, &s) };
             if let Some(w) = cls.win {
                 self.win = Some((nid, w as u32));
                 return Outcome::Solvable;
             }
+            let mut class_deals: Vec<(i32, u32)> = Vec::new();
             for (ei, ex) in cls.exits.iter().enumerate() {
                 let k = ex.result.eval();
                 if ex.mv == Move::Deal {
-                    deals.push((k, nid, ei as u32));
+                    class_deals.push((k, ei as u32));
                 } else {
                     self.seq += 1;
                     self.work += 1;
@@ -717,36 +803,73 @@ impl Solver {
                     });
                 }
             }
+            if class_deals.len() > self.deals_per_class {
+                class_deals.sort_unstable_by(|a, b| b.cmp(a));
+                class_deals.truncate(self.deals_per_class);
+                complete = false;
+            }
+            for (k, ei) in class_deals {
+                self.seq += 1;
+                deals += 1;
+                self.deal_queue.push(DealCand {
+                    key: k + self.deal_bonus * (entry_state.deals_done as i32 + 1),
+                    seq: self.seq,
+                    nid,
+                    ei,
+                    origin: search_id,
+                    charged: 0,
+                });
+            }
         }
-        drop(heap);
         if debug {
             eprintln!(
-                "{indent}stage {} explored: classes {} dup {} deals {} work {} complete {}",
-                entry_state.deals_done, expanded_ids.len(), dup, deals.len(), self.work - start_work, complete
+                "{indent}stage {} entry eval {}: classes {classes} dup {dup} members {members_total} biggest {biggest} deals {deals} work {} complete {complete}",
+                entry_state.deals_done, entry_state.eval(), self.work - start_work
             );
         }
+        self.search_complete[search_id as usize] = complete;
+        if complete {
+            Outcome::Unsolvable
+        } else {
+            Outcome::NotFound
+        }
+    }
 
-        deals.sort_unstable_by(|a, b| b.cmp(a));
-        for (rank, &(k, nid, ei)) in deals.iter().enumerate() {
+    /// Global best-first search over deal points: explore the root stage, then
+    /// repeatedly take the most promising queued deal and explore the stage
+    /// after it.
+    fn search(&mut self, root: u32) -> Outcome {
+        let mut complete = true;
+        match self.explore_stage(root) {
+            Outcome::Solvable => return Outcome::Solvable,
+            Outcome::Unknown => return Outcome::Unknown,
+            Outcome::NotFound => complete = false,
+            Outcome::Unsolvable => {}
+        }
+        while let Some(mut c) = self.deal_queue.pop() {
             if self.tick() {
                 return Outcome::Unknown;
             }
-            if debug {
-                eprintln!("{indent}stage {} deal candidate #{rank} eval {k}", entry_state.deals_done);
+            let f = self.failures[c.origin as usize];
+            if c.charged < f {
+                // Siblings failed since this was queued: demote and requeue.
+                c.key -= self.sibling_tax * (f - c.charged) as i32;
+                c.charged = f;
+                self.deal_queue.push(c);
+                continue;
             }
-            let s = self.nodes[nid as usize].state.to_state();
+            let s = self.nodes[c.nid as usize].state.to_state();
             let cls = self.expand_class(&s);
-            let child = self.push_node(nid, ei, &cls.exits[ei as usize].result);
-            match self.stage(child) {
-                Outcome::Unsolvable => {}
+            let child = self.push_node(c.nid, c.ei, &cls.exits[c.ei as usize].result);
+            match self.explore_stage(child) {
+                Outcome::Solvable => return Outcome::Solvable,
+                Outcome::Unknown => return Outcome::Unknown,
                 Outcome::NotFound => complete = false,
-                v => return v,
+                Outcome::Unsolvable => {}
             }
+            self.failures[c.origin as usize] += 1;
         }
         if complete {
-            for id in expanded_ids {
-                self.seen.insert(id, DEAD);
-            }
             Outcome::Unsolvable
         } else {
             Outcome::NotFound
