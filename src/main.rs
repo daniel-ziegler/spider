@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use spider::game::{Card, Game, Move, NUM_COLS};
-use spider::solver::{SolveResult, SolverHandle, Verdict};
+use spider::solver::{Config, SolveResult, SolverHandle, Verdict};
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,11 +36,12 @@ struct App {
     solver: Option<SolverHandle>,
     solver_result: Option<SolveResult>,
     budget: u64,
+    threads: usize,
     quit: bool,
 }
 
 impl App {
-    fn new(suits: u8, seed: u64, budget: u64, solver_on: bool) -> App {
+    fn new(suits: u8, seed: u64, budget: u64, threads: usize, solver_on: bool) -> App {
         let mut app = App {
             game: Game::new(suits, seed),
             suits,
@@ -52,6 +53,7 @@ impl App {
             solver: None,
             solver_result: None,
             budget,
+            threads,
             quit: false,
         };
         app.restart_solver();
@@ -71,7 +73,7 @@ impl App {
         self.solver = None;
         self.solver_result = None;
         if self.solver_on && !self.game.is_won() {
-            self.solver = Some(SolverHandle::spawn(&self.game, self.budget));
+            self.solver = Some(SolverHandle::spawn_with(&self.game, self.budget, Config::portfolio(self.threads)));
         }
     }
 
@@ -381,14 +383,14 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
             out,
             Print(detail),
             SetForegroundColor(Color::DarkGrey),
-            Print(format!("  [{} classes, {} positions, {:.2}s]", r.classes, r.nodes, r.elapsed.as_secs_f64())),
+            Print(format!("  [{} classes, {} positions, {:.2}s, {}]", r.classes, r.nodes, r.elapsed.as_secs_f64(), r.config)),
             ResetColor
         )?;
     } else if let Some(hnd) = &app.solver {
         queue!(
             out,
             SetForegroundColor(Color::Cyan),
-            Print(format!("thinking…  {} positions, {:.1}s", hnd.work(), hnd.elapsed().as_secs_f64())),
+            Print(format!("thinking…  {} positions on {} thread{}, {:.1}s", hnd.work(), hnd.threads(), if hnd.threads() == 1 { "" } else { "s" }, hnd.elapsed().as_secs_f64())),
             ResetColor
         )?;
     }
@@ -498,7 +500,7 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "",
         "Solver verdicts:  SOLVABLE = a winning line exists from this exact position;",
         "UNSOLVABLE = proven impossible;  UNKNOWN = the work budget ran out first.",
-        "Start with:  spider --suits 1|2|4  --seed N  --budget N  --solver",
+        "Start with:  spider --suits 1|2|4  --seed N  --budget N  --threads N  --solver",
     ];
     let bw = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let bh = lines.len() as u16 + 2;
@@ -518,11 +520,16 @@ struct Args {
     suits: u8,
     seed: u64,
     budget: u64,
+    threads: usize,
     solver: bool,
 }
 
+fn default_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4)
+}
+
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { suits: 2, seed: random_seed(), budget: DEFAULT_BUDGET, solver: false };
+    let mut a = Args { suits: 2, seed: random_seed(), budget: DEFAULT_BUDGET, threads: default_threads(), solver: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -535,12 +542,14 @@ fn parse_args() -> Result<Args, String> {
             }
             "--seed" => a.seed = value("--seed")?.parse().map_err(|_| "bad --seed")?,
             "--budget" => a.budget = value("--budget")?.parse().map_err(|_| "bad --budget")?,
+            "--threads" => a.threads = value("--threads")?.parse::<usize>().map_err(|_| "bad --threads")?.clamp(1, 8),
             "--solver" => a.solver = true,
             "-h" | "--help" => {
-                println!("usage: spider [--suits 1|2|4] [--seed N] [--budget WORK] [--solver]");
+                println!("usage: spider [--suits 1|2|4] [--seed N] [--budget WORK] [--threads N] [--solver]");
                 println!("  --suits   number of suits (default 2)");
                 println!("  --seed    deal number; the same seed always gives the same deal");
-                println!("  --budget  solver work limit before it answers UNKNOWN (default {DEFAULT_BUDGET})");
+                println!("  --budget  solver work limit per thread before it answers UNKNOWN (default {DEFAULT_BUDGET})");
+                println!("  --threads solver configurations to run in parallel (default min(cores, 4), max 8)");
                 println!("  --solver  start with the peeking solver switched on");
                 std::process::exit(0);
             }
@@ -555,7 +564,7 @@ fn run(args: Args) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
     let result = (|| -> io::Result<()> {
-        let mut app = App::new(args.suits, args.seed, args.budget, args.solver);
+        let mut app = App::new(args.suits, args.seed, args.budget, args.threads, args.solver);
         draw(&mut out, &app)?;
         while !app.quit {
             if event::poll(Duration::from_millis(100))? {

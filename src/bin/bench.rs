@@ -1,7 +1,7 @@
 //! Solve a range of seeds and report verdicts, node counts and timing.
 //! Usage: bench [suits] [first_seed] [count] [budget]
 use spider::game::Game;
-use spider::solver::{Solver, Verdict};
+use spider::solver::{solve_portfolio, Config, Solver, Verdict};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -14,7 +14,12 @@ fn main() {
     let mut total_time = 0f64;
     for seed in first..first + count {
         let mut g = Game::new(suits, seed);
-        let r = Solver::new(&g, budget).solve(&g);
+        let portfolio: usize = std::env::var("SPIDER_PORTFOLIO").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let r = if portfolio > 0 {
+            solve_portfolio(&g, budget, Config::portfolio(portfolio))
+        } else {
+            Solver::new(&g, budget).solve(&g)
+        };
         total_nodes += r.nodes;
         total_time += r.elapsed.as_secs_f64();
         match r.verdict {
@@ -29,8 +34,8 @@ fn main() {
             Verdict::Unknown => unk += 1,
         }
         println!(
-            "seed {seed:>5}: {:<10?} work {:>9} classes {:>6} line {:>4} {:>7.3}s",
-            r.verdict, r.nodes, r.classes, r.line.len(), r.elapsed.as_secs_f64()
+            "seed {seed:>5}: {:<10?} work {:>9} classes {:>6} line {:>4} {:>7.3}s {}",
+            r.verdict, r.nodes, r.classes, r.line.len(), r.elapsed.as_secs_f64(), r.config
         );
     }
     println!(

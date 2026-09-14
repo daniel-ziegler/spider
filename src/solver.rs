@@ -70,6 +70,8 @@ pub struct SolveResult {
     pub classes: u64,
     /// Whether the second (split-inclusive) pass was needed.
     pub proof_pass: bool,
+    /// Which configuration produced this result.
+    pub config: &'static str,
     pub elapsed: Duration,
     /// A winning line, if one was found.
     pub line: Vec<Move>,
@@ -218,8 +220,7 @@ impl State {
     }
 
     /// Static evaluation: higher is closer to winning.
-    fn eval(&self) -> i32 {
-        let w = weights();
+    fn eval(&self, w: &Weights) -> i32 {
         let mut score: i32 = w.completed * self.completed as i32;
         let mut empties = 0;
         for c in 0..NUM_COLS {
@@ -259,31 +260,103 @@ impl State {
     }
 }
 
-/// Evaluation weights (overridable through SPIDER_W_* for experiments).
-struct Weights {
-    completed: i32,
-    hidden: i32,
-    same: i32,
-    diff: i32,
-    wrong: i32,
-    empty: i32,
-    king_base: i32,
+/// Evaluation weights.
+#[derive(Clone, Copy, Debug)]
+pub struct Weights {
+    pub completed: i32,
+    pub hidden: i32,
+    pub same: i32,
+    pub diff: i32,
+    pub wrong: i32,
+    pub empty: i32,
+    pub king_base: i32,
     /// Bonus per same-suit run of length L: run_sq * L^2 / 16.
-    run_sq: i32,
+    pub run_sq: i32,
 }
 
-fn weights() -> &'static Weights {
-    static W: std::sync::OnceLock<Weights> = std::sync::OnceLock::new();
-    W.get_or_init(|| Weights {
-        completed: env_or("SPIDER_W_COMPLETED", 1000),
-        hidden: env_or("SPIDER_W_HIDDEN", 12),
-        same: env_or("SPIDER_W_SAME", 4),
-        diff: env_or("SPIDER_W_DIFF", 1),
-        wrong: env_or("SPIDER_W_WRONG", 2),
-        empty: env_or("SPIDER_W_EMPTY", 30),
-        king_base: env_or("SPIDER_W_KING", 3),
-        run_sq: env_or("SPIDER_W_RUNSQ", 0),
-    })
+impl Default for Weights {
+    fn default() -> Weights {
+        Weights { completed: 1000, hidden: 12, same: 4, diff: 1, wrong: 2, empty: 30, king_base: 3, run_sq: 0 }
+    }
+}
+
+/// Search parameters. `Config::from_env` applies SPIDER_* overrides, which is
+/// how the defaults were tuned; `Config::portfolio` gives a set of diverse
+/// configurations that solve different deals, for running in parallel.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub name: &'static str,
+    pub weights: Weights,
+    /// Max deal points taken from one class (the best by post-deal score).
+    pub deals_per_class: usize,
+    /// Added to a deal candidate's key per stock stage already dealt.
+    pub deal_bonus: i32,
+    /// Penalty per failed sibling deal from the same stage exploration.
+    pub sibling_tax: i32,
+    /// Work cap per stage exploration; None = budget / STAGE_CAP_DIV.
+    pub stage_cap: Option<u64>,
+    /// Work cap for the final (stock-empty) stage; None = budget / END_CAP_DIV.
+    pub end_cap: Option<u64>,
+    /// Treat same-suit joins as reversible once the stock is empty.
+    pub end_splits: bool,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            name: "base",
+            weights: Weights::default(),
+            deals_per_class: DEALS_PER_CLASS,
+            deal_bonus: DEAL_BONUS,
+            sibling_tax: SIBLING_TAX,
+            stage_cap: None,
+            end_cap: None,
+            end_splits: false,
+        }
+    }
+}
+
+impl Config {
+    pub fn from_env() -> Config {
+        let d = Config::default();
+        let w = d.weights;
+        Config {
+            name: "env",
+            weights: Weights {
+                completed: env_or("SPIDER_W_COMPLETED", w.completed),
+                hidden: env_or("SPIDER_W_HIDDEN", w.hidden),
+                same: env_or("SPIDER_W_SAME", w.same),
+                diff: env_or("SPIDER_W_DIFF", w.diff),
+                wrong: env_or("SPIDER_W_WRONG", w.wrong),
+                empty: env_or("SPIDER_W_EMPTY", w.empty),
+                king_base: env_or("SPIDER_W_KING", w.king_base),
+                run_sq: env_or("SPIDER_W_RUNSQ", w.run_sq),
+            },
+            deals_per_class: env_or("SPIDER_DEALS_PER_CLASS", d.deals_per_class),
+            deal_bonus: env_or("SPIDER_DEAL_BONUS", d.deal_bonus),
+            sibling_tax: env_or("SPIDER_SIBLING_TAX", d.sibling_tax),
+            stage_cap: std::env::var("SPIDER_STAGE_CAP").ok().and_then(|v| v.parse().ok()),
+            end_cap: std::env::var("SPIDER_END_CAP").ok().and_then(|v| v.parse().ok()),
+            end_splits: env_or::<u8>("SPIDER_END_SPLITS", 0) != 0,
+        }
+    }
+
+    /// Diverse configurations; the first `n` are meant to run in parallel.
+    pub fn portfolio(n: usize) -> Vec<Config> {
+        let base = Config::default();
+        let mut v = vec![
+            base.clone(),
+            Config { name: "runsq", weights: Weights { run_sq: 8, ..base.weights }, ..base.clone() },
+            Config { name: "tax", sibling_tax: 3, ..base.clone() },
+            Config { name: "hidden", weights: Weights { hidden: 20, ..base.weights }, ..base.clone() },
+            Config { name: "dpc1", deals_per_class: 1, ..base.clone() },
+            Config { name: "bonus", deal_bonus: 20, ..base.clone() },
+            Config { name: "empty", weights: Weights { empty: 15, ..base.weights }, ..base.clone() },
+            Config { name: "same", weights: Weights { same: 8, diff: 0, ..base.weights }, ..base.clone() },
+        ];
+        v.truncate(n.max(1));
+        v
+    }
 }
 
 #[inline]
@@ -426,12 +499,13 @@ enum Outcome {
 /// on to deals (too large starves later stages, too small deals blindly).
 const STAGE_CAP_DIV: u64 = 10;
 const STAGE_CAP_MIN: u64 = 20_000;
+const END_CAP_DIV: u64 = 10;
 const DEALS_PER_CLASS: usize = 4;
 const DEAL_BONUS: i32 = 0;
 /// Score penalty applied to a deal candidate for every sibling (same parent
 /// exploration) that has already been tried without success; spreads the
 /// search across branches instead of exhausting one bad stage's deal points.
-const SIBLING_TAX: i32 = 10;
+const SIBLING_TAX: i32 = 0;
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -474,11 +548,7 @@ pub struct Solver {
     /// Position hash -> id of the (already expanded) class it belongs to.
     member_of: HashMap<u64, u64, IdBuild>,
     deal_queue: BinaryHeap<DealCand>,
-    /// Max deal points taken from one class (the best by post-deal score).
-    deals_per_class: usize,
-    /// Added to a deal candidate's key per stock stage already dealt.
-    deal_bonus: i32,
-    sibling_tax: i32,
+    cfg: Config,
     /// Failed deal attempts per stage exploration id.
     failures: Vec<u32>,
     nodes: Vec<SNode>,
@@ -490,14 +560,20 @@ pub struct Solver {
     aborted: bool,
     splits: bool,
     stage_cap: u64,
+    /// Work cap for exploring the final (stock-empty) stage.
+    end_cap: u64,
     seq: u64,
     win: Option<(u32, u32)>,
 }
 
 impl Solver {
     /// `budget` bounds the work: positions enumerated within classes plus
-    /// class nodes created.
+    /// class nodes created. Uses `Config::from_env()`.
     pub fn new(g: &Game, budget: u64) -> Solver {
+        Solver::with_config(g, budget, Config::from_env())
+    }
+
+    pub fn with_config(g: &Game, budget: u64, cfg: Config) -> Solver {
         // Deals are taken from the end of the stock, ten at a time, column 0 first.
         let mut deals = Vec::new();
         let mut stock: Vec<Card> = g.stock.clone();
@@ -514,9 +590,9 @@ impl Solver {
             search_complete: Vec::new(),
             member_of: HashMap::default(),
             deal_queue: BinaryHeap::new(),
-            deals_per_class: env_or("SPIDER_DEALS_PER_CLASS", DEALS_PER_CLASS),
-            deal_bonus: env_or("SPIDER_DEAL_BONUS", DEAL_BONUS),
-            sibling_tax: env_or("SPIDER_SIBLING_TAX", SIBLING_TAX),
+            stage_cap: cfg.stage_cap.unwrap_or((budget / STAGE_CAP_DIV).max(STAGE_CAP_MIN)),
+            end_cap: cfg.end_cap.unwrap_or((budget / END_CAP_DIV).max(STAGE_CAP_MIN)),
+            cfg,
             failures: Vec::new(),
             nodes: Vec::new(),
             work: 0,
@@ -526,7 +602,6 @@ impl Solver {
             work_counter: None,
             aborted: false,
             splits: false,
-            stage_cap: env_or("SPIDER_STAGE_CAP", (budget / STAGE_CAP_DIV).max(STAGE_CAP_MIN)),
             seq: 0,
             win: None,
         }
@@ -564,6 +639,7 @@ impl Solver {
             nodes: self.work,
             classes: self.classes,
             proof_pass,
+            config: self.cfg.name,
             elapsed: start.elapsed(),
             line,
         }
@@ -600,6 +676,7 @@ impl Solver {
     fn legal_moves(&self, s: &State, out: &mut Vec<Move>) {
         out.clear();
         let first_empty = s.len.iter().position(|&l| l == 0);
+        let splits = self.splits || (self.cfg.end_splits && !self.stock_left(s));
         for from in 0..NUM_COLS {
             let fl = s.len[from] as usize;
             if fl == 0 {
@@ -616,7 +693,7 @@ impl Solver {
                     if first_empty != Some(to) {
                         continue;
                     }
-                    let lo = if self.splits { 1 } else { run };
+                    let lo = if splits { 1 } else { run };
                     for k in lo..=run {
                         if k == fl {
                             continue; // whole column onto another empty: no-op
@@ -625,7 +702,7 @@ impl Solver {
                     }
                 } else {
                     let k = (s.cols[to][tl - 1] % 13) as i32 - top_rank;
-                    if k >= 1 && k as usize <= run && (self.splits || k as usize == run) {
+                    if k >= 1 && k as usize <= run && (splits || k as usize == run) {
                         out.push(Move::Move { from, to, count: k as usize });
                     }
                 }
@@ -638,7 +715,7 @@ impl Solver {
     /// is one rank higher than the run's bottom (or the column was left
     /// empty), and it did not join a same-suit predecessor.
     #[inline]
-    fn reversible(s: &State, t: &State, mv: Move) -> bool {
+    fn reversible(&self, s: &State, t: &State, mv: Move) -> bool {
         let (from, to, count) = match mv {
             Move::Deal => return false,
             Move::Move { from, to, count } => (from, to, count),
@@ -647,8 +724,9 @@ impl Solver {
             return false;
         }
         let bottom = s.cols[from][s.len[from] as usize - count];
-        if s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
-            return false; // same-suit join
+        let join_reversible = self.splits || (self.cfg.end_splits && !self.stock_left(s));
+        if !join_reversible && s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
+            return false; // same-suit join (cannot be undone without a split)
         }
         if t.len[from] == 0 {
             return true;
@@ -681,7 +759,7 @@ impl Solver {
                     exits.push(Exit { member: i as u32, mv, result: t });
                     break 'bfs;
                 }
-                if Self::reversible(&s, &t, mv) {
+                if self.reversible(&s, &t, mv) {
                     if members.len() >= CLASS_CAP {
                         continue;
                     }
@@ -731,8 +809,9 @@ impl Solver {
         let mut complete = true;
         let entry_node = &self.nodes[entry as usize];
         let entry_state = entry_node.state.to_state();
+        let w = self.cfg.weights;
         heap.push(Pending {
-            key: entry_state.eval(),
+            key: entry_state.eval(&w),
             seq: 0,
             parent: entry_node.parent,
             exit_idx: entry_node.exit_idx,
@@ -747,7 +826,8 @@ impl Solver {
             if self.tick() {
                 return Outcome::Unknown;
             }
-            if self.work - start_work > self.stage_cap {
+            let cap = if self.stock_left(&entry_state) { self.stage_cap } else { self.end_cap };
+            if self.work - start_work > cap {
                 complete = false;
                 break;
             }
@@ -788,7 +868,7 @@ impl Solver {
             }
             let mut class_deals: Vec<(i32, u32)> = Vec::new();
             for (ei, ex) in cls.exits.iter().enumerate() {
-                let k = ex.result.eval();
+                let k = ex.result.eval(&w);
                 if ex.mv == Move::Deal {
                     class_deals.push((k, ei as u32));
                 } else {
@@ -803,16 +883,16 @@ impl Solver {
                     });
                 }
             }
-            if class_deals.len() > self.deals_per_class {
+            if class_deals.len() > self.cfg.deals_per_class {
                 class_deals.sort_unstable_by(|a, b| b.cmp(a));
-                class_deals.truncate(self.deals_per_class);
+                class_deals.truncate(self.cfg.deals_per_class);
                 complete = false;
             }
             for (k, ei) in class_deals {
                 self.seq += 1;
                 deals += 1;
                 self.deal_queue.push(DealCand {
-                    key: k + self.deal_bonus * (entry_state.deals_done as i32 + 1),
+                    key: k + self.cfg.deal_bonus * (entry_state.deals_done as i32 + 1),
                     seq: self.seq,
                     nid,
                     ei,
@@ -824,7 +904,7 @@ impl Solver {
         if debug {
             eprintln!(
                 "{indent}stage {} entry eval {}: classes {classes} dup {dup} members {members_total} biggest {biggest} deals {deals} work {} complete {complete}",
-                entry_state.deals_done, entry_state.eval(), self.work - start_work
+                entry_state.deals_done, entry_state.eval(&w), self.work - start_work
             );
         }
         self.search_complete[search_id as usize] = complete;
@@ -853,7 +933,7 @@ impl Solver {
             let f = self.failures[c.origin as usize];
             if c.charged < f {
                 // Siblings failed since this was queued: demote and requeue.
-                c.key -= self.sibling_tax * (f - c.charged) as i32;
+                c.key -= self.cfg.sibling_tax * (f - c.charged) as i32;
                 c.charged = f;
                 self.deal_queue.push(c);
                 continue;
@@ -907,48 +987,99 @@ impl Solver {
     }
 }
 
-/// A solver running on a background thread with cancellation and progress.
+/// Run several configurations in parallel; the first win (or proof) ends it.
+/// Reports the winning result, else a proof of unsolvability if any thread
+/// produced one, else the Unknown result that did the most work.
+pub fn solve_portfolio(game: &Game, budget: u64, configs: Vec<Config>) -> SolveResult {
+    let h = SolverHandle::spawn_with(game, budget, configs);
+    loop {
+        if let Some(r) = h.result() {
+            return r;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Background solver: one thread per configuration, with cancellation and
+/// progress reporting.
 pub struct SolverHandle {
     cancel: Arc<AtomicBool>,
-    work: Arc<AtomicU64>,
-    result: Arc<Mutex<Option<SolveResult>>>,
+    work: Vec<Arc<AtomicU64>>,
+    shared: Arc<Mutex<Portfolio>>,
     started: Instant,
+}
+
+struct Portfolio {
+    pending: usize,
+    /// Best result so far: a win beats a proof beats an Unknown.
+    best: Option<SolveResult>,
+    done: bool,
 }
 
 impl SolverHandle {
     pub fn spawn(game: &Game, budget: u64) -> SolverHandle {
+        SolverHandle::spawn_with(game, budget, vec![Config::from_env()])
+    }
+
+    pub fn spawn_with(game: &Game, budget: u64, configs: Vec<Config>) -> SolverHandle {
         let cancel = Arc::new(AtomicBool::new(false));
-        let work = Arc::new(AtomicU64::new(0));
-        let result: Arc<Mutex<Option<SolveResult>>> = Arc::new(Mutex::new(None));
-        let game = game.clone();
-        let (c2, w2, r2) = (cancel.clone(), work.clone(), result.clone());
-        thread::Builder::new()
-            .name("spider-solver".into())
-            .spawn(move || {
-                let mut solver = Solver::new(&game, budget);
-                solver.cancel = Some(c2.clone());
-                solver.work_counter = Some(w2.clone());
-                let res = solver.solve(&game);
-                w2.store(res.nodes, Ordering::Relaxed);
-                if !c2.load(Ordering::Relaxed) {
-                    *r2.lock().unwrap() = Some(res);
-                }
-            })
-            .expect("spawn solver thread");
-        SolverHandle { cancel, work, result, started: Instant::now() }
+        let shared = Arc::new(Mutex::new(Portfolio { pending: configs.len(), best: None, done: false }));
+        let mut work = Vec::new();
+        for cfg in configs {
+            let counter = Arc::new(AtomicU64::new(0));
+            work.push(counter.clone());
+            let game = game.clone();
+            let (c2, s2) = (cancel.clone(), shared.clone());
+            thread::Builder::new()
+                .name(format!("spider-solver-{}", cfg.name))
+                .spawn(move || {
+                    let mut solver = Solver::with_config(&game, budget, cfg);
+                    solver.cancel = Some(c2.clone());
+                    solver.work_counter = Some(counter.clone());
+                    let res = solver.solve(&game);
+                    counter.store(res.nodes, Ordering::Relaxed);
+                    let mut p = s2.lock().unwrap();
+                    p.pending -= 1;
+                    let better = match (&p.best, res.verdict) {
+                        (_, Verdict::Solvable) => true,
+                        (None, _) => true,
+                        (Some(b), Verdict::Unsolvable) => b.verdict == Verdict::Unknown,
+                        (Some(b), Verdict::Unknown) => b.verdict == Verdict::Unknown && res.nodes > b.nodes,
+                    };
+                    if better && !(res.verdict == Verdict::Unknown && c2.load(Ordering::Relaxed) && p.best.is_some()) {
+                        p.best = Some(res);
+                    }
+                    let decided = matches!(p.best.as_ref().map(|b| b.verdict), Some(Verdict::Solvable | Verdict::Unsolvable));
+                    if decided || p.pending == 0 {
+                        p.done = true;
+                        c2.store(true, Ordering::Relaxed);
+                    }
+                })
+                .expect("spawn solver thread");
+        }
+        SolverHandle { cancel, work, shared, started: Instant::now() }
     }
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
+    /// Total work across all threads.
     pub fn work(&self) -> u64 {
-        self.work.load(Ordering::Relaxed)
+        self.work.iter().map(|w| w.load(Ordering::Relaxed)).sum()
+    }
+    pub fn threads(&self) -> usize {
+        self.work.len()
     }
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
     pub fn result(&self) -> Option<SolveResult> {
-        self.result.lock().unwrap().clone()
+        let p = self.shared.lock().unwrap();
+        if p.done {
+            p.best.clone()
+        } else {
+            None
+        }
     }
 }
 
