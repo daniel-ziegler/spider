@@ -1,0 +1,15 @@
+[package]
+name = "spider"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal Spider Solitaire with a perfect-information peeking solver"
+
+[dependencies]
+crossterm = "0.28"
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+[profile.dev]
+opt-level = 2
