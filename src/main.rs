@@ -87,6 +87,23 @@ impl App {
         Ok(())
     }
 
+    /// Ctrl-R: only leave the screen if the binary on disk is actually runnable
+    /// (a build in progress can leave it missing or half-written).
+    fn reload_requested(&mut self) {
+        let exe = reload_exe();
+        let check = std::process::Command::new(&exe)
+            .arg("--help")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match check {
+            Ok(st) if st.success() => self.reload = true,
+            Ok(st) => self.msg = format!("Reload refused: {} exited with {st} (build in progress?).", exe.display()),
+            Err(e) => self.msg = format!("Reload refused: cannot run {}: {e}.", exe.display()),
+        }
+    }
+
     /// Command line that reproduces the current position and settings.
     fn reload_args(&self) -> Vec<String> {
         let mut a = vec![
@@ -320,7 +337,7 @@ impl App {
                 self.msg.clear();
             }
             KeyCode::Char('d') => self.deal(),
-            KeyCode::Char('r') if ctrl => self.reload = true,
+            KeyCode::Char('r') if ctrl => self.reload_requested(),
             KeyCode::Char('u') => self.undo_requested(),
             KeyCode::Char('r') => self.redo(),
             KeyCode::Char('s') => self.toggle_solver(),
@@ -407,6 +424,19 @@ impl App {
 
 fn label(col: usize) -> String {
     if col == 9 { "0".into() } else { (col + 1).to_string() }
+}
+
+fn reload_exe() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| std::env::args().next().unwrap_or_default().into())
+}
+
+/// Quote a command-line word for pasting into a shell.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// Round a count to a short human form: 850, 12K, 0.7M, 2.3M.
@@ -737,7 +767,15 @@ fn main() {
             std::process::exit(1);
         }
         Ok(Some(reload_args)) => {
-            let exe = std::env::current_exe().unwrap_or_else(|_| std::env::args().next().unwrap_or_default().into());
+            // Leave the command in the scrollback so the position can be
+            // recovered by hand if the exec fails or the new binary is broken.
+            let exe = reload_exe();
+            let cmd = std::iter::once(exe.to_string_lossy().into_owned())
+                .chain(reload_args.iter().cloned())
+                .map(|w| shell_quote(&w))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("spider: reloading with\n{cmd}");
             let err = std::process::Command::new(&exe).args(&reload_args).exec();
             eprintln!("spider: could not re-exec {}: {err}", exe.display());
             std::process::exit(1);
