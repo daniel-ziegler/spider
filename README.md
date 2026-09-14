@@ -116,8 +116,10 @@ does about 1.3M work per second.
 | 2     | 99%       | 0.12M       | 100%           | ~0.1 s           |
 | 4     | 91%       | 0.18M       | 97%            | 0.35 s           |
 
-Before the depth-first, resumable-stage search the numbers were 84% / 94%
-for four suits at a median of 1.28M work (about 1.1 s). Of the three 4-suit
+On held-out 4-suit seeds 101–200 (not used for tuning) the default solves
+91 and the portfolio 97; the previous solver solved 65 of those.
+Before the depth-first, resumable-stage search the numbers on seeds 1–100
+were 84% / 94% for four suits at a median of 1.28M work (about 1.1 s). Of the three 4-suit
 deals no configuration solves within the budget, seed 91 is winnable (the
 wide configuration finds a line after 9.5M work) and seeds 82 and 98 stay
 unknown at 30,000,000 work. Things that were tried and did not help:
