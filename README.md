@@ -117,9 +117,10 @@ does about 1.3M work per second.
 | 4     | 91%       | 0.18M       | 97%            | 0.35 s           |
 
 Before the depth-first, resumable-stage search the numbers were 84% / 94%
-for four suits at a median of 1.28M work (about 1.1 s). The three 4-suit deals
-that no configuration solves (seeds 82, 91, 98) stay unknown at 30,000,000
-work and are probably unwinnable. Things that were tried and did not help:
+for four suits at a median of 1.28M work (about 1.1 s). Of the three 4-suit
+deals no configuration solves within the budget, seed 91 is winnable (the
+wide configuration finds a line after 9.5M work) and seeds 82 and 98 stay
+unknown at 30,000,000 work. Things that were tried and did not help:
 a global best-first queue over all stages (dives into the first endgame and
 never returns), restarts with growing slices (dives with small slices rarely
 succeed), smaller class caps, more or fewer deal points per class, other
