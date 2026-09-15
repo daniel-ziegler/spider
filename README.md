@@ -96,13 +96,53 @@ refute by exhaustion in the median case (about 70 work), and the ones that are
 not usually turn out to be winnable with more work, which is what the subtree
 allowances are for.
 
+### Alternate engines: rollouts and beam search
+
+Two further solvers use different algorithms on the same class abstraction.
+Neither can prove unsolvability; both are portfolio members because they
+win deals the class search does not, or win them faster.
+
+**NRPA rollouts** (`src/rollout.rs`): nested rollout policy adaptation.
+A rollout plays a whole game by sampling, at each step, one exit of the
+current class from a softmax over `w[code] + beta * delta`, where `delta` is
+the evaluation change the exit causes and `w` is a learned weight per move
+code (card moved × card landed on). A level-2 search runs 40 level-1
+searches, each 40 rollouts, and after each one shifts the policy toward the
+best rollout seen. Deals are offered only when no exit improves the
+evaluation. Rolling out over single card moves instead of class exits does
+not work: winning lines are full of worsen-then-improve pairs that a
+one-move prior cannot follow. It wins 1-suit deals in one rollout and most
+2-suit deals in a few hundred; on 4 suits its policy plateaus within a
+quarter second and it solves few deals.
+
+**Beam search** (`src/beam.rs`): one beam per stock level. From the frontier
+it expands every class, keeps at most 8 children per parent and the 16 best
+children overall, and pools deal exits separately (they always evaluate
+worse than card moves); when a level's beam runs dry the 16 best pooled
+post-deal positions seed the next level. Once the stock is empty each
+candidate is handed to the class solver with a 100,000-work budget, because
+a beam cannot backtrack and endgames need it. If every level runs dry the
+width quadruples and it restarts. Classes are cut at 500 members (their
+remainder becomes ordinary exits), which matters more than the width.
+
+On 4-suit seeds 1–100 with 6 s each, beam solves 59 and NRPA 5, but beam
+solves seed 82 (6 s, 8.5M work), which no class-search configuration solves
+at 30M work, and both solve seed 91 in about 3 s. On the 117 hard endgame
+positions of the cut set they solve 24 (NRPA) and 22 (beam) against 44 for
+the class search, with 4 positions only they solve.
+
 ### Portfolio
 
 Different configurations solve different deals, so the UI runs up to four of
-them (`--threads`) in parallel and takes the first win or proof: the default,
-a wider one (100,000-work slices, six-slice allowances), one with a smaller
-run-length bonus, and a best-first one. Every configuration is sound; only
-what they find within the budget differs.
+them (`--threads`) in parallel and takes the first win or proof: the default
+class search, the beam search, a best-first class search, and one with a
+smaller run-length bonus; NRPA is fifth, then the wide class search. The
+class-search configurations are sound; the beam and rollout engines only
+report wins, so an UNSOLVABLE verdict always comes from a class search.
+Chosen by per-seed analysis of all candidates on 4-suit seeds 1–100; beam
+is the member no class-search configuration can replace, and it gets four
+times the budget (its work is cheaper per unit, and the hard deals it wins
+need 5–10M work). On 2-suit deals beam wins the race three times out of four.
 
 ### Statistics
 
@@ -112,27 +152,35 @@ does about 1.3M work per second.
 
 | suits | one config | median work | portfolio of 4 | median wall time |
 |-------|-----------|-------------|----------------|------------------|
-| 1     | 100%      | 0.12M       | 100%           | ~0.1 s           |
-| 2     | 99%       | 0.12M       | 100%           | ~0.1 s           |
-| 4     | 91%       | 0.18M       | 97%            | 0.35 s           |
+| 1     | 100%      | 0.12M       | 100%           | ~0.05 s          |
+| 2     | 99%       | 0.12M       | 100%           | 0.10 s           |
+| 4     | 91%       | 0.18M       | 99%            | 0.34 s           |
 
 On held-out 4-suit seeds 101–200 (not used for tuning) the default solves
-91 and the portfolio 97; the previous solver solved 65 of those.
-Before the depth-first, resumable-stage search the numbers on seeds 1–100
-were 84% / 94% for four suits at a median of 1.28M work (about 1.1 s). Of the three 4-suit
-deals no configuration solves within the budget, seed 91 is winnable (the
-wide configuration finds a line after 9.5M work) and seeds 82 and 98 stay
-unknown at 30,000,000 work. Things that were tried and did not help:
+91 and the portfolio 100; the previous solver solved 65 of those. Before the
+alternate engines joined, the portfolio of four class-search configurations
+solved 97 of seeds 1–100 and 97 of 101–200; before the depth-first,
+resumable-stage search the numbers on seeds 1–100 were 84% / 94% for four
+suits at a median of 1.28M work (about 1.1 s). The one 4-suit deal in 1–100
+nothing solves, seed 98, stays unknown at 30,000,000 work for the class
+search and 18M for the beam. Things that were tried and did not help:
 a global best-first queue over all stages (dives into the first endgame and
 never returns), restarts with growing slices (dives with small slices rarely
 succeed), smaller class caps, more or fewer deal points per class, other
 evaluation weights (they only reshuffle which deals get solved, which is what
-the portfolio exploits), and treating same-suit joins as reversible in the
-end game (class sizes explode; solves nothing).
+the portfolio exploits), treating same-suit joins as reversible in the
+end game (class sizes explode; solves nothing), rollouts over single card
+moves, beam widths above 16, and beaming through the endgame instead of
+handing it to the class search.
 
 `cargo run --release --bin bench -- <suits> <first_seed> <count> [budget]`
 solves a range of seeds and verifies each winning line by replaying it.
-`SPIDER_PORTFOLIO=4` makes it use the portfolio; `SPIDER_DEBUG=1` traces the
+`SPIDER_PORTFOLIO=4` makes it use the portfolio, `SPIDER_ROLLOUT=1` the NRPA
+engine and `SPIDER_BEAM=1` the beam engine (also in `--bin endgame`);
+`SPIDER_R_*` (`BETA`, `DEAL_H`, `LEVEL`, `ITERS`, `ALPHA`, `MAX_LEN`,
+`DEAL_RULE`, `CLASSES`, `CLASS_CAP`, `DEALS_PER_CLASS`, `TIME`) and
+`SPIDER_B_*` (`WIDTH`, `GROWTH`, `CLASS_CAP`, `DEALS_PER_CLASS`,
+`PER_PARENT`, `END_DFS`, `TIME`) set their parameters; `SPIDER_DEBUG=1` traces the
 stage search; `SPIDER_W_*`, `SPIDER_STAGE_CAP`, `SPIDER_END_CAP`,
 `SPIDER_SUB_ALLOC`, `SPIDER_SUB_GROWTH`, `SPIDER_RESUME_TAX`,
 `SPIDER_DEALS_PER_STAGE`, `SPIDER_DEALS_PER_CLASS`, `SPIDER_DEPTH_W`,

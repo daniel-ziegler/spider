@@ -37,6 +37,10 @@ pub struct BeamParams {
     /// Work budget for the class solver on each endgame candidate once the
     /// stock is empty (0 = beam through the endgame too).
     pub end_dfs: u64,
+    /// The beam gets this many times the budget it is given: its work is
+    /// cheaper per unit than the class search's, and the hard deals it wins
+    /// need 5-10M work.
+    pub budget_mul: u64,
 }
 
 impl Default for BeamParams {
@@ -51,6 +55,7 @@ impl Default for BeamParams {
             per_parent: 8,
             time_limit: 0.0,
             end_dfs: 100_000,
+            budget_mul: 4,
         }
     }
 }
@@ -78,6 +83,7 @@ impl BeamParams {
             per_parent: env_or("SPIDER_B_PER_PARENT", d.per_parent),
             time_limit: env_or("SPIDER_B_TIME", d.time_limit),
             end_dfs: env_or("SPIDER_B_END_DFS", d.end_dfs),
+            budget_mul: env_or("SPIDER_B_BUDGET_MUL", d.budget_mul),
         }
     }
 }
@@ -123,10 +129,10 @@ impl BeamSolver {
         BeamSolver {
             deals: stock_deals(g),
             suits: g.suits,
-            p,
             work: 0,
             classes: 0,
-            budget,
+            budget: budget.saturating_mul(p.budget_mul.max(1)),
+            p,
             cancel: None,
             work_counter: None,
             stop: false,

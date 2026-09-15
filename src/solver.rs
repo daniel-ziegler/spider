@@ -398,10 +398,10 @@ impl Config {
         let mut v = vec![
             base.clone(),
             Config { name: "beam", engine: Engine::Beam(crate::beam::BeamParams::default()), ..base.clone() },
-            Config { name: "wide", stage_cap: Some(100_000), end_cap: Some(100_000), sub_alloc: 6, ..base.clone() },
-            Config { name: "nrpa", engine: Engine::Rollout(crate::rollout::RolloutParams::default()), ..base.clone() },
-            Config { name: "runsq8", weights: Weights { run_sq: 8, ..base.weights }, ..base.clone() },
             Config { name: "bestfirst", depth_w: 0, ..base.clone() },
+            Config { name: "runsq8", weights: Weights { run_sq: 8, ..base.weights }, ..base.clone() },
+            Config { name: "nrpa", engine: Engine::Rollout(crate::rollout::RolloutParams::default()), ..base.clone() },
+            Config { name: "wide", stage_cap: Some(100_000), end_cap: Some(100_000), sub_alloc: 6, ..base.clone() },
             Config { name: "same", weights: Weights { same: 8, diff: 0, ..base.weights }, ..base.clone() },
             Config { name: "alloc20", sub_alloc: 20, ..base.clone() },
             Config { name: "hidden", weights: Weights { hidden: 20, ..base.weights }, ..base.clone() },
