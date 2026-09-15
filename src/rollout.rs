@@ -453,7 +453,7 @@ impl RolloutSolver {
             _ => best_h < 0,
         };
         if allowed && !deals.is_empty() {
-            deals.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            deals.sort_unstable_by_key(|d| std::cmp::Reverse(d.0));
             let top = deals[0].0;
             for &(e, ei) in deals.iter().take(self.p.deals_per_class) {
                 let ex = &cls.exits[ei];

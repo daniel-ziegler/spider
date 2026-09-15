@@ -209,7 +209,7 @@ impl BeamSolver {
             self.level_reached = level;
             if level > 0 {
                 let pool = &mut pools[level];
-                pool.sort_unstable_by(|a, b| b.eval.cmp(&a.eval));
+                pool.sort_unstable_by_key(|c| std::cmp::Reverse(c.eval));
                 pool.truncate(width);
                 frontier = pool.drain(..).map(|c| self.push(c)).collect();
             }
@@ -265,19 +265,19 @@ impl BeamSolver {
                             kids.push((eval, ei));
                         }
                     }
-                    kids.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                    kids.sort_unstable_by_key(|k| std::cmp::Reverse(k.0));
                     for &(eval, ei) in kids.iter().take(self.p.per_parent) {
                         let ex = &cls.exits[ei];
                         next.push(Cand { eval, parent: nid, path: encode_path(&cls, ei), state: Compact::from_state(&ex.result) });
                     }
                     if !deals.is_empty() {
-                        deals.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                        deals.sort_unstable_by_key(|d| std::cmp::Reverse(d.0));
                         for &(eval, ei) in deals.iter().take(self.p.deals_per_class) {
                             let ex = &cls.exits[ei];
                             let pool = &mut pools[level + 1];
                             pool.push(Cand { eval, parent: nid, path: encode_path(&cls, ei), state: Compact::from_state(&ex.result) });
                             if pool.len() >= 4 * width {
-                                pool.sort_unstable_by(|a, b| b.eval.cmp(&a.eval));
+                                pool.sort_unstable_by_key(|c| std::cmp::Reverse(c.eval));
                                 pool.truncate(width);
                             }
                         }
@@ -286,7 +286,7 @@ impl BeamSolver {
                         return None;
                     }
                 }
-                next.sort_unstable_by(|a, b| b.eval.cmp(&a.eval));
+                next.sort_unstable_by_key(|c| std::cmp::Reverse(c.eval));
                 next.truncate(width);
                 if self.debug && depth % 10 == 0 {
                     eprintln!(
