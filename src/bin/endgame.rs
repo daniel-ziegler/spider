@@ -16,10 +16,16 @@ fn main() {
         let tag = it.next().unwrap();
         let work: u64 = it.next().unwrap().parse().unwrap();
         let mut g = Game::from_position_text(suits, it.next().unwrap()).expect("parse position");
-        let mut cfg = Config::from_env();
-        cfg.end_cap = Some(budget);
-        cfg.stage_cap = Some(budget);
-        let r = Solver::with_config(&g, budget, cfg).solve(&g);
+        let r = if std::env::var_os("SPIDER_ROLLOUT").is_some() {
+            spider::rollout::solve_rollout(&g, budget)
+        } else if std::env::var_os("SPIDER_BEAM").is_some() {
+            spider::beam::solve_beam(&g, budget)
+        } else {
+            let mut cfg = Config::from_env();
+            cfg.end_cap = Some(budget);
+            cfg.stage_cap = Some(budget);
+            Solver::with_config(&g, budget, cfg).solve(&g)
+        };
         match r.verdict {
             Verdict::Solvable => {
                 solv += 1;

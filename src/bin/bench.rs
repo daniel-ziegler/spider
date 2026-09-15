@@ -15,7 +15,12 @@ fn main() {
     for seed in first..first + count {
         let mut g = Game::new(suits, seed);
         let portfolio: usize = std::env::var("SPIDER_PORTFOLIO").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let r = if portfolio > 0 {
+        let rollout = std::env::var_os("SPIDER_ROLLOUT").is_some();
+        let r = if rollout {
+            spider::rollout::solve_rollout(&g, budget)
+        } else if std::env::var_os("SPIDER_BEAM").is_some() {
+            spider::beam::solve_beam(&g, budget)
+        } else if portfolio > 0 {
             solve_portfolio(&g, budget, Config::portfolio(portfolio))
         } else {
             Solver::new(&g, budget).solve(&g)
