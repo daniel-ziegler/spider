@@ -426,8 +426,24 @@ fn label(col: usize) -> String {
     if col == 9 { "0".into() } else { (col + 1).to_string() }
 }
 
+/// The path to re-exec. `current_exe` reads /proc/self/exe, which turns
+/// into `<path> (deleted)` once a rebuild has replaced the file; the new
+/// build lives at the original path, so strip the suffix and fall back to
+/// argv[0] if even that is gone.
 fn reload_exe() -> std::path::PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| std::env::args().next().unwrap_or_default().into())
+    let argv0: std::path::PathBuf = std::env::args().next().unwrap_or_default().into();
+    let Ok(exe) = std::env::current_exe() else { return argv0 };
+    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(stripped) => std::path::PathBuf::from(stripped),
+        None => exe,
+    };
+    if exe.exists() {
+        exe
+    } else if argv0.exists() {
+        argv0
+    } else {
+        exe
+    }
 }
 
 /// Quote a command-line word for pasting into a shell.
