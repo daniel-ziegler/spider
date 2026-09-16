@@ -45,6 +45,8 @@ struct App {
     quit: bool,
     /// Set by Ctrl-R: exec a fresh copy of the binary into this position.
     reload: bool,
+    /// Resume commands recorded with S, printed to the terminal on exit.
+    saved: Vec<String>,
 }
 
 impl App {
@@ -65,6 +67,7 @@ impl App {
             threads,
             quit: false,
             reload: false,
+            saved: Vec::new(),
         };
         app.restart_solver();
         app
@@ -102,6 +105,17 @@ impl App {
             Ok(st) => self.msg = format!("Reload refused: {} exited with {st} (build in progress?).", exe.display()),
             Err(e) => self.msg = format!("Reload refused: cannot run {}: {e}.", exe.display()),
         }
+    }
+
+    /// S: record the command that resumes this exact position. It is
+    /// printed when the program exits and written to a file right away.
+    fn save_requested(&mut self) {
+        let cmd = resume_command(&reload_exe(), &self.reload_args());
+        self.saved.push(cmd.clone());
+        self.msg = match write_save_file(&cmd) {
+            Ok(path) => format!("Saved: resume command written to {} and printed when you quit.", path.display()),
+            Err(e) => format!("Resume command will be printed when you quit (could not write save file: {e})."),
+        };
     }
 
     /// Command line that reproduces the current position and settings.
@@ -341,6 +355,7 @@ impl App {
             KeyCode::Char('u') => self.undo_requested(),
             KeyCode::Char('r') => self.redo(),
             KeyCode::Char('s') => self.toggle_solver(),
+            KeyCode::Char('S') => self.save_requested(),
             KeyCode::Char('n') => self.prompt = Prompt::ConfirmNew,
             KeyCode::Char('R') => self.prompt = Prompt::ConfirmRestart,
             KeyCode::Char('?') => self.prompt = Prompt::Help,
@@ -631,7 +646,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
         SetForegroundColor(Color::DarkGrey),
-        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  n new  R restart  ^R reload  ? help  q quit"),
+        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  S save  n new  R restart  ^R reload  ? help  q quit"),
         ResetColor
     )?;
 
@@ -671,6 +686,7 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "  u / r      undo / redo (undoing past a reveal asks for confirmation)",
         "  s          toggle the peeking solver (uses hidden cards + stock order)",
         "  n / R      new random game / restart this deal;   q quits",
+        "  S          save: print the command that resumes this position when you quit",
         "  Ctrl-R     re-exec the program (picks up a rebuilt binary) at this position",
         "",
         "Solver verdicts:  SOLVABLE = a winning line exists from this exact position;",
@@ -740,12 +756,45 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
-/// Returns the reload command line if the user asked to re-exec.
-fn run(args: Args) -> io::Result<Option<Vec<String>>> {
+/// The full command line (quoted for a shell) that resumes a position.
+fn resume_command(exe: &std::path::Path, args: &[String]) -> String {
+    std::iter::once(exe.to_string_lossy().into_owned())
+        .chain(args.iter().cloned())
+        .map(|w| shell_quote(&w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Write the resume command to `~/.local/state/spider/resume.sh` (or
+/// `$XDG_STATE_HOME/spider/resume.sh`); returns the path.
+fn write_save_file(cmd: &str) -> io::Result<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))
+        .ok_or_else(|| io::Error::other("no HOME"))?;
+    let dir = base.join("spider");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("resume.sh");
+    std::fs::write(&path, format!("#!/bin/sh\n# spider position saved {}\nexec {cmd}\n", unix_time()))?;
+    Ok(path)
+}
+
+fn unix_time() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// What to do after the UI exits: re-exec with these arguments, and/or
+/// print the saved resume commands.
+struct Exit {
+    reload: Option<Vec<String>>,
+    saved: Vec<String>,
+}
+
+fn run(args: Args) -> io::Result<Exit> {
     let mut out = io::stdout();
     terminal::enable_raw_mode()?;
     execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
-    let result = (|| -> io::Result<Option<Vec<String>>> {
+    let result = (|| -> io::Result<Exit> {
         let mut app = App::new(args.suits, args.seed, args.budget, args.threads, args.solver);
         if let Err(e) = app.restore(&args.replay, &args.redo) {
             return Err(io::Error::other(e));
@@ -762,7 +811,7 @@ fn run(args: Args) -> io::Result<Option<Vec<String>>> {
             app.poll_solver();
             draw(&mut out, &app)?;
         }
-        Ok(if app.reload { Some(app.reload_args()) } else { None })
+        Ok(Exit { reload: if app.reload { Some(app.reload_args()) } else { None }, saved: std::mem::take(&mut app.saved) })
     })();
     execute!(out, cursor::Show, terminal::LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
@@ -777,25 +826,23 @@ fn main() {
             std::process::exit(2);
         }
     };
-    match run(args) {
+    let exit = match run(args) {
         Err(e) => {
             eprintln!("spider: {e}");
             std::process::exit(1);
         }
-        Ok(Some(reload_args)) => {
-            // Leave the command in the scrollback so the position can be
-            // recovered by hand if the exec fails or the new binary is broken.
-            let exe = reload_exe();
-            let cmd = std::iter::once(exe.to_string_lossy().into_owned())
-                .chain(reload_args.iter().cloned())
-                .map(|w| shell_quote(&w))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("spider: reloading with\n{cmd}");
-            let err = std::process::Command::new(&exe).args(&reload_args).exec();
-            eprintln!("spider: could not re-exec {}: {err}", exe.display());
-            std::process::exit(1);
-        }
-        Ok(None) => {}
+        Ok(exit) => exit,
+    };
+    for (i, cmd) in exit.saved.iter().enumerate() {
+        println!("spider: saved position {} of {}; resume with\n{cmd}", i + 1, exit.saved.len());
+    }
+    if let Some(reload_args) = exit.reload {
+        // Leave the command in the scrollback so the position can be
+        // recovered by hand if the exec fails or the new binary is broken.
+        let exe = reload_exe();
+        println!("spider: reloading with\n{}", resume_command(&exe, &reload_args));
+        let err = std::process::Command::new(&exe).args(&reload_args).exec();
+        eprintln!("spider: could not re-exec {}: {err}", exe.display());
+        std::process::exit(1);
     }
 }

@@ -24,6 +24,7 @@ cargo run --release -- --solver             # start with the solver on
 | `s`            | toggle the peeking solver                                     |
 | `n` / `R`      | new random deal / restart the same deal                        |
 | `?` / `q`      | help / quit                                                   |
+| `S`            | save: records the command line that resumes the current position (settings, history and redo stack), writes it to `~/.local/state/spider/resume.sh` immediately and prints it to the terminal when you quit, so `sh ~/.local/state/spider/resume.sh` or the printed command brings the game back |
 | `Ctrl-R`       | reload: re-exec the program at the current position (history and redo stack included), so a rebuilt binary can be picked up mid-game. It first checks that the binary on disk runs (refusing while a build is in progress) and prints the exact reload command to the terminal before exec'ing, so the position can be recovered by hand. Implemented with `--replay MOVES` / `--redo MOVES`, where a move is `F>T:N` (N cards from 0-based column F to T) or `d` |
 
 Rules are the usual ones: a descending same-suit run may move onto any card one
