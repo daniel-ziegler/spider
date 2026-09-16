@@ -545,6 +545,47 @@ fn fit(s: &str, w: u16) -> String {
     s.chars().take((w as usize).saturating_sub(1)).collect()
 }
 
+/// The bottom key line, dropping the least important entries until it fits
+/// the screen width (`? help` and `q quit` always stay).
+fn key_bar(w: u16) -> String {
+    // (text, drop priority: lower is dropped first; u8::MAX never)
+    let entries: [(&str, u8); 15] = [
+        ("1-9,0 pick/place", 9),
+        ("←→ cursor", 2),
+        ("↑↓ count", 1),
+        ("⏎ act", 0),
+        ("Tab hint", 8),
+        ("d deal", 10),
+        ("u undo", 7),
+        ("r redo", 4),
+        ("s solver", 6),
+        ("S save", 3),
+        ("n new", 5),
+        ("R restart", 3),
+        ("^R reload", 2),
+        ("? help", u8::MAX),
+        ("q quit", u8::MAX),
+    ];
+    let mut keep: Vec<bool> = vec![true; entries.len()];
+    let width = |keep: &[bool]| {
+        1 + entries.iter().zip(keep).filter(|(_, k)| **k).map(|(e, _)| e.0.chars().count() + 2).sum::<usize>()
+    };
+    while width(&keep) > (w as usize).saturating_sub(1) {
+        let Some((i, _)) = entries.iter().enumerate().filter(|(i, e)| keep[*i] && e.1 != u8::MAX).min_by_key(|(_, e)| e.1) else {
+            break;
+        };
+        keep[i] = false;
+    }
+    let mut out = String::from(" ");
+    for (e, k) in entries.iter().zip(&keep) {
+        if *k {
+            out.push_str(e.0);
+            out.push_str("  ");
+        }
+    }
+    fit(out.trim_end(), w)
+}
+
 fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
     let (w, h) = terminal::size()?;
     // Synchronized output: terminals that support it show the frame at once
@@ -672,7 +713,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
         SetForegroundColor(Color::DarkGrey),
-        Print(fit(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  S save  n new  R restart  ^R reload  ? help  q quit", w)),
+        Print(key_bar(w)),
         ResetColor
     )?;
 
