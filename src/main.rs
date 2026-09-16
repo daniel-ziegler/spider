@@ -174,13 +174,17 @@ impl App {
         }
     }
 
-    fn poll_solver(&mut self) {
+    /// Returns true if the screen needs redrawing: a result arrived, or the
+    /// solver is still running (its progress line changes).
+    fn poll_solver(&mut self) -> bool {
         if let Some(h) = &self.solver {
             if let Some(r) = h.result() {
                 self.solver_result = Some(r);
                 self.solver = None;
             }
+            return true;
         }
+        false
     }
 
     fn column_key(&mut self, col: usize) {
@@ -594,15 +598,20 @@ fn key_bar(w: u16) -> String {
     fit(out.trim_end(), w)
 }
 
-fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
+fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
     let (w, h) = terminal::size()?;
-    // Synchronized output: terminals that support it show the frame at once
-    // instead of the cleared screen filling in.
-    queue!(out, terminal::BeginSynchronizedUpdate, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    // No full-screen clear: each row is cleared just before it is redrawn,
+    // so the screen is never blank between frames. (Synchronized output
+    // additionally lets capable terminals show the frame at once.)
+    queue!(out, terminal::BeginSynchronizedUpdate)?;
+    let clear_row = |out: &mut O, row: u16| queue!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine));
+    for row in 0..TOP {
+        clear_row(out, row)?;
+    }
     let g = &app.game;
 
     // Title line.
-    queue!(out, SetAttribute(Attribute::Bold), Print(" SPIDER "), SetAttribute(Attribute::Reset))?;
+    queue!(out, cursor::MoveTo(0, 0), SetAttribute(Attribute::Bold), Print(" SPIDER "), SetAttribute(Attribute::Reset))?;
     queue!(
         out,
         Print(format!(
@@ -668,11 +677,19 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         queue!(out, Print(format!(" [{}] ", label(c))), SetAttribute(Attribute::Reset), ResetColor)?;
     }
 
-    // Columns.
+    // Columns, drawn row by row so each screen row is cleared then filled.
     let avail = (h as usize).saturating_sub(TOP as usize + 2).max(1);
-    for c in 0..NUM_COLS {
-        let x = LEFT + c as u16 * CELL_W;
-        for (row, slot) in column_slots(g, c, app.sel, avail).iter().enumerate() {
+    let slots: Vec<Vec<Slot>> = (0..NUM_COLS).map(|c| column_slots(g, c, app.sel, avail)).collect();
+    let shelf_x = LEFT + NUM_COLS as u16 * CELL_W + 2;
+    let shelf = w > shelf_x + 8;
+    if shelf {
+        queue!(out, cursor::MoveTo(shelf_x, TOP - 1), SetForegroundColor(Color::DarkGrey), Print("done"), ResetColor)?;
+    }
+    for row in 0..avail {
+        clear_row(out, TOP + row as u16)?;
+        for (c, col_slots) in slots.iter().enumerate() {
+            let Some(slot) = col_slots.get(row) else { continue };
+            let x = LEFT + c as u16 * CELL_W;
             queue!(out, cursor::MoveTo(x, TOP + row as u16))?;
             match slot {
                 Slot::Empty => queue!(out, SetForegroundColor(Color::DarkGrey), Print(" ·  · "), ResetColor)?,
@@ -698,25 +715,25 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
                 }
             }
         }
-    }
-
-    // Completed suits shelf, to the right of the tableau if there is room.
-    let shelf_x = LEFT + NUM_COLS as u16 * CELL_W + 2;
-    if w > shelf_x + 8 {
-        queue!(out, cursor::MoveTo(shelf_x, TOP - 1), SetForegroundColor(Color::DarkGrey), Print("done"), ResetColor)?;
-        for (i, &suit) in g.completed.iter().enumerate() {
-            let card = Card::new(suit, 12);
-            queue!(
-                out,
-                cursor::MoveTo(shelf_x, TOP + i as u16),
-                SetForegroundColor(if card.is_red() { Color::Red } else { Color::White }),
-                Print(format!("K{}..A{}", card.suit_char(), card.suit_char())),
-                ResetColor
-            )?;
+        // Completed suits shelf, to the right of the tableau if there is room.
+        if shelf {
+            if let Some(&suit) = g.completed.get(row) {
+                let card = Card::new(suit, 12);
+                queue!(
+                    out,
+                    cursor::MoveTo(shelf_x, TOP + row as u16),
+                    SetForegroundColor(if card.is_red() { Color::Red } else { Color::White }),
+                    Print(format!("K{}..A{}", card.suit_char(), card.suit_char())),
+                    ResetColor
+                )?;
+            }
         }
     }
 
-    // Key line.
+    // Rows below the tableau (a help box may have covered them), then the key line.
+    for row in TOP + avail as u16..h {
+        clear_row(out, row)?;
+    }
     queue!(
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
@@ -877,15 +894,23 @@ fn run(args: Args) -> io::Result<Exit> {
         }
         draw(&mut out, &app)?;
         while !app.quit && !app.reload {
+            let mut dirty = false;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
-                    Event::Key(k) => app.handle_key(k),
-                    Event::Resize(_, _) => {}
-                    _ => continue,
+                    Event::Key(k) => {
+                        app.handle_key(k);
+                        dirty = true;
+                    }
+                    Event::Resize(_, _) => {
+                        queue!(out, terminal::Clear(ClearType::All))?;
+                        dirty = true;
+                    }
+                    _ => {}
                 }
             }
-            app.poll_solver();
-            draw(&mut out, &app)?;
+            if app.poll_solver() || dirty {
+                draw(&mut out, &app)?;
+            }
         }
         Ok(Exit { reload: if app.reload { Some(app.reload_args()) } else { None }, saved: std::mem::take(&mut app.saved) })
     })();
