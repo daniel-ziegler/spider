@@ -10,6 +10,9 @@ cargo run --release -- --suits 4 --seed 42  # a specific deal
 cargo run --release -- --solver             # start with the solver on
 ```
 
+A card is underlined when the card on top of it is not one rank lower: the
+line marks where a stack is broken and will have to be cleared.
+
 ## Keys
 
 | key            | action                                                        |

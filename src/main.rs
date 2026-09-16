@@ -494,7 +494,9 @@ const TOP: u16 = 5;
 
 /// One displayed row of a column.
 enum Slot {
-    Card(Card, bool),
+    /// A face-up card: (card, selected, the card on top of it is not one
+    /// rank lower, so the stack is broken here).
+    Card(Card, bool, bool),
     Hidden(usize),
     More(usize),
     Empty,
@@ -517,7 +519,14 @@ fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, avail: usi
         up_start = down;
     }
     let mut rest: Vec<Slot> = (up_start..cards.len())
-        .map(|i| if i < down { Slot::Hidden(1) } else { Slot::Card(cards[i], i >= selected_from) })
+        .map(|i| {
+            if i < down {
+                Slot::Hidden(1)
+            } else {
+                let broken = i + 1 < cards.len() && cards[i + 1].rank() + 1 != cards[i].rank();
+                Slot::Card(cards[i], i >= selected_from, broken)
+            }
+        })
         .collect();
     let room = avail.saturating_sub(slots.len()).max(1);
     if rest.len() > room {
@@ -612,14 +621,22 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
                 Slot::Hidden(1) => queue!(out, SetForegroundColor(Color::DarkBlue), Print(" ▒▒▒▒ "), ResetColor)?,
                 Slot::Hidden(n) => queue!(out, SetForegroundColor(Color::DarkBlue), Print(format!(" ▒{:<3}", format!("×{n}"))), ResetColor)?,
                 Slot::More(n) => queue!(out, SetForegroundColor(Color::DarkGrey), Print(format!(" +{n:<3}")), ResetColor)?,
-                Slot::Card(card, selected) => {
+                Slot::Card(card, selected, broken) => {
                     let color = if card.is_red() { Color::Red } else { Color::White };
                     if *selected {
                         queue!(out, SetBackgroundColor(Color::DarkYellow), SetForegroundColor(if card.is_red() { Color::Red } else { Color::Black }))?;
                     } else {
                         queue!(out, SetForegroundColor(color))?;
                     }
-                    queue!(out, Print(format!(" {:>2}{}  ", card.rank_str(), card.suit_char())), ResetColor)?;
+                    // Underline a card whose cover is not one rank lower: the
+                    // line marks where the stack breaks.
+                    if *broken {
+                        queue!(out, Print(" "), SetAttribute(Attribute::Underlined))?;
+                        queue!(out, Print(format!("{:>2}{}", card.rank_str(), card.suit_char())), SetAttribute(Attribute::NoUnderline), Print("  "))?;
+                    } else {
+                        queue!(out, Print(format!(" {:>2}{}  ", card.rank_str(), card.suit_char())))?;
+                    }
+                    queue!(out, ResetColor)?;
                 }
             }
         }
