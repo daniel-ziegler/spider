@@ -152,6 +152,17 @@ impl App {
         self.restart_solver();
     }
 
+    /// R: back to the start of this deal by undoing every move, so the whole
+    /// game sits on the redo stack (r replays it; S saves it under --redo).
+    fn restart(&mut self) {
+        let n = self.game.move_count();
+        while self.game.undo().is_some() {}
+        self.sel = None;
+        self.cursor = 0;
+        self.msg = format!("Restarted: {n} move{} moved to the redo stack (r replays them).", if n == 1 { "" } else { "s" });
+        self.restart_solver();
+    }
+
     /// The position changed: drop any running solve and start over if enabled.
     fn restart_solver(&mut self) {
         self.solver = None;
@@ -317,10 +328,7 @@ impl App {
                     match p {
                         Prompt::ConfirmUndo => self.do_undo(),
                         Prompt::ConfirmNew => self.new_game(random_seed()),
-                        Prompt::ConfirmRestart => {
-                            let seed = self.game.seed;
-                            self.new_game(seed);
-                        }
+                        Prompt::ConfirmRestart => self.restart(),
                         Prompt::ConfirmQuit => self.quit = true,
                         _ => {}
                     }
@@ -722,7 +730,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         Prompt::None => None,
         Prompt::ConfirmUndo => Some("This undo takes back a move that REVEALED cards (a flip or a deal). Undo anyway? [y/N]"),
         Prompt::ConfirmNew => Some("Abandon this game and start a new one? [y/N]"),
-        Prompt::ConfirmRestart => Some("Restart this same deal from the beginning? [y/N]"),
+        Prompt::ConfirmRestart => Some("Restart this deal from the beginning (moves stay on the redo stack)? [y/N]"),
         Prompt::ConfirmQuit => Some("Quit the game in progress? [y/N]"),
         Prompt::Help => Some("HELP — press any key to close"),
     };
