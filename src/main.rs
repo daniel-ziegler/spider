@@ -538,9 +538,18 @@ fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, avail: usi
     slots
 }
 
+/// Truncate a line to the screen width. Nothing may reach the last cell of
+/// the bottom row: the terminal would wrap and scroll the whole screen up a
+/// line until the next redraw.
+fn fit(s: &str, w: u16) -> String {
+    s.chars().take((w as usize).saturating_sub(1)).collect()
+}
+
 fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
     let (w, h) = terminal::size()?;
-    queue!(out, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    // Synchronized output: terminals that support it show the frame at once
+    // instead of the cleared screen filling in.
+    queue!(out, terminal::BeginSynchronizedUpdate, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
     let g = &app.game;
 
     // Title line.
@@ -593,7 +602,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
     }
 
     // Message line.
-    queue!(out, cursor::MoveTo(1, 2), SetForegroundColor(Color::White), Print(&app.msg), ResetColor)?;
+    queue!(out, cursor::MoveTo(1, 2), SetForegroundColor(Color::White), Print(fit(&app.msg, w.saturating_sub(1))), ResetColor)?;
 
     // Column headers.
     for c in 0..NUM_COLS {
@@ -663,7 +672,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         out,
         cursor::MoveTo(0, h.saturating_sub(1)),
         SetForegroundColor(Color::DarkGrey),
-        Print(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  S save  n new  R restart  ^R reload  ? help  q quit"),
+        Print(fit(" 1-9,0 pick/place  ←→ cursor  ↑↓ count  ⏎ act  Tab hint  d deal  u undo  r redo  s solver  S save  n new  R restart  ^R reload  ? help  q quit", w)),
         ResetColor
     )?;
 
@@ -682,6 +691,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
     if app.prompt == Prompt::Help {
         draw_help(out, w, h)?;
     }
+    queue!(out, terminal::EndSynchronizedUpdate)?;
     out.flush()
 }
 
