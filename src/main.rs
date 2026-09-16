@@ -632,7 +632,7 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
                     // line marks where the stack breaks.
                     if *broken {
                         queue!(out, Print(" "), SetAttribute(Attribute::Underlined))?;
-                        queue!(out, Print(format!("{:>2}{}", card.rank_str(), card.suit_char())), SetAttribute(Attribute::NoUnderline), Print("  "))?;
+                        queue!(out, Print(format!("{:>2}{} ", card.rank_str(), card.suit_char())), SetAttribute(Attribute::NoUnderline), Print(" "))?;
                     } else {
                         queue!(out, Print(format!(" {:>2}{}  ", card.rank_str(), card.suit_char())))?;
                     }
