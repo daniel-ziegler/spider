@@ -81,9 +81,22 @@ ancestor's siblings. This is what lets small slices work: the search dives
 quickly, and when a dive dies the budget flows back up to alternatives at
 every level instead of being absorbed by the endgame.
 
-Splitting a same-suit run is deferred to a second pass that only runs if the
+Splitting a same-suit run is deferred to later passes that only run if the
 first pass exhausts its space, so `UNSOLVABLE` is a proof over the full move
-set. Column order is treated as irrelevant. That is exact once the stock is
+set. Two passes handle splits differently. The second treats a split (and a
+same-suit join) as an irreversible exit, so classes stay small and the
+search orders the splits by evaluation: a win that needs a split is then
+found in a few thousand positions. It gets an eighth of the budget. If it
+neither wins nor exhausts, the third pass treats splits and joins as
+reversible, which merges the huge classes they create and exhausts a
+position with about a third of the work, giving the proof. (Before the
+capped second pass existed, the third-pass behaviour was the only one: an
+endgame with a suit completion one split away, such as 8♥..A♥ from under
+10♥ 9♥ onto a 9♥, sat in a class of millions of positions that the
+enumeration crawled through 20K at a time with 50K overflow exits per
+chunk, and the solver answered UNKNOWN at 3M work; the second pass finds
+it in 12K.) `SPIDER_TRACE=1` prints every expanded class (pass, size,
+exits, evaluation, work) to stderr. Column order is treated as irrelevant. That is exact once the stock is
 empty; before that it ignores the option of permuting columns through an
 empty column to change which column a dealt card lands on.
 

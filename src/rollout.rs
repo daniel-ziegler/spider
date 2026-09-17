@@ -408,7 +408,7 @@ impl RolloutSolver {
         let w = self.p.weights;
         self.cand.clear();
         self.paths.clear();
-        let (cls, _) = enumerate_class(s, &self.deals, self.p.class_cap, false, None);
+        let (cls, _) = enumerate_class(s, &self.deals, self.p.class_cap, false, false, None);
         self.work += cls.members.len() as u64;
         self.stats[0] += 1;
         self.stats[1] += cls.exits.len() as u64;

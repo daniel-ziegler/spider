@@ -240,7 +240,7 @@ impl BeamSolver {
                 let mut next: Vec<Cand> = Vec::new();
                 for &nid in &frontier {
                     let s = self.nodes[nid as usize].state.to_state();
-                    let (cls, local) = enumerate_class(&s, &self.deals, self.p.class_cap, false, None);
+                    let (cls, local) = enumerate_class(&s, &self.deals, self.p.class_cap, false, false, None);
                     self.work += cls.members.len() as u64;
                     self.classes += 1;
                     if let Some(ei) = cls.win {

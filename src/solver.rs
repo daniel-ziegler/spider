@@ -545,9 +545,15 @@ pub(crate) fn legal_moves(s: &State, splits: bool, out: &mut Vec<Move>) {
 /// A move is reversible when the moved run can immediately be moved back
 /// as a whole: nothing was turned over or removed, the card it left behind
 /// is one rank higher than the run's bottom (or the column was left
-/// empty), and it did not join a same-suit predecessor (unless `splits`).
+/// empty), and it did not join a same-suit predecessor (unless `splits`,
+/// when a join can be split back). With `split_exits`, joins and moves of
+/// part of a same-suit run count as irreversible even under `splits`:
+/// classes stay small and the search orders the splits by evaluation,
+/// which finds wins that need a split quickly, whereas the classes with
+/// splits inside can run to millions of positions that the enumeration
+/// crawls through blindly (20K at a time) but exhausts more cheaply.
 #[inline]
-pub(crate) fn reversible(s: &State, t: &State, mv: Move, splits: bool) -> bool {
+pub(crate) fn reversible(s: &State, t: &State, mv: Move, splits: bool, split_exits: bool) -> bool {
     let (from, to, count) = match mv {
         Move::Deal => return false,
         Move::Move { from, to, count } => (from, to, count),
@@ -556,8 +562,11 @@ pub(crate) fn reversible(s: &State, t: &State, mv: Move, splits: bool) -> bool {
         return false;
     }
     let bottom = s.cols[from][s.len[from] as usize - count];
-    if !splits && s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
+    if (!splits || split_exits) && s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
         return false; // same-suit join (cannot be undone without a split)
+    }
+    if splits && split_exits && count < s.run_len(from) {
+        return false; // split of a same-suit run
     }
     if t.len[from] == 0 {
         return true;
@@ -574,6 +583,7 @@ pub(crate) fn enumerate_class(
     deals: &[[u8; DEAL_SIZE]],
     cap: usize,
     splits: bool,
+    split_exits: bool,
     seen: Option<&HashMap<u64, u64, IdBuild>>,
 ) -> (Class, HashMap<u64, u32, IdBuild>) {
     let stock_left = (entry.deals_done as usize) < deals.len();
@@ -599,7 +609,7 @@ pub(crate) fn enumerate_class(
                 exits.push(Exit { member: i as u32, mv, result: t });
                 break 'bfs;
             }
-            if reversible(&s, &t, mv, splits) {
+            if reversible(&s, &t, mv, splits, split_exits) {
                 let h = t.hash();
                 if local.contains_key(&h) {
                     continue;
@@ -727,6 +737,8 @@ enum Outcome {
 /// Fraction of the budget spent enumerating one stage's classes before moving
 /// on to deals (too large starves later stages, too small deals blindly).
 const STAGE_CAP_DIV: u64 = 100;
+/// Fraction of the budget given to the split-finding pass (see `solve`).
+const SPLIT_FIND_DIV: u64 = 8;
 const STAGE_CAP_MIN: u64 = 20_000;
 const END_CAP_DIV: u64 = 100;
 const DEALS_PER_CLASS: usize = 4;
@@ -831,6 +843,10 @@ pub struct Solver {
     /// Node holding the won position.
     win: Option<u32>,
     class_cap: usize,
+    /// Pass 2 (see `solve`): split moves are exits rather than class members.
+    split_exits: bool,
+    /// SPIDER_TRACE: print every expanded class to stderr.
+    trace: bool,
     debug: bool,
 }
 
@@ -863,6 +879,8 @@ impl Solver {
             seq: 0,
             win: None,
             class_cap: env_or("SPIDER_CLASS_CAP", CLASS_CAP),
+            split_exits: false,
+            trace: std::env::var_os("SPIDER_TRACE").is_some(),
             debug: std::env::var_os("SPIDER_DEBUG").is_some(),
         }
     }
@@ -878,16 +896,28 @@ impl Solver {
         };
         let mut proof_pass = false;
         if outcome == Outcome::Unsolvable && root.completed < 8 {
+            // No win without splitting same-suit runs. Pass 2 allows splits
+            // as class exits, which finds a win that needs one quickly
+            // (typically well under 100K work), but is capped because it
+            // makes exhausting a position several times dearer; pass 3
+            // treats splits as reversible for the proof.
             proof_pass = true;
             self.splits = true;
-            self.seen.clear();
-            self.member_of.clear();
-            self.nodes.clear();
-            self.stages.clear();
-            self.queue.clear();
-            self.incomplete = false;
+            self.split_exits = true;
+            self.reset_search();
+            let full = self.budget;
+            self.budget = full.min(self.work + full / SPLIT_FIND_DIV);
             let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
             outcome = self.search(root_id);
+            self.budget = full;
+            let cancelled = self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed));
+            if !matches!(outcome, Outcome::Solvable | Outcome::Unsolvable) && !cancelled {
+                self.split_exits = false;
+                self.aborted = false;
+                self.reset_search();
+                let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
+                outcome = self.search(root_id);
+            }
         }
         let verdict = match outcome {
             Outcome::Solvable => Verdict::Solvable,
@@ -904,6 +934,16 @@ impl Solver {
             elapsed: start.elapsed(),
             line,
         }
+    }
+
+    /// Forget everything searched so far (between passes).
+    fn reset_search(&mut self) {
+        self.seen.clear();
+        self.member_of.clear();
+        self.nodes.clear();
+        self.stages.clear();
+        self.queue.clear();
+        self.incomplete = false;
     }
 
     #[inline]
@@ -935,9 +975,15 @@ impl Solver {
     /// collect its irreversible exits.
     fn expand_class(&mut self, entry: &State) -> Class {
         let splits = self.splits || (self.cfg.end_splits && !self.stock_left(entry));
-        let (cls, local) = enumerate_class(entry, &self.deals, self.class_cap, splits, Some(&self.member_of));
+        let (cls, local) = enumerate_class(entry, &self.deals, self.class_cap, splits, self.split_exits, Some(&self.member_of));
         self.work += cls.members.len() as u64;
         self.classes += 1;
+        if self.trace {
+            eprintln!(
+                "class {} splits {} members {} exits {} truncated {} eval {} work {}",
+                self.classes, splits, cls.members.len(), cls.exits.len(), cls.id == entry.hash() && cls.members.len() >= self.class_cap.min(cls.members.len() + 1) - 1, entry.eval(&self.cfg.weights), self.work
+            );
+        }
         let id = cls.id;
         for (h, _) in local {
             self.member_of.insert(h, id);
