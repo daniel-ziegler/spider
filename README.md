@@ -25,6 +25,8 @@ line marks where a stack is broken and will have to be cleared.
 | `d`            | deal ten cards from the stock (not allowed with an empty column) |
 | `u` / `r`      | undo / redo. Undoing past a move that revealed information (a card flip or a deal) asks for confirmation |
 | `s`            | toggle the peeking solver                                     |
+| `H`            | superhint: the solver line shows the solver's next move, and the cards of the line's next *irreversible* move are marked in green (bright: the cards it moves, dark: the card they land on). Turns the solver on if it was off. See [Superhint](#superhint-following-the-solvers-line) |
+| `p` / `P`      | with superhint on: play the solver's next move / play through its next irreversible move. Moves that follow the line do not restart the solver |
 | `n` / `R`      | new random deal / restart the same deal (its moves go onto the redo stack, so `r` replays them) |
 | `?` / `q`      | help / quit                                                   |
 | `S`            | save: records the command line that resumes the current position (settings, history and redo stack), writes it to `~/.local/state/spider/resume.sh` immediately and prints it to the terminal when you quit, so `sh ~/.local/state/spider/resume.sh` or the printed command brings the game back |
@@ -134,6 +136,30 @@ solves seed 82 (6 s, 8.5M work), which no class-search configuration solves
 at 30M work, and both solve seed 91 in about 3 s. On the 117 hard endgame
 positions of the cut set they solve 24 (NRPA) and 22 (beam) against 44 for
 the class search, with 4 positions only they solve.
+
+### Superhint: following the solver's line
+
+`H` shows the winning line's next move on the solver line, marks its next
+irreversible move on the table, and lets `p`/`P` play it. Irreversible is
+the solver's own notion: a move that leaves an equivalence class (deal,
+suit completion, card flip, same-suit join, or leaving a non-linkage
+behind); the moves before it are shuffles that only prepare it. As long as
+the moves played (by `p`, `P`, or by hand) are the line's own, the line is
+consumed instead of re-solved, and undo walks back along it; any other move
+restarts the solver.
+
+Raw solver lines are long: a 4-suit line is typically 500–800 moves where
+150–250 would do, because each class is crossed by the shortest route to
+the exit the search happened to pick, not to the best one. `lineopt::shorten`
+walks the line and from each position runs a bounded breadth-first search
+over all legal moves for the farthest later position of the line, splicing
+in the search path when it is shorter; passes repeat until nothing improves,
+and the result is replayed to check it still wins (an order-sensitive hash
+is used, since the solver's hash ignores column order). It runs in the
+background in two stages (500 then 4000 positions per search point): the
+first lands in about 0.2 s and removes 40–45% of the moves, the second takes
+1–3 s for another 10–15% (seed 1: 828 → 486 → 436). `SPIDER_SHORTEN=cap`
+makes `bench` report shortened lengths and times.
 
 ### Portfolio
 

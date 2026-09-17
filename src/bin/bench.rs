@@ -27,9 +27,16 @@ fn main() {
         };
         total_nodes += r.nodes;
         total_time += r.elapsed.as_secs_f64();
+        let mut shortened = String::new();
         match r.verdict {
             Verdict::Solvable => {
                 solv += 1;
+                // SPIDER_SHORTEN=cap: also shorten the line and report it.
+                if let Some(cap) = std::env::var("SPIDER_SHORTEN").ok().and_then(|v| v.parse::<usize>().ok()) {
+                    let t0 = std::time::Instant::now();
+                    let short = spider::lineopt::shorten(&g, &r.line, cap, &std::sync::atomic::AtomicBool::new(false));
+                    shortened = format!(" short {:>4} {:>6.2}s", short.len(), t0.elapsed().as_secs_f64());
+                }
                 for mv in &r.line {
                     g.apply(*mv).expect("line legal");
                 }
@@ -39,7 +46,7 @@ fn main() {
             Verdict::Unknown => unk += 1,
         }
         println!(
-            "seed {seed:>5}: {:<10?} work {:>9} classes {:>6} line {:>4} {:>7.3}s {}",
+            "seed {seed:>5}: {:<10?} work {:>9} classes {:>6} line {:>4} {:>7.3}s {}{shortened}",
             r.verdict, r.nodes, r.classes, r.line.len(), r.elapsed.as_secs_f64(), r.config
         );
     }

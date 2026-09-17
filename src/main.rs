@@ -8,12 +8,64 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use spider::game::{encode_moves, parse_moves, Card, Game, Move, NUM_COLS};
+use spider::lineopt::{commit_kind, shorten, Commit};
 use spider::solver::{Config, SolveResult, SolverHandle, Verdict};
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_BUDGET: u64 = 3_000_000;
+/// Search caps of the successive line-shortening passes run in the
+/// background once the solver finds a winning line (see `lineopt`).
+const SHORTEN_CAPS: [usize; 2] = [500, 4000];
+
+/// The solver's winning line from the current position, kept in step with
+/// the game as long as the moves played are the line's own.
+struct Line {
+    /// Moves still to play.
+    moves: Vec<Move>,
+    /// Moves of the line already played (undo walks back through them).
+    played: Vec<Move>,
+    /// Shortening passes completed.
+    stage: usize,
+    opt: Option<LineOpt>,
+    /// The first irreversible move of the line, for the superhint highlight.
+    commit: Option<CommitInfo>,
+}
+
+/// A background shortening pass on the line as it was when it started.
+struct LineOpt {
+    rx: mpsc::Receiver<Vec<Move>>,
+    cancel: Arc<AtomicBool>,
+    /// `played.len()` when the pass started; moves played since are
+    /// stripped from its result if it agrees with them.
+    base: usize,
+}
+
+impl Drop for LineOpt {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Where the line first commits, in the coordinates of the current position.
+struct CommitInfo {
+    /// Index into `Line::moves` of the committing move.
+    idx: usize,
+    kind: Commit,
+    /// Positions (column, index) of the cards it moves that are already on
+    /// the table, and of the card they land on.
+    cards: Vec<(usize, usize)>,
+    dest: Option<(usize, usize)>,
+}
+
+/// What just happened to the game, for keeping the solver's line in step.
+enum Change {
+    Played(Move),
+    Undone(Move),
+}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Prompt {
@@ -40,6 +92,9 @@ struct App {
     hints: Option<Vec<Move>>,
     /// Index into `hints` of the hint currently shown.
     hint_idx: Option<usize>,
+    /// Superhint: show the solver's next move and highlight its next commit.
+    superhint: bool,
+    line: Option<Line>,
     budget: u64,
     threads: usize,
     quit: bool,
@@ -63,6 +118,8 @@ impl App {
             solver_result: None,
             hints: None,
             hint_idx: None,
+            superhint: false,
+            line: None,
             budget,
             threads,
             quit: false,
@@ -167,6 +224,7 @@ impl App {
     fn restart_solver(&mut self) {
         self.solver = None;
         self.solver_result = None;
+        self.line = None;
         self.hints = None;
         self.hint_idx = None;
         if self.solver_on && !self.game.is_won() {
@@ -177,14 +235,168 @@ impl App {
     /// Returns true if the screen needs redrawing: a result arrived, or the
     /// solver is still running (its progress line changes).
     fn poll_solver(&mut self) -> bool {
+        let mut changed = false;
         if let Some(h) = &self.solver {
             if let Some(r) = h.result() {
+                if r.verdict == Verdict::Solvable && !r.line.is_empty() {
+                    self.line = Some(Line { moves: r.line.clone(), played: Vec::new(), stage: 0, opt: None, commit: None });
+                    self.refresh_line();
+                }
                 self.solver_result = Some(r);
                 self.solver = None;
             }
-            return true;
+            changed = true;
         }
-        false
+        if self.poll_shortener() {
+            changed = true;
+        }
+        changed
+    }
+
+    /// Collect a finished shortening pass. Its line starts from the position
+    /// the pass began at, so the moves played since then must match its
+    /// beginning, otherwise the pass is rerun from here.
+    fn poll_shortener(&mut self) -> bool {
+        let Some(line) = &mut self.line else { return false };
+        let Some(opt) = &line.opt else { return false };
+        let result = match opt.rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                line.opt = None;
+                return false;
+            }
+        };
+        let base = opt.base;
+        line.opt = None;
+        if line.played.len() >= base {
+            let since = &line.played[base..];
+            if result.len() >= since.len() && result[..since.len()] == *since {
+                let rest = result[since.len()..].to_vec();
+                if rest.len() <= line.moves.len() {
+                    line.moves = rest;
+                }
+                line.stage += 1;
+            }
+        }
+        self.refresh_line();
+        true
+    }
+
+    /// The line changed: recompute where it commits and keep shortening it.
+    fn refresh_line(&mut self) {
+        let Some(line) = &mut self.line else { return };
+        line.commit = first_commit(&self.game, &line.moves);
+        if line.opt.is_none() && line.stage < SHORTEN_CAPS.len() && !line.moves.is_empty() {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (tx, rx) = mpsc::channel();
+            let (game, moves, cap, c2) = (self.game.clone(), line.moves.clone(), SHORTEN_CAPS[line.stage], cancel.clone());
+            std::thread::Builder::new()
+                .name("spider-shorten".into())
+                .spawn(move || {
+                    let r = shorten(&game, &moves, cap, &c2);
+                    if !c2.load(Ordering::Relaxed) {
+                        let _ = tx.send(r);
+                    }
+                })
+                .expect("spawn shortener thread");
+            line.opt = Some(LineOpt { rx, cancel, base: line.played.len() });
+        }
+    }
+
+    /// Keep the line in step with a move played or undone; returns false if
+    /// the game left the line (the solver must start over).
+    fn track_line(&mut self, change: &Change) -> bool {
+        let Some(line) = &mut self.line else { return false };
+        match *change {
+            Change::Played(mv) => {
+                if line.moves.first() != Some(&mv) {
+                    return false;
+                }
+                line.moves.remove(0);
+                line.played.push(mv);
+            }
+            Change::Undone(mv) => {
+                if line.played.last() != Some(&mv) {
+                    return false;
+                }
+                line.played.pop();
+                line.moves.insert(0, mv);
+                if line.opt.as_ref().is_some_and(|o| o.base > line.played.len()) {
+                    line.opt = None;
+                }
+            }
+        }
+        line.commit = first_commit(&self.game, &line.moves);
+        if line.moves.is_empty() {
+            line.opt = None;
+        }
+        true
+    }
+
+    /// H: superhint shows the solver's next move on the solver line and
+    /// marks its next irreversible move in green. It needs the solver.
+    fn toggle_superhint(&mut self) {
+        self.superhint = !self.superhint;
+        if self.superhint {
+            if !self.solver_on {
+                self.solver_on = true;
+                self.restart_solver();
+            }
+            self.msg = "Superhint on: the solver's next move is shown above; green marks its next commit (p plays a move, P plays through the commit).".into();
+        } else {
+            self.msg = "Superhint off.".into();
+        }
+    }
+
+    /// p: play the solver's next move. P: play up to and including the
+    /// next irreversible move.
+    fn play_line(&mut self, through_commit: bool) {
+        if !self.superhint {
+            self.msg = "Superhint is off (H turns it on).".into();
+            return;
+        }
+        let Some(line) = &self.line else {
+            self.msg = if self.solver.is_some() { "The solver is still thinking.".into() } else { "No winning line to follow here.".into() };
+            return;
+        };
+        if line.moves.is_empty() {
+            self.msg = "The line is finished.".into();
+            return;
+        }
+        let n = if through_commit { line.commit.as_ref().map_or(line.moves.len(), |c| c.idx + 1) } else { 1 };
+        let mut played = 0;
+        let mut last = None;
+        for _ in 0..n {
+            let Some(&mv) = self.line.as_ref().and_then(|l| l.moves.first()) else { break };
+            if self.game.apply(mv).is_err() {
+                break;
+            }
+            played += 1;
+            last = Some(mv);
+            self.after_change(Change::Played(mv));
+        }
+        self.sel = None;
+        if let Some(mv) = last {
+            if let Move::Move { to, .. } = mv {
+                self.cursor = to;
+            }
+            if !self.game.is_won() {
+                let what = describe_move(&self.game_before(played), mv);
+                self.msg = if played == 1 { format!("Played {what}.") } else { format!("Played {played} moves, ending with {what}.") };
+            }
+        } else {
+            self.msg = "Could not play the line's move here.".into();
+        }
+    }
+
+    /// The position `back` moves ago (for describing a move just played).
+    fn game_before(&self, back: usize) -> Game {
+        let mut g = self.game.clone();
+        for _ in 0..back {
+            g.undo();
+        }
+        g
     }
 
     fn column_key(&mut self, col: usize) {
@@ -232,7 +444,7 @@ impl App {
             Ok(()) => {
                 self.sel = None;
                 self.cursor = to;
-                self.after_change();
+                self.after_change(Change::Played(Move::Move { from, to, count }));
                 let rec = self.game.history().last().unwrap();
                 if !rec.completed.is_empty() {
                     self.msg = format!("Completed a suit! {}/8 done.", self.game.completed.len());
@@ -250,7 +462,7 @@ impl App {
         match self.game.apply(Move::Deal) {
             Ok(()) => {
                 self.sel = None;
-                self.after_change();
+                self.after_change(Change::Played(Move::Deal));
                 self.msg = format!("Dealt. {} deals left.", self.game.deals_remaining());
             }
             Err(e) => self.msg = format!("Cannot deal: {e}."),
@@ -272,7 +484,7 @@ impl App {
     fn do_undo(&mut self) {
         if let Some(rec) = self.game.undo() {
             self.sel = None;
-            self.after_change();
+            self.after_change(Change::Undone(rec.mv));
             self.msg = match rec.mv {
                 Move::Deal => "Undid the deal.".into(),
                 Move::Move { from, to, count } => {
@@ -285,7 +497,7 @@ impl App {
     fn redo(&mut self) {
         if let Some(rec) = self.game.redo() {
             self.sel = None;
-            self.after_change();
+            self.after_change(Change::Played(rec.mv));
             self.msg = match rec.mv {
                 Move::Deal => "Redid the deal.".into(),
                 Move::Move { from, to, .. } => format!("Redid the move from {} to {}.", label(from), label(to)),
@@ -295,8 +507,15 @@ impl App {
         }
     }
 
-    fn after_change(&mut self) {
-        self.restart_solver();
+    fn after_change(&mut self, change: Change) {
+        if self.track_line(&change) {
+            // Still on the solver's line: the verdict stands and the rest of
+            // the line is the new line.
+            self.hints = None;
+            self.hint_idx = None;
+        } else {
+            self.restart_solver();
+        }
         if self.game.is_won() {
             self.msg = format!("You won! Score {}. Press n for a new game.", self.game.score());
         } else if !self.game.has_any_move() {
@@ -368,6 +587,9 @@ impl App {
             KeyCode::Char('r') => self.redo(),
             KeyCode::Char('s') => self.toggle_solver(),
             KeyCode::Char('S') => self.save_requested(),
+            KeyCode::Char('H') => self.toggle_superhint(),
+            KeyCode::Char('p') => self.play_line(false),
+            KeyCode::Char('P') => self.play_line(true),
             KeyCode::Char('n') => self.prompt = Prompt::ConfirmNew,
             KeyCode::Char('R') => self.prompt = Prompt::ConfirmRestart,
             KeyCode::Char('?') => self.prompt = Prompt::Help,
@@ -406,29 +628,14 @@ impl App {
         };
         self.hint_idx = Some(i);
         let mv = hints[i];
-        let what = match mv {
-            Move::Deal => {
-                self.sel = None;
-                "deal".to_string()
-            }
+        match mv {
+            Move::Deal => self.sel = None,
             Move::Move { from, to, count } => {
                 self.sel = Some((from, count));
                 self.cursor = to;
-                let col = &self.game.columns[from];
-                let top = col[col.len() - 1];
-                let bottom = col[col.len() - count];
-                let cards = if count == 1 {
-                    format!("{}{}", top.rank_str(), top.suit_char())
-                } else {
-                    format!("{}{}..{}{}", top.rank_str(), top.suit_char(), bottom.rank_str(), bottom.suit_char())
-                };
-                let onto = match self.game.columns[to].last() {
-                    Some(c) => format!("onto {}{} in column {}", c.rank_str(), c.suit_char(), label(to)),
-                    None => format!("to empty column {}", label(to)),
-                };
-                format!("{cards} from column {} {onto}", label(from))
             }
-        };
+        }
+        let what = describe_move(&self.game, mv);
         self.msg = format!(
             "Hint {}/{}: {what}.  {} plays it, Tab/Shift-Tab cycle.",
             i + 1,
@@ -451,6 +658,66 @@ impl App {
 
 fn label(col: usize) -> String {
     if col == 9 { "0".into() } else { (col + 1).to_string() }
+}
+
+/// "7♠..5♠ from column 3 onto 8♥ in column 5", or "deal".
+fn describe_move(game: &Game, mv: Move) -> String {
+    match mv {
+        Move::Deal => "deal".to_string(),
+        Move::Move { from, to, count } => {
+            let col = &game.columns[from];
+            if count == 0 || count > col.len() {
+                return format!("{count} cards from column {} to column {}", label(from), label(to));
+            }
+            let top = col[col.len() - 1];
+            let bottom = col[col.len() - count];
+            let cards = if count == 1 { top.to_string() } else { format!("{top}..{bottom}") };
+            let onto = match game.columns[to].last() {
+                Some(c) => format!("onto {c} in column {}", label(to)),
+                None => format!("to empty column {}", label(to)),
+            };
+            format!("{cards} from column {} {onto}", label(from))
+        }
+    }
+}
+
+/// Follow `moves` from `game` up to its first irreversible move and report
+/// which cards of the current position that move touches. Cards not yet on
+/// the table (dealt or turned over along the way) are left out.
+fn first_commit(game: &Game, moves: &[Move]) -> Option<CommitInfo> {
+    let mut g = game.clone();
+    // Each card's position in the current game, or None if it arrives later.
+    let mut tags: Vec<Vec<Option<(usize, usize)>>> =
+        (0..NUM_COLS).map(|c| (0..g.columns[c].len()).map(|i| Some((c, i))).collect()).collect();
+    for (idx, &mv) in moves.iter().enumerate() {
+        if let Some(kind) = commit_kind(&g, mv) {
+            let (cards, dest) = match mv {
+                Move::Deal => (Vec::new(), None),
+                Move::Move { from, to, count } => {
+                    let n = tags[from].len();
+                    (tags[from][n.saturating_sub(count)..].iter().flatten().copied().collect(), tags[to].last().copied().flatten())
+                }
+            };
+            return Some(CommitInfo { idx, kind, cards, dest });
+        }
+        if g.apply(mv).is_err() {
+            return None;
+        }
+        match mv {
+            Move::Deal => tags.iter_mut().for_each(|t| t.push(None)),
+            Move::Move { from, to, count } => {
+                let n = tags[from].len();
+                let moved: Vec<_> = tags[from].drain(n.saturating_sub(count)..).collect();
+                tags[to].extend(moved);
+            }
+        }
+        let rec = g.history().last().unwrap();
+        for &(col, _) in &rec.completed {
+            let n = tags[col].len();
+            tags[col].truncate(n.saturating_sub(13));
+        }
+    }
+    None
 }
 
 /// The path to re-exec. `current_exe` reads /proc/self/exe, which turns
@@ -504,17 +771,27 @@ const CELL_W: u16 = 6;
 const LEFT: u16 = 2;
 const TOP: u16 = 5;
 
+/// Superhint marking of a card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    None,
+    /// Moved by the line's next irreversible move.
+    Moved,
+    /// The card that move lands on.
+    Dest,
+}
+
 /// One displayed row of a column.
 enum Slot {
     /// A face-up card: (card, selected, the card on top of it is not one
-    /// rank lower, so the stack is broken here).
-    Card(Card, bool, bool),
+    /// rank lower, so the stack is broken here, superhint mark).
+    Card(Card, bool, bool, Mark),
     Hidden(usize),
     More(usize),
     Empty,
 }
 
-fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, avail: usize) -> Vec<Slot> {
+fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, commit: Option<&CommitInfo>, avail: usize) -> Vec<Slot> {
     let cards = &game.columns[col];
     if cards.is_empty() {
         return vec![Slot::Empty];
@@ -523,6 +800,11 @@ fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, avail: usi
     let selected_from = match sel {
         Some((c, n)) if c == col => cards.len() - n,
         _ => usize::MAX,
+    };
+    let mark = |i: usize| match commit {
+        Some(c) if c.cards.contains(&(col, i)) => Mark::Moved,
+        Some(c) if c.dest == Some((col, i)) => Mark::Dest,
+        _ => Mark::None,
     };
     let mut slots = Vec::new();
     let mut up_start = 0;
@@ -536,7 +818,7 @@ fn column_slots(game: &Game, col: usize, sel: Option<(usize, usize)>, avail: usi
                 Slot::Hidden(1)
             } else {
                 let broken = i + 1 < cards.len() && cards[i + 1].rank() + 1 != cards[i].rank();
-                Slot::Card(cards[i], i >= selected_from, broken)
+                Slot::Card(cards[i], i >= selected_from, broken, mark(i))
             }
         })
         .collect();
@@ -561,12 +843,14 @@ fn fit(s: &str, w: u16) -> String {
 /// the screen width (`? help` and `q quit` always stay).
 fn key_bar(w: u16) -> String {
     // (text, drop priority: lower is dropped first; u8::MAX never)
-    let entries: [(&str, u8); 15] = [
+    let entries: [(&str, u8); 17] = [
         ("1-9,0 pick/place", 9),
         ("←→ cursor", 2),
         ("↑↓ count", 1),
         ("⏎ act", 0),
         ("Tab hint", 8),
+        ("H superhint", 6),
+        ("p/P play", 5),
         ("d deal", 10),
         ("u undo", 7),
         ("r redo", 4),
@@ -643,13 +927,30 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
             Verdict::Solvable | Verdict::Unsolvable => "",
             Verdict::Unknown => "  budget exhausted",
         };
-        queue!(
-            out,
-            Print(detail),
-            SetForegroundColor(Color::DarkGrey),
-            Print(format!("  {} positions, {:.1}s, {}", fmt_count(r.nodes), r.elapsed.as_secs_f64(), r.config)),
-            ResetColor
-        )?;
+        queue!(out, Print(detail))?;
+        match (&app.line, app.superhint) {
+            (Some(line), true) if !line.moves.is_empty() => {
+                // Superhint: the line's next move, then where it commits.
+                let next = line.moves[0];
+                queue!(out, Print("  "), SetForegroundColor(Color::Cyan), Print(fit(&format!("▶ {}", describe_move(g, next)), w.saturating_sub(24))), ResetColor)?;
+                let commit = match &line.commit {
+                    Some(c) if c.idx == 0 => format!("  this move {}", c.kind.describe()),
+                    Some(c) => format!("  commit at move {}: {}", c.idx + 1, c.kind.describe()),
+                    None => String::new(),
+                };
+                queue!(out, SetForegroundColor(Color::Green), Print(commit), ResetColor)?;
+                let shortening = if line.opt.is_some() { ", shortening…" } else { "" };
+                queue!(out, SetForegroundColor(Color::DarkGrey), Print(format!("  {} to go{shortening}", line.moves.len())), ResetColor)?;
+            }
+            _ => {
+                queue!(
+                    out,
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!("  {} positions, {:.1}s, {}", fmt_count(r.nodes), r.elapsed.as_secs_f64(), r.config)),
+                    ResetColor
+                )?;
+            }
+        }
     } else if let Some(hnd) = &app.solver {
         queue!(
             out,
@@ -679,7 +980,8 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
 
     // Columns, drawn row by row so each screen row is cleared then filled.
     let avail = (h as usize).saturating_sub(TOP as usize + 2).max(1);
-    let slots: Vec<Vec<Slot>> = (0..NUM_COLS).map(|c| column_slots(g, c, app.sel, avail)).collect();
+    let commit = if app.superhint { app.line.as_ref().and_then(|l| l.commit.as_ref()) } else { None };
+    let slots: Vec<Vec<Slot>> = (0..NUM_COLS).map(|c| column_slots(g, c, app.sel, commit, avail)).collect();
     let shelf_x = LEFT + NUM_COLS as u16 * CELL_W + 2;
     let shelf = w > shelf_x + 8;
     if shelf {
@@ -696,12 +998,17 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
                 Slot::Hidden(1) => queue!(out, SetForegroundColor(Color::DarkBlue), Print(" ▒▒▒▒ "), ResetColor)?,
                 Slot::Hidden(n) => queue!(out, SetForegroundColor(Color::DarkBlue), Print(format!(" ▒{:<3}", format!("×{n}"))), ResetColor)?,
                 Slot::More(n) => queue!(out, SetForegroundColor(Color::DarkGrey), Print(format!(" +{n:<3}")), ResetColor)?,
-                Slot::Card(card, selected, broken) => {
+                Slot::Card(card, selected, broken, mark) => {
                     let color = if card.is_red() { Color::Red } else { Color::White };
-                    if *selected {
-                        queue!(out, SetBackgroundColor(Color::DarkYellow), SetForegroundColor(if card.is_red() { Color::Red } else { Color::Black }))?;
-                    } else {
-                        queue!(out, SetForegroundColor(color))?;
+                    let bg = match (*selected, *mark) {
+                        (true, _) => Some(Color::DarkYellow),
+                        (false, Mark::Moved) => Some(Color::Green),
+                        (false, Mark::Dest) => Some(Color::DarkGreen),
+                        (false, Mark::None) => None,
+                    };
+                    match bg {
+                        Some(bg) => queue!(out, SetBackgroundColor(bg), SetForegroundColor(if card.is_red() { Color::Red } else { Color::Black }))?,
+                        None => queue!(out, SetForegroundColor(color))?,
                     }
                     // Underline a card whose cover is not one rank lower: the
                     // line marks where the stack breaks.
@@ -778,6 +1085,9 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "  d          deal from the stock",
         "  u / r      undo / redo (undoing past a reveal asks for confirmation)",
         "  s          toggle the peeking solver (uses hidden cards + stock order)",
+        "  H          superhint: show the solver's next move; green marks the cards of",
+        "             its next irreversible move (bright: moved, dark: landing card)",
+        "  p / P      play the solver's next move / play through its next commit",
         "  n / R      new random game / restart this deal;   q quits",
         "  S          save: print the command that resumes this position when you quit",
         "  Ctrl-R     re-exec the program (picks up a rebuilt binary) at this position",
