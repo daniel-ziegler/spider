@@ -142,6 +142,9 @@ impl App {
         for _ in redo {
             self.game.undo();
         }
+        if moves.is_empty() && redo.is_empty() {
+            return Ok(()); // a fresh start, not a reload
+        }
         self.msg = format!("Reloaded at move {}.", self.game.move_count());
         self.restart_solver();
         Ok(())
