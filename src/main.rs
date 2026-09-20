@@ -784,6 +784,21 @@ enum Mark {
     Dest,
 }
 
+/// Each suit its own colour so they tell apart at a glance: spades white,
+/// hearts red, diamonds orange, clubs green. On a highlighted (coloured)
+/// background spades turn black and the others darken.
+fn suit_color(card: Card, on_bg: bool) -> Color {
+    match (card.suit(), on_bg) {
+        (0, false) => Color::White,
+        (0, true) => Color::Black,
+        (1, _) => Color::Red,
+        (2, false) => Color::AnsiValue(208),
+        (2, true) => Color::AnsiValue(166),
+        (3, false) => Color::Green,
+        (_, _) => Color::DarkGreen,
+    }
+}
+
 /// One displayed row of a column.
 enum Slot {
     /// A face-up card: (card, selected, the card on top of it is not one
@@ -1002,7 +1017,7 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
                 Slot::Hidden(n) => queue!(out, SetForegroundColor(Color::DarkBlue), Print(format!(" ▒{:<3}", format!("×{n}"))), ResetColor)?,
                 Slot::More(n) => queue!(out, SetForegroundColor(Color::DarkGrey), Print(format!(" +{n:<3}")), ResetColor)?,
                 Slot::Card(card, selected, broken, mark) => {
-                    let color = if card.is_red() { Color::Red } else { Color::White };
+                    let color = suit_color(*card, false);
                     let bg = match (*selected, *mark) {
                         (true, _) => Some(Color::DarkYellow),
                         (false, Mark::Moved) => Some(Color::Green),
@@ -1010,7 +1025,7 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
                         (false, Mark::None) => None,
                     };
                     match bg {
-                        Some(bg) => queue!(out, SetBackgroundColor(bg), SetForegroundColor(if card.is_red() { Color::Red } else { Color::Black }))?,
+                        Some(bg) => queue!(out, SetBackgroundColor(bg), SetForegroundColor(suit_color(*card, true)))?,
                         None => queue!(out, SetForegroundColor(color))?,
                     }
                     // Underline a card whose cover is not one rank lower: the
@@ -1032,7 +1047,7 @@ fn draw<O: Write>(out: &mut O, app: &App) -> io::Result<()> {
                 queue!(
                     out,
                     cursor::MoveTo(shelf_x, TOP + row as u16),
-                    SetForegroundColor(if card.is_red() { Color::Red } else { Color::White }),
+                    SetForegroundColor(suit_color(card, false)),
                     Print(format!("K{}..A{}", card.suit_char(), card.suit_char())),
                     ResetColor
                 )?;
