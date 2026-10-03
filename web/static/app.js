@@ -43,6 +43,7 @@ let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
+let keyboardUsed = store.get('spider:keyboard', false); // then columns show their number keys
 let L; // layout, see computeLayout
 
 // ---------------------------------------------------------------- saving and loading
@@ -448,7 +449,7 @@ function computeLayout() {
   const ch = Math.round(cw * 1.4);
   const font = Math.round(Math.max(11, Math.min(22, cw * 0.27)));
   L = {
-    gap, cw, ch, font, top0: 10,
+    gap, cw, ch, font, top0: keyboardUsed ? 26 : 10,
     left0: (bw - cw * NUM_COLS - gap * (NUM_COLS - 1)) / 2,
     down: Math.max(4, Math.round(ch * 0.09)),
     up: Math.max(Math.round(ch * 0.24), Math.round(font * 1.35)),
@@ -492,7 +493,11 @@ function render() {
       else html += faceHtml(card, style, sel && sel.col === c && i >= col.length - sel.count ? 'sel' : '', attrs);
     });
   }
-  if (showCursor) html += `<div class="cursor-mark" style="left:${colX(cursor)}px"></div>`;
+  if (keyboardUsed) {
+    for (let c = 0; c < NUM_COLS; c++) {
+      html += `<div class="col-num${showCursor && c === cursor ? ' cursor' : ''}" style="left:${colX(c)}px">${(c + 1) % 10}</div>`;
+    }
+  }
   board.innerHTML = html;
 
   const small = L.cw * 0.7;
@@ -648,6 +653,12 @@ document.addEventListener('keydown', e => {
   else if (k === '?') helpDialog();
   else return;
   e.preventDefault();
+  if (!keyboardUsed) {
+    keyboardUsed = true;
+    store.set('spider:keyboard', true);
+    computeLayout();
+    render();
+  }
 });
 
 // ---------------------------------------------------------------- start

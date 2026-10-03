@@ -92,14 +92,16 @@ button.primary:hover { background: #ffe27a; }
   border: 2px dashed #ffffff22;
   border-radius: calc(var(--cw) * 0.08);
 }
-.cursor-mark {
+.col-num {
   position: absolute;
-  top: 2px;
-  height: 4px;
+  top: 3px;
   width: var(--cw);
-  border-radius: 2px;
-  background: var(--accent);
+  text-align: center;
+  font: 600 12px/18px system-ui, sans-serif;
+  color: var(--ink-dim);
+  opacity: 0.7;
 }
+.col-num.cursor { color: #222; background: var(--accent); border-radius: 4px; opacity: 1; }
 .card {
   position: absolute;
   width: var(--cw);
