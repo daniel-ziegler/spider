@@ -150,6 +150,41 @@ at 30M work, and both solve seed 91 in about 3 s. On the 117 hard endgame
 positions of the cut set they solve 24 (NRPA) and 22 (beam) against 44 for
 the class search, with 4 positions only they solve.
 
+### Non-peeking player
+
+`src/human.rs` plays without looking: every decision is made on a masked
+copy of the game in which face-down cards and the stock are blanks, so it
+knows only what a person at the table knows. It plays roughly the way a
+person does, with very little compute (about 2,000 positions per decision,
+15–40 ms for a whole game):
+
+* Look a few moves ahead: a breadth-first search over the legal moves from
+  the visible position, stopping at any move that turns a card over (what
+  comes up is unknown). Splits of a same-suit run are only tried onto a card
+  of the same suit, and with one suit also into an empty column.
+* Play the line to the best position found if it scores better than the
+  current one, then look again. The score is visible-only: completed suits,
+  hidden cards, columns with nothing hidden, empty columns, same-suit and
+  cross-suit linkages, run lengths. Only strict improvements are played
+  between card turns, so it cannot cycle.
+* If nothing scores better, turn over any card that can be reached at all
+  (even at the cost of an empty column: a deal fills it anyway).
+* Otherwise deal, first arranging the best position that fills every empty
+  column; with the stock gone, give up.
+
+| suits | won, seeds 1–200 | won, seeds 201–400 | suits completed per deal |
+|-------|------------------|--------------------|--------------------------|
+| 1     | 75%              | 69%                | 6.9                      |
+| 2     | 33%              | 32%                | 4.0                      |
+| 4     | 8%               | 9%                 | 0.9                      |
+
+Weights were tuned on seeds 1–200 (2 and 4 suits). `cargo run --release
+--bin human -- <suits> <first_seed> <count>` plays a range of seeds;
+`SPIDER_H_*` (`NODES`, `SPLITS`, `HIDDEN`, `CLEAR`, `EMPTY`, `SAME`, `DIFF`,
+`WRONG`, `RUN_SQ`, `COMPLETED`) override the parameters, `SPIDER_H_TRACE=1`
+prints every decision with the position it was made from and
+`SPIDER_H_QUIET=1` only the summary.
+
 ### Superhint: following the solver's line
 
 `H` shows the winning line's next move on the solver line, marks its next
