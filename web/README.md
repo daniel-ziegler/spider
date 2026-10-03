@@ -13,8 +13,9 @@ keyboard), log in, and wins are recorded with their move count and real undos.
 In-progress games are saved only in the browser. A win stores the length of
 the winning line (undone moves don't count), the number of undos, and the
 number of **real undos**: undos that took back a card turned over or a deal.
-Restarting a deal counts as undoing every move back to the start. Results for
-a deal are shown only to players who have won it.
+Restarting a deal counts as one undo, and as one real undo if it takes back
+cards you have seen. Results for a deal are shown only to players who have
+won it.
 
 ## Running locally
 
