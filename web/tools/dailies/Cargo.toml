@@ -1,0 +1,12 @@
+[package]
+name = "dailies"
+version = "0.1.0"
+edition = "2021"
+description = "Picks each day's challenge deals, checked winnable by the peeking solver"
+
+[dependencies]
+spider = { path = "../../.." }
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3

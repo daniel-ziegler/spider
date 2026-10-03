@@ -7,6 +7,8 @@ description = "Web Spider Solitaire for friends: static client, accounts, record
 [dependencies]
 argon2 = "0.6.0"
 axum = "0.8.9"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

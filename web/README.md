@@ -16,6 +16,22 @@ number of **real undos**: undos that took back a card turned over or a deal.
 Restarting a deal counts as undoing every move back to the start. Results for
 a deal are shown only to players who have won it.
 
+## Daily challenges
+
+Every day (midnight to midnight Pacific time) has three challenges: 1, 2 and 4
+suits. They are listed in `challenges.txt` (`date suits seed`), which is built
+into the server. `tools/dailies` picks them: for each date and suit count, the
+first candidate seed (from a hash of the date) that the peeking solver proves
+winnable. It keeps dates already in the file, so extending the list never
+changes a past challenge:
+
+```
+cd tools/dailies && cargo run --release -- 2028-01-01 2028-12-31
+```
+
+The list runs through 2027-12-31, and `cargo test` fails once today is past
+the end of it.
+
 ## Running locally
 
 ```

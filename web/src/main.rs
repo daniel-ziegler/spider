@@ -17,13 +17,33 @@ use axum::{Json, Router};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Seeds stay within JavaScript's exact integer range.
 const MAX_SEED: u64 = (1 << 53) - 1;
 const SESSION_COOKIE: &str = "session";
+
+/// Daily challenges `(date, suits, seed)` in date order, from challenges.txt
+/// (made by tools/dailies). Days start at midnight Pacific time.
+static CHALLENGES: LazyLock<Vec<(String, u8, u64)>> = LazyLock::new(|| {
+    let mut v: Vec<(String, u8, u64)> = include_str!("../challenges.txt")
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f[0].to_string(), f[1].parse().unwrap(), f[2].parse().unwrap())
+        })
+        .collect();
+    v.sort();
+    v
+});
+
+fn today() -> String {
+    chrono::Utc::now().with_timezone(&chrono_tz::America::Los_Angeles).date_naive().to_string()
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -284,6 +304,41 @@ async fn get_results(State(app): AppState, headers: HeaderMap, Path((suits, seed
     results(&app, &user, suits, seed).map(Json)
 }
 
+/// Challenges up to today, newest day first, with how many players have won
+/// each and (when logged in) the player's own best win of it.
+async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let user = current_user(&app, &headers)?;
+    let today = today();
+    let db = app.db.lock().unwrap();
+    let mut solved: HashMap<(u8, i64), i64> = HashMap::new();
+    let mut stmt = db.prepare("SELECT suits, seed, COUNT(DISTINCT user_id) FROM wins GROUP BY suits, seed")?;
+    for row in stmt.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))? {
+        let (key, n) = row?;
+        solved.insert(key, n);
+    }
+    // Worst first, so the best win is inserted last.
+    let mut mine: HashMap<(u8, i64), Value> = HashMap::new();
+    if let Some(user) = &user {
+        let mut stmt = db.prepare("SELECT suits, seed, real_undos, moves FROM wins WHERE user_id = ?1 ORDER BY real_undos DESC, moves DESC")?;
+        for row in stmt.query_map([user.id], |r| {
+            Ok(((r.get(0)?, r.get(1)?), json!({ "real_undos": r.get::<_, i64>(2)?, "moves": r.get::<_, i64>(3)? })))
+        })? {
+            let (key, best) = row?;
+            mine.insert(key, best);
+        }
+    }
+    let mut days: Vec<Value> = Vec::new();
+    for (date, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
+        let key = (*suits, *seed as i64);
+        let challenge = json!({ "suits": suits, "seed": seed, "solved": solved.get(&key).unwrap_or(&0), "mine": mine.get(&key) });
+        match days.last_mut() {
+            Some(day) if day["date"] == *date => day["challenges"].as_array_mut().unwrap().insert(0, challenge),
+            _ => days.push(json!({ "date": date, "challenges": [challenge] })),
+        }
+    }
+    Ok(Json(json!({ "today": today, "days": days })))
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -311,6 +366,7 @@ async fn main() {
         .route("/settings", put(put_settings))
         .route("/wins", post(record_win))
         .route("/results/{suits}/{seed}", get(get_results))
+        .route("/dailies", get(dailies))
         .with_state(app);
     // Any other path (e.g. /play/2/1234) is the single-page client.
     let client = ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
@@ -354,6 +410,14 @@ mod tests {
             games += 1;
         }
         assert!(games >= 30);
+    }
+
+    #[test]
+    fn challenges_are_complete() {
+        let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
+        assert!(CHALLENGES.len() == days.len() * 3, "every day has 1, 2 and 4 suits");
+        assert!(CHALLENGES.iter().all(|c| matches!(c.1, 1 | 2 | 4) && c.2 <= MAX_SEED));
+        assert!(days.contains(today().as_str()), "challenges.txt has run out: run tools/dailies");
     }
 
     #[test]

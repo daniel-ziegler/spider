@@ -4,5 +4,6 @@
 !web/Cargo.toml
 !web/Cargo.lock
 !web/src
+!web/challenges.txt
 !web/test
 !web/static

@@ -44,6 +44,7 @@ let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
 let hint = null; // while Tab cycles through hints: {moves, i}
+let dailies = null; // daily challenges up to today, from the server: {today, days: [{date, challenges}]}
 let keyboardUsed = store.get('spider:keyboard', false); // then columns show their number keys
 let L; // layout, see computeLayout
 
@@ -82,7 +83,7 @@ function load(suits, seed, push = false) {
   $('#dangler').hidden = true;
   save();
   render();
-  if (g.isWon()) onWin();
+  if (g.isWon()) startup.then(onWin); // once we know who is logged in
 }
 
 const randomSeed = () => 1 + Math.floor(Math.random() * 999_999_999);
@@ -222,6 +223,7 @@ async function onWin() {
     markRecorded(win);
     save();
     showWinDialog(win, resultsTable(data.results));
+    fetchDailies();
   } catch (e) {
     showWinDialog(win, `<p class="error">Could not save this win: ${esc(e.message)}. Reload to try again.</p>`);
   }
@@ -229,8 +231,9 @@ async function onWin() {
 
 function showWinDialog(win, body) {
   if (dialog.open && !dialog.querySelector('[data-win]')) return; // don't replace another dialog
+  const date = dailyDate(win.suits, win.seed);
   openDialog(`<h2 data-win>Solved!</h2>
-    <p>${suitsLabel(win.suits)} · deal ${win.seed}<br>
+    <p>${date ? `Daily challenge · ${dayLabel(date)} · ${suitsLabel(win.suits)}` : `${suitsLabel(win.suits)} · deal ${win.seed}`}<br>
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
       <b>${plural(win.real_undos, 'real undo')}</b> <span class="dim">(${plural(win.undos, 'undo')} in all)</span></p>
     <div>${body}</div>
@@ -253,6 +256,7 @@ function resultsTable(rows) {
 
 function openDialog(html, onClick) {
   dialog.onclose = dialog.onkeydown = null;
+  dialog.className = '';
   dialog.innerHTML = `<div class="panel">${html}</div>`;
   dialog.onclick = e => {
     if (e.target === dialog || e.target.closest('[data-close]')) dialog.close(); // backdrop or close button
@@ -280,7 +284,12 @@ const suitsLabel = n => plural(n, 'suit');
 function newGameDialog() {
   let suits = g.suits;
   const choices = () => [1, 2, 4].map(n => `<button type="button" data-suits="${n}" aria-pressed="${n === suits}">${suitsLabel(n)}</button>`).join('');
-  openDialog(`<h2>New game</h2>
+  const today = dailies?.days[0];
+  openDialog(`${today && today.date === dailies.today ? `<h2>Today's challenges</h2>
+    <div class="challenges">${today.challenges.map(c => challengeButton(c)).join('')}</div>
+    <div class="row" style="justify-content:flex-start;margin-top:8px"><button type="button" data-archive>Archive of past challenges</button></div>
+    <hr>` : ''}
+    <h2>New game</h2>
     <form>
       <label>Suits</label><div class="choices">${choices()}</div>
       <label for="seed">Deal number</label>
@@ -291,6 +300,8 @@ function newGameDialog() {
   e => {
     const b = e.target.closest('[data-suits]');
     if (b) { suits = +b.dataset.suits; dialog.querySelector('.choices').innerHTML = choices(); }
+    if (e.target.closest('[data-archive]')) archiveDialog();
+    playChallenge(e);
   });
   dialog.querySelector('form').onsubmit = e => {
     e.preventDefault();
@@ -304,6 +315,61 @@ function newGameDialog() {
     load(suits, seed, true);
   };
   dialog.querySelector('form .primary').focus();
+}
+
+// ---------------------------------------------------------------- daily challenges
+
+async function fetchDailies() {
+  try { dailies = await api('GET', '/dailies'); } catch { /* offline: no dailies */ }
+  render();
+}
+
+// The date of the daily challenge with this deal, if it is one.
+function dailyDate(suits, seed) {
+  return dailies?.days.find(d => d.challenges.some(c => c.suits === suits && c.seed === seed))?.date ?? null;
+}
+
+function dayLabel(date) {
+  if (date === dailies?.today) return 'today';
+  return new Date(`${date}T12:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+// A challenge's button: the full form for today's, a compact one for the
+// archive (whose columns are labelled with the suits).
+function challengeButton(c, compact = false) {
+  const save = store.get('spider:saves', {})[keyOf(c.suits, c.seed)];
+  const started = save && (save.moves || save.undos);
+  const won = c.solved ? `${c.solved} won` : '&nbsp;';
+  let lines;
+  if (compact) {
+    lines = c.mine ? [`✓ ${c.mine.moves}`, `${c.mine.real_undos} real`, won] : [started ? 'started' : 'play', '&nbsp;', won];
+  } else {
+    const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')}, ${c.mine.real_undos} real` : started ? 'in progress' : '&nbsp;';
+    lines = [suitsLabel(c.suits), status, won];
+  }
+  const [first, ...rest] = lines;
+  return `<button type="button" class="challenge${c.mine ? ' won' : ''}" data-play="${c.suits}/${c.seed}">
+    <span>${first}</span>${rest.map(l => `<small>${l}</small>`).join('')}</button>`;
+}
+
+// Click handler part for dialogs listing challenges.
+function playChallenge(e) {
+  const b = e.target.closest('[data-play]');
+  if (!b) return;
+  const [suits, seed] = b.dataset.play.split('/').map(Number);
+  dialog.close();
+  if (suits !== g.suits || seed !== g.seed) load(suits, seed, true);
+}
+
+function archiveDialog() {
+  if (!dailies) return;
+  openDialog(`<h2>Daily challenges</h2>
+    <p class="dim">Every deal here can be won. Results show once you have won a deal yourself.</p>
+    <div class="archive"><span></span>${[1, 2, 4].map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
+      ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>
+      ${d.challenges.map(c => challengeButton(c, true)).join('')}`).join('')}</div>
+    <div class="row"><button data-close>Close</button></div>`, playChallenge);
+  dialog.classList.add('wide');
 }
 
 function accountDialog(mode) {
@@ -342,7 +408,7 @@ async function loggedIn() {
   if (me.settings?.colors) applySettings(me.settings, false);
   else api('PUT', '/settings', settings).catch(() => {});
   await submitPending();
-  render();
+  fetchDailies();
 }
 
 function applySettings(s, upload = true) {
@@ -390,6 +456,7 @@ function helpDialog() {
 
 function menuDialog() {
   const items = [
+    ['archive', 'Daily challenge archive', !!dailies],
     ['restart', 'Restart this deal', g.canUndo()],
     ['results', 'Results for this deal', g.isWon()],
     ['link', 'Copy link to this deal', true],
@@ -404,6 +471,7 @@ function menuDialog() {
     if (!b) return;
     dialog.close();
     switch (b.dataset.m) {
+      case 'archive': return archiveDialog();
       case 'restart': return restart();
       case 'results': return onWin();
       case 'link': return copyLink();
@@ -413,7 +481,7 @@ function menuDialog() {
       case 'logout':
         await api('POST', '/logout').catch(() => {});
         me = null;
-        render();
+        fetchDailies();
         return flash('Logged out');
     }
   });
@@ -512,7 +580,9 @@ function render() {
   $('#stock').style.width = `${deals ? small + (deals - 1) * small * 0.18 : 0}px`;
   $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down${hinted?.deal && i === deals - 1 ? ' hint' : ''}" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
 
-  $('#info').innerHTML = `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span> ·
+  const daily = dailyDate(g.suits, g.seed);
+  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
+    : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
     <b>${g.history.length}</b> moves · <b>${undos}</b> undos${realUndos ? ` (<b>${realUndos}</b> real)` : ''}`;
   $('#b-undo').disabled = !g.canUndo();
   $('#b-redo').disabled = !g.canRedo();
@@ -715,7 +785,10 @@ window.addEventListener('popstate', loadFromUrl);
 document.documentElement.style.setProperty('--back', cardBack());
 applySettings({}, false);
 computeLayout();
+const startPath = location.pathname;
+const startup = Promise.all([
+  api('GET', '/me').then(user => { if (user) { me = user; return loggedIn(); } }).catch(() => {}),
+  fetchDailies(),
+]);
 loadFromUrl();
-api('GET', '/me').then(user => {
-  if (user) { me = user; loggedIn(); }
-}).catch(() => {});
+startup.then(() => { if (startPath === '/archive') archiveDialog(); });
