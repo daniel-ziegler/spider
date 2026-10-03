@@ -168,16 +168,13 @@ function redo() {
   after();
 }
 
-// A restart is one undo, and one real undo if it takes back cards you have seen.
 async function restart() {
   if (!g.canUndo()) return;
-  const real = g.history.some(r => r.mv.deal || r.flips.length);
-  const text = real ? 'Going back to the start takes back cards you have seen, so it counts as a real undo.'
+  const real = g.history.filter(r => r.mv.deal || r.flips.length).length;
+  const text = real ? `Going back to the start takes back cards you have seen: ${plural(real, 'real undo')}.`
     : 'Your moves go onto the redo stack.';
   if (!await confirmDialog('Restart this deal?', text, 'Restart', ['R'])) return;
-  while (g.canUndo()) g.undo();
-  undos++;
-  if (real) realUndos++;
+  while (g.canUndo()) undoOne();
   sel = null;
   after();
 }
