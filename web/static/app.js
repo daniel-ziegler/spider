@@ -452,7 +452,7 @@ function computeLayout() {
   const ch = Math.round(cw * 1.4);
   const font = Math.round(Math.max(11, Math.min(22, cw * 0.27)));
   L = {
-    gap, cw, ch, font, top0: keyboardUsed ? 26 : 10,
+    gap, cw, ch, font, top0: 26, // room for the column numbers, shown or not
     left0: (bw - cw * NUM_COLS - gap * (NUM_COLS - 1)) / 2,
     down: Math.max(4, Math.round(ch * 0.09)),
     up: Math.max(Math.round(ch * 0.24), Math.round(font * 1.35)),
@@ -694,7 +694,6 @@ function markKeyboardUsed() {
   if (keyboardUsed) return;
   keyboardUsed = true;
   store.set('spider:keyboard', true);
-  computeLayout();
   render();
 }
 
