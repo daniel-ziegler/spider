@@ -380,7 +380,8 @@ function helpDialog() {
   ];
   openDialog(`<h2>How to play</h2>
     <p>Build runs from king down to ace in one suit; a finished run is cleared. Win by clearing all eight.
-    Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.</p>
+    Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
+    <b>Hint</b> steps through useful moves, best first; tap the column outlined in green to play one.</p>
     <p>Undos are free, except a <b>real undo</b>: one that takes back a card turned over or a deal.
     Wins record your moves and real undos.</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
@@ -703,6 +704,7 @@ for (const b of document.querySelectorAll('#bar button')) b.addEventListener('mo
 $('#b-new').onclick = newGameDialog;
 $('#b-undo').onclick = undo;
 $('#b-redo').onclick = redo;
+$('#b-hint').onclick = () => cycleHint(1);
 $('#b-menu').onclick = menuDialog;
 $('#b-logo').onclick = helpDialog;
 $('#stock').onclick = () => play(DEAL);
