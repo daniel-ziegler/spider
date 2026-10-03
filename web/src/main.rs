@@ -330,7 +330,7 @@ mod tests {
     use super::*;
 
     /// The browser's port of the rules (static/game.js) must deal the same
-    /// cards and play moves the same way as game.rs. test/port.mjs plays
+    /// cards, play moves and rank hints the same way as game.rs. test/port.mjs plays
     /// random games in JavaScript and prints each one's deal, moves and final
     /// position; replaying them here must agree.
     #[test]
@@ -350,6 +350,7 @@ mod tests {
                 g.apply(mv).unwrap();
             }
             assert_eq!(g.to_position_text(), f[5], "after moves {suits}/{seed}");
+            assert_eq!(game::encode_moves(g.hint_moves()), f[6], "hints {suits}/{seed}");
             games += 1;
         }
         assert!(games >= 30);

@@ -187,6 +187,59 @@ export class Game {
     return again;
   }
 
+  // Every legal move, best first, for hints: a port of Game::hint_moves.
+  // Scored by the destination plus what the move frees at the source; among
+  // equal scores the longer run first; the deal last. Only whole runs are
+  // offered for an empty column, and only for the first empty one.
+  hintMoves() {
+    const out = [];
+    const firstEmpty = this.columns.findIndex(c => c.length === 0);
+    for (let from = 0; from < NUM_COLS; from++) {
+      const run = this.runLen(from);
+      if (run === 0) continue;
+      const src = this.columns[from];
+      for (let to = 0; to < NUM_COLS; to++) {
+        if (to === from) continue;
+        let count;
+        if (this.columns[to].length === 0) {
+          if (firstEmpty !== to || run === src.length) continue;
+          count = run;
+        } else {
+          count = this.requiredCount(from, to);
+          if (count === null) continue;
+        }
+        out.push({ score: this.hintScore(from, to, count), mv: { from, to, count } });
+      }
+    }
+    out.sort((a, b) => b.score - a.score || b.mv.count - a.mv.count);
+    const moves = out.map(h => h.mv);
+    if (!this.checkDeal()) moves.push(DEAL);
+    return moves;
+  }
+
+  // Destination: completes a suit +100, same-suit linkage +15, cross-suit 0,
+  // empty column -15. Source: flips a card +12, empties the column +10, leaves
+  // a non-linkage +8, a cross-suit linkage 0, breaks a same-suit run -20.
+  hintScore(from, to, count) {
+    const src = this.columns[from], bottom = src[src.length - count];
+    const dest = this.columns[to], top = dest.at(-1);
+    let dst;
+    if (top === undefined) dst = -15;
+    else if (suitOf(top) === suitOf(bottom)) {
+      dst = rankOf(bottom) === 0 && runLen(dest, this.faceDown[to]) + count === 13 ? 100 : 15;
+    } else dst = 0;
+    let srcScore;
+    if (count === src.length) srcScore = 10;
+    else if (count === src.length - this.faceDown[from]) srcScore = 12;
+    else {
+      const parent = src[src.length - count - 1];
+      if (rankOf(parent) !== rankOf(bottom) + 1) srcScore = 8;
+      else if (suitOf(parent) === suitOf(bottom)) srcScore = -20;
+      else srcScore = 0;
+    }
+    return dst + srcScore;
+  }
+
   // Same text form as Game::to_position_text in game.rs (used by the port test).
   positionText() {
     return [this.completed.length, ...this.columns.map((c, i) => `${this.faceDown[i]}/${c.join(',')}`)].join(';');

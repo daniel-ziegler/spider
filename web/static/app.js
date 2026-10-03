@@ -43,6 +43,7 @@ let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
+let hint = null; // while Tab cycles through hints: {moves, i}
 let keyboardUsed = store.get('spider:keyboard', false); // then columns show their number keys
 let L; // layout, see computeLayout
 
@@ -100,6 +101,7 @@ function loadFromUrl() {
 // ---------------------------------------------------------------- actions
 
 function after() {
+  hint = null;
   save();
   render();
   if (g.isWon()) onWin();
@@ -368,6 +370,7 @@ function helpDialog() {
     ['<kbd>←</kbd> <kbd>→</kbd>', 'move the cursor; <kbd>Enter</kbd> or <kbd>Space</kbd> picks the cursor column'],
     ['<kbd>↑</kbd> <kbd>↓</kbd>', 'pick more or fewer cards (for empty columns)'],
     ['same column twice', 'move the run wherever fits best'],
+    ['<kbd>Tab</kbd>', 'hint: step through useful moves, best first (<kbd>Shift</kbd> <kbd>Tab</kbd> back); <kbd>Enter</kbd> plays it'],
     ['<kbd>Esc</kbd>', 'drop the selection'],
     ['<kbd>d</kbd>', 'deal'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
@@ -483,14 +486,15 @@ function faceHtml(card, style, extra = '', attrs = '') {
 }
 
 function render() {
+  const hinted = hint?.moves[hint.i], hintTo = hinted && !hinted.deal ? hinted.to : null;
   let html = '';
   for (let c = 0; c < NUM_COLS; c++) {
     const x = colX(c), col = g.columns[c], fd = g.faceDown[c], tops = cardTops(c);
-    html += `<div class="slot" style="left:${x}px;top:${L.top0}px"></div>`;
+    html += `<div class="slot${hintTo === c ? ' hint' : ''}" style="left:${x}px;top:${L.top0}px"></div>`;
     col.forEach((card, i) => {
       const style = `left:${x}px;top:${tops[i]}px`, attrs = `data-c="${c}" data-i="${i}"`;
       if (i < fd) html += `<div class="card down" style="${style}" ${attrs}></div>`;
-      else html += faceHtml(card, style, sel && sel.col === c && i >= col.length - sel.count ? 'sel' : '', attrs);
+      else html += faceHtml(card, style, sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '', attrs);
     });
   }
   if (keyboardUsed) {
@@ -505,7 +509,7 @@ function render() {
   $('#done').innerHTML = g.completed.map((s, i) => faceHtml(s * 13 + 12, `left:${i * small * 0.3}px;top:0`)).join('');
   const deals = g.dealsRemaining();
   $('#stock').style.width = `${deals ? small + (deals - 1) * small * 0.18 : 0}px`;
-  $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
+  $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down${hinted?.deal && i === deals - 1 ? ' hint' : ''}" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
 
   $('#info').innerHTML = `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span> ·
     <b>${g.history.length}</b> moves · <b>${undos}</b> undos${realUndos ? ` (<b>${realUndos}</b> real)` : ''}`;
@@ -514,12 +518,12 @@ function render() {
 }
 
 let msgTimer;
-function flash(text) {
+function flash(text, ms = 2500) {
   const m = $('#msg');
   m.textContent = text;
   m.classList.add('flash');
   clearTimeout(msgTimer);
-  msgTimer = setTimeout(() => { m.textContent = ''; m.classList.remove('flash'); }, 2500);
+  msgTimer = setTimeout(() => { m.textContent = ''; m.classList.remove('flash'); }, ms);
 }
 
 // ---------------------------------------------------------------- mouse and touch
@@ -576,6 +580,7 @@ board.addEventListener('pointerdown', e => {
   if (e.button !== 0) return;
   const col = colAt(e.clientX);
   showCursor = false;
+  hint = null;
   if (col === null) {
     press = null;
     if (sel) { sel = null; render(); }
@@ -629,6 +634,31 @@ function columnKey(c) {
   }
 }
 
+const cardName = c => RANKS[rankOf(c)] + SUITS[suitOf(c)];
+
+// Tab / Shift-Tab: step through the ranked hints, leaving the hinted run
+// selected so Enter plays it.
+function cycleHint(d) {
+  if (!hint) {
+    const moves = g.hintMoves();
+    if (!moves.length) return flash('No moves left');
+    hint = { moves, i: d > 0 ? 0 : moves.length - 1 };
+  } else {
+    hint.i = (hint.i + d + hint.moves.length) % hint.moves.length;
+  }
+  const mv = hint.moves[hint.i];
+  let text = 'deal';
+  sel = null;
+  if (!mv.deal) {
+    const src = g.columns[mv.from], top = g.columns[mv.to].at(-1);
+    sel = { col: mv.from, count: mv.count };
+    cursor = mv.to;
+    text = `${cardName(src[src.length - mv.count])} onto ${top === undefined ? 'the empty column' : cardName(top)}`;
+  }
+  render();
+  flash(`Hint ${hint.i + 1} of ${hint.moves.length}: ${text}`, 8000);
+}
+
 function changeCount(d) {
   if (!sel) return;
   sel.count = Math.max(1, Math.min(g.runLen(sel.col), sel.count + d));
@@ -638,6 +668,10 @@ function changeCount(d) {
 document.addEventListener('keydown', e => {
   if (dialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
+  if (k === 'Shift') return;
+  if (k === 'Tab') return e.preventDefault(), markKeyboardUsed(), cycleHint(e.shiftKey ? -1 : 1);
+  if (hint && (k === 'Enter' || k === ' ')) return e.preventDefault(), play(hint.moves[hint.i]);
+  hint = null;
   if (/^[0-9]$/.test(k)) columnKey(k === '0' ? 9 : +k - 1);
   else if (k === 'ArrowLeft' || k === 'h') { cursor = (cursor + NUM_COLS - 1) % NUM_COLS; showCursor = true; render(); }
   else if (k === 'ArrowRight' || k === 'l') { cursor = (cursor + 1) % NUM_COLS; showCursor = true; render(); }
@@ -653,13 +687,16 @@ document.addEventListener('keydown', e => {
   else if (k === '?') helpDialog();
   else return;
   e.preventDefault();
-  if (!keyboardUsed) {
-    keyboardUsed = true;
-    store.set('spider:keyboard', true);
-    computeLayout();
-    render();
-  }
+  markKeyboardUsed();
 });
+
+function markKeyboardUsed() {
+  if (keyboardUsed) return;
+  keyboardUsed = true;
+  store.set('spider:keyboard', true);
+  computeLayout();
+  render();
+}
 
 // ---------------------------------------------------------------- start
 

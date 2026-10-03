@@ -1,5 +1,5 @@
 // Plays random games with static/game.js and prints, one line per game:
-//   suits seed initial-position stock moves final-position
+//   suits seed initial-position stock moves final-position hints
 // The server's `cargo test` replays these with game.rs and compares.
 import { readFileSync } from 'node:fs';
 import { Game, NUM_COLS, DEAL, encodeMoves, parseMoves } from '../static/game.js';
@@ -29,7 +29,7 @@ for (let i = 0; i < 60; i++) {
     else if (legal.length) g.apply(legal[rand(legal.length)]);
     else if (g.canUndo()) g.undo();
   }
-  console.log(`${suits} ${seed} ${start} ${stock} ${encodeMoves(g.moves()) || ''} ${g.positionText()}`);
+  console.log(`${suits} ${seed} ${start} ${stock} ${encodeMoves(g.moves()) || ''} ${g.positionText()} ${encodeMoves(g.hintMoves())}`);
 }
 
 // A solver's winning line for 1 suit, deal 3, to cover completing runs.
@@ -38,4 +38,4 @@ const g = new Game(1, 3);
 const start = g.positionText(), stock = g.stock.join(',');
 for (const mv of parseMoves(win)) if (g.apply(mv)) throw new Error(`illegal ${mv}`);
 if (!g.isWon()) throw new Error('win-1-3.txt does not win');
-console.log(`1 3 ${start} ${stock} ${win} ${g.positionText()}`);
+console.log(`1 3 ${start} ${stock} ${win} ${g.positionText()} ${encodeMoves(g.hintMoves())}`);
