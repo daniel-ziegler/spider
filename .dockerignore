@@ -1,0 +1,8 @@
+# Only the web server (web/Dockerfile) builds images; it needs just these.
+*
+!src/game.rs
+!web/Cargo.toml
+!web/Cargo.lock
+!web/src
+!web/test
+!web/static

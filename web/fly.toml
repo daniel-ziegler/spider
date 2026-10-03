@@ -1,0 +1,21 @@
+# Deploy with ./deploy.sh (it builds from the repository root).
+app = "spider-friends"
+primary_region = "sjc"
+
+[env]
+  COOKIE_SECURE = "1"
+
+[mounts]
+  source = "spider_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
