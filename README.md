@@ -158,8 +158,14 @@ the solver's own notion: a move that leaves an equivalence class (deal,
 suit completion, card flip, same-suit join, or leaving a non-linkage
 behind); the moves before it are shuffles that only prepare it. As long as
 the moves played (by `p`, `P`, or by hand) are the line's own, the line is
-consumed instead of re-solved, and undo walks back along it; any other move
-restarts the solver.
+consumed instead of re-solved, and undo walks back along it. A move off the
+line that can be taken straight back (nothing turned over or completed, and
+the cards could return to where they came from, which includes a same-suit
+join since splitting it is legal) keeps the line with the inverse move put in
+front, and undoing any other move keeps it with that move put in front; the
+shortener then removes the detour. Only a move that cannot be taken back
+restarts the solver. (The solver itself treats joins as one-way in its first
+pass, so re-solving after a join could fail on a position that was winning.)
 
 Raw solver lines are long: a 4-suit line is typically 500–800 moves where
 150–250 would do, because each class is crossed by the shortest route to

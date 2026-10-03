@@ -61,10 +61,20 @@ struct CommitInfo {
     dest: Option<(usize, usize)>,
 }
 
+/// The move that takes `mv` straight back, if it is a card move.
+fn inverse(mv: Move) -> Option<Move> {
+    match mv {
+        Move::Move { from, to, count } => Some(Move::Move { from: to, to: from, count }),
+        Move::Deal => None,
+    }
+}
+
 /// What just happened to the game, for keeping the solver's line in step.
 enum Change {
     Played(Move),
-    Undone(Move),
+    /// The move undone, and whether it was quiet (turned nothing over and
+    /// completed no suit).
+    Undone(Move, bool),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -308,31 +318,61 @@ impl App {
     }
 
     /// Keep the line in step with a move played or undone; returns false if
-    /// the game left the line (the solver must start over).
+    /// the game left the line (the solver must start over). A move off the
+    /// line that can be taken straight back (including a same-suit join,
+    /// which a split undoes) keeps the line with that move's inverse put in
+    /// front of it, and undoing a move puts the move back in front; the
+    /// shortener then removes the detour.
     fn track_line(&mut self, change: &Change) -> bool {
         let Some(line) = &mut self.line else { return false };
+        let mut detour = false;
         match *change {
             Change::Played(mv) => {
-                if line.moves.first() != Some(&mv) {
-                    return false;
-                }
-                line.moves.remove(0);
-                line.played.push(mv);
-            }
-            Change::Undone(mv) => {
-                if line.played.last() != Some(&mv) {
-                    return false;
-                }
-                line.played.pop();
-                line.moves.insert(0, mv);
-                if line.opt.as_ref().is_some_and(|o| o.base > line.played.len()) {
-                    line.opt = None;
+                if line.moves.first() == Some(&mv) {
+                    line.moves.remove(0);
+                    line.played.push(mv);
+                } else {
+                    let quiet = self.game.history().last().is_some_and(|r| r.flips.is_empty() && r.completed.is_empty());
+                    let back = match inverse(mv) {
+                        Some(inv @ Move::Move { from, to, count }) if quiet && self.game.check_move(from, to, count).is_ok() => inv,
+                        _ => return false,
+                    };
+                    line.moves.insert(0, back);
+                    detour = true;
                 }
             }
+            Change::Undone(mv, quiet) => {
+                if line.played.last() == Some(&mv) {
+                    line.played.pop();
+                    line.moves.insert(0, mv);
+                    if line.opt.as_ref().is_some_and(|o| o.base > line.played.len()) {
+                        line.opt = None;
+                    }
+                } else {
+                    // Redoing `mv` returns to where the line starts; if the
+                    // line begins by taking it back, drop that instead.
+                    if quiet && inverse(mv).is_some() && line.moves.first().copied() == inverse(mv) {
+                        line.moves.remove(0);
+                    } else {
+                        line.moves.insert(0, mv);
+                    }
+                    detour = true;
+                }
+            }
+        }
+        if detour {
+            // The line no longer extends the moves played: shorten it afresh
+            // from here.
+            line.played.clear();
+            line.opt = None;
+            line.stage = 0;
         }
         line.commit = first_commit(&self.game, &line.moves);
         if line.moves.is_empty() {
             line.opt = None;
+        }
+        if detour {
+            self.refresh_line();
         }
         true
     }
@@ -487,7 +527,7 @@ impl App {
     fn do_undo(&mut self) {
         if let Some(rec) = self.game.undo() {
             self.sel = None;
-            self.after_change(Change::Undone(rec.mv));
+            self.after_change(Change::Undone(rec.mv, rec.flips.is_empty() && rec.completed.is_empty()));
             self.msg = match rec.mv {
                 Move::Deal => "Undid the deal.".into(),
                 Move::Move { from, to, count } => {
