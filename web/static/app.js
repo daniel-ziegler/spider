@@ -424,7 +424,7 @@ function settingsDialog() {
     ${label} <span class="swatch ${cls}"><span>♠&#xFE0E;</span><span>♥&#xFE0E;</span><span>♦&#xFE0E;</span><span>♣&#xFE0E;</span></span></button>`;
   const html = () => `<h2>Settings</h2><label>Suit colours</label>
     <div class="choices">${choice('mine', 'Four colours', 'mine')}${choice('traditional', 'Traditional', 'trad')}</div>
-    <label>Underline a card when the card on it is not one rank lower</label>
+    <label>Mark where a stack breaks (a card on one that is not one rank higher)</label>
     <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>
     <div class="row"><button class="primary" data-close>Done</button></div>`;
   openDialog(html(), e => {
@@ -572,8 +572,8 @@ function render() {
       if (i < fd) html += `<div class="card down" style="${style}" ${attrs}></div>`;
       else {
         const mark = sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '';
-        // A break: the card on this one is not one rank lower (the console's underline).
-        const broken = i + 1 < col.length && rankOf(col[i + 1]) + 1 !== rankOf(card) ? ' broken' : '';
+        // A break: this card is not one rank lower than the face-up card under it.
+        const broken = i > fd && rankOf(card) + 1 !== rankOf(col[i - 1]) ? ' broken' : '';
         html += faceHtml(card, style, mark + broken, attrs);
       }
     });
