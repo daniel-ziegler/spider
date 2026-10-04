@@ -415,6 +415,7 @@ function applySettings(s, upload = true) {
   settings = { ...settings, ...s };
   store.set('spider:settings', settings);
   document.body.classList.toggle('traditional', settings.colors === 'traditional');
+  document.body.classList.toggle('show-breaks', !!settings.breaks);
   if (upload && me) api('PUT', '/settings', settings).catch(() => {});
 }
 
@@ -423,10 +424,16 @@ function settingsDialog() {
     ${label} <span class="swatch ${cls}"><span>♠&#xFE0E;</span><span>♥&#xFE0E;</span><span>♦&#xFE0E;</span><span>♣&#xFE0E;</span></span></button>`;
   const html = () => `<h2>Settings</h2><label>Suit colours</label>
     <div class="choices">${choice('mine', 'Four colours', 'mine')}${choice('traditional', 'Traditional', 'trad')}</div>
+    <label>Underline a card when the card on it is not one rank lower</label>
+    <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>
     <div class="row"><button class="primary" data-close>Done</button></div>`;
   openDialog(html(), e => {
     const b = e.target.closest('[data-colors]');
-    if (b) { applySettings({ colors: b.dataset.colors }); dialog.querySelector('.panel').innerHTML = html(); }
+    const k = e.target.closest('[data-breaks]');
+    if (b) applySettings({ colors: b.dataset.colors });
+    else if (k) applySettings({ breaks: !!k.dataset.breaks });
+    else return;
+    dialog.querySelector('.panel').innerHTML = html();
   });
 }
 
@@ -563,7 +570,12 @@ function render() {
     col.forEach((card, i) => {
       const style = `left:${x}px;top:${tops[i]}px`, attrs = `data-c="${c}" data-i="${i}"`;
       if (i < fd) html += `<div class="card down" style="${style}" ${attrs}></div>`;
-      else html += faceHtml(card, style, sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '', attrs);
+      else {
+        const mark = sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '';
+        // A break: the card on this one is not one rank lower (the console's underline).
+        const broken = i + 1 < col.length && rankOf(col[i + 1]) + 1 !== rankOf(card) ? ' broken' : '';
+        html += faceHtml(card, style, mark + broken, attrs);
+      }
     });
   }
   if (keyboardUsed) {
