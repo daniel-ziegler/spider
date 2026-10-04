@@ -180,10 +180,16 @@ pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: 
     out
 }
 
+thread_local! {
+    /// Diagnostic (`SPIDER_P_CHEAT`): the real game, which the rollouts then
+    /// play in instead of guessed worlds.
+    static TRUTH: std::cell::RefCell<Option<Game>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Play candidate `c` in a world guessed from `obs`, then let the rollout
 /// player finish. Returns the outcome's value and the positions examined.
 fn rollout(obs: &Game, c: &Cand, visited: &HashSet<u64>, world_seed: u64, cfg: &PimcConfig) -> (f64, u64) {
-    let mut world = determinize(obs, world_seed);
+    let mut world = TRUTH.with(|t| t.borrow().clone()).unwrap_or_else(|| determinize(obs, world_seed));
     apply(&mut world, c);
     let mut seen = visited.clone();
     seen.insert(State::from_game(&mask(&world)).hash());
@@ -286,9 +292,13 @@ pub fn play(g: &Game, cfg: &PimcConfig) -> (PlayResult, PimcStats) {
     let mut visited = HashSet::new();
     let mut idle = 0;
     let mut tempo = Tempo::default();
+    let cheat = std::env::var_os("SPIDER_P_CHEAT").is_some();
     while !g.is_won() && g.move_count() - start < 5000 && g.columns.iter().all(|c| c.len() <= MAXC) {
         let obs = mask(&g);
         visited.insert(State::from_game(&obs).hash());
+        if cheat {
+            TRUTH.with(|t| *t.borrow_mut() = Some(g.clone()));
+        }
         let (d, ds) = decide(&obs, g.deals_remaining(), &visited, idle, &mut tempo, cfg);
         let before = (g.face_down, g.deals_remaining(), g.completed.len());
         st.decisions += 1;

@@ -17,13 +17,13 @@
 //! ends with a visible-only evaluation and plays the best line that raises
 //! the value; failing that, it scores the same lines again "about to deal",
 //! with a separate (lower) value for an empty column, since a deal needs
-//! every column filled, and plays the best line that raises that value.
-//! Once about to deal it stays so until a card turns, a deal or a suit
-//! completes (going back and forth between the two values could go on for
-//! ever without repeating a position). If nothing raises the value it can
-//! turn any card it can reach at a cost (`last_flip`), then deals, first
-//! filling the empty columns, splitting runs if it must; with the stock
-//! gone it gives up.
+//! every column filled (and a line that turns a card can earn a bonus,
+//! `deal_flip`), and plays the best line that raises that value. Once about
+//! to deal it stays so until a card turns, a deal or a suit completes
+//! (going back and forth between the two values could go on for ever
+//! without repeating a position). If nothing raises the value it deals,
+//! first filling the empty columns, splitting runs if it must; with the
+//! stock gone it gives up.
 //!
 //! The evaluation counts completed suits, face-down cards, empty columns,
 //! same-suit links, off-suit links (with an amount per rank of the lower
@@ -61,10 +61,6 @@ pub struct LineConfig {
     /// Splits allowed when about to deal (searched again if it differs
     /// from `splits`); 0: as `splits`.
     pub deal_splits: u8,
-    /// When no line raises the value, turn any card that can be reached
-    /// (searching with all splits), even at a cost: bit 1 with the stock
-    /// gone (instead of giving up), bit 2 before dealing.
-    pub last_flip: u8,
     pub expect_steps: usize,
     pub expect_beam: usize,
     /// Which splits of a same-suit run are considered: 0 none, 1 only onto
@@ -75,6 +71,9 @@ pub struct LineConfig {
     pub empty: i32,
     /// Value of an empty column when about to deal.
     pub deal_empty: i32,
+    /// Added, when about to deal or with the stock gone, for a line that
+    /// turns a card.
+    pub deal_flip: i32,
     /// Value of an empty column when nothing raises the value and the stock
     /// is gone (so that a card can be turned at the cost of an empty column).
     pub end_empty: i32,
@@ -114,7 +113,6 @@ impl LineConfig {
             beam: 0,
             expect_top: 0,
             deal_splits: 0,
-            last_flip: 0,
             expect_steps: 4,
             expect_beam: 20,
             splits: if suits == 1 { 2 } else { 1 },
@@ -122,6 +120,7 @@ impl LineConfig {
             hidden: 47,
             empty: 53,
             deal_empty: -72,
+            deal_flip: 0,
             end_empty: 3,
             same: 0,
             off: -6,
@@ -166,7 +165,7 @@ impl LineConfig {
             _ => LineConfig {
                 max_steps: 8,
                 beam: 300,
-                last_flip: 3,
+                deal_splits: 3,
                 hidden: 71,
                 empty: 83,
                 end_empty: 39,
@@ -180,8 +179,8 @@ impl LineConfig {
         }
     }
 
-    /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, LAST_FLIP, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
-    /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, END_EMPTY, SAME, OFF, OFF_RANK,
+    /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
+    /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
     /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE).
     pub fn from_env(suits: u8) -> LineConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -194,7 +193,6 @@ impl LineConfig {
             beam: get("BEAM", d.beam),
             expect_top: get("EXPECT_TOP", d.expect_top),
             deal_splits: get("DEAL_SPLITS", d.deal_splits),
-            last_flip: get("LAST_FLIP", d.last_flip),
             expect_steps: get("EXPECT_STEPS", d.expect_steps),
             expect_beam: get("EXPECT_BEAM", d.expect_beam),
             splits: get("SPLITS", d.splits),
@@ -202,6 +200,7 @@ impl LineConfig {
             hidden: get("HIDDEN", d.hidden),
             empty: get("EMPTY", d.empty),
             deal_empty: get("DEAL_EMPTY", d.deal_empty),
+            deal_flip: get("DEAL_FLIP", d.deal_flip),
             end_empty: get("END_EMPTY", d.end_empty),
             same: get("SAME", d.same),
             off: get("OFF", d.off),
@@ -609,33 +608,30 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
             return (Choice::Line(line_to(&nodes, k)), nodes.len());
         }
     }
-    // About to deal (or, with the stock gone, about to give up).
-    if cfg.deal_splits != 0 && cfg.deal_splits != cfg.splits {
-        let wide = search_state(nodes[0].state.clone(), &LineConfig { splits: cfg.deal_splits, ..*cfg });
-        let base = wide[0].parts.value(deals_left, empty);
-        let best = (1..wide.len())
-            .filter(|&k| wide[k].parts.value(deals_left, empty) > base && !visited.contains(&wide[k].state.hash()))
-            .max_by_key(|&k| (wide[k].parts.value(deals_left, empty), std::cmp::Reverse(k)));
-        if let Some(k) = best {
-            tempo.dealing = true;
-            return (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len());
-        }
-    } else if let Some(k) = best_raising(1, empty) {
+    // About to deal (or, with the stock gone, about to give up): a line
+    // that turns a card earns `deal_flip` besides.
+    let widen = cfg.deal_splits != 0 && cfg.deal_splits != cfg.splits;
+    let wide;
+    let dn: &[Node] = if widen {
+        wide = search_state(nodes[0].state.clone(), &LineConfig { splits: cfg.deal_splits, ..*cfg });
+        &wide
+    } else {
+        &nodes
+    };
+    let deal_value = |k: usize| {
+        let v = if widen { dn[k].parts.value(deals_left, empty) } else { value(k, 1, empty) };
+        if v > LOST && dn[k].leaf { v + cfg.deal_flip } else { v }
+    };
+    let base = dn[0].parts.value(deals_left, empty);
+    let best = (1..dn.len())
+        .filter(|&k| !visited.contains(&dn[k].state.hash()))
+        .map(|k| (deal_value(k), k))
+        .filter(|&(v, _)| v > base)
+        .max_by_key(|&(v, k)| (v, std::cmp::Reverse(k)));
+    let work = if widen { nodes.len() + dn.len() } else { nodes.len() };
+    if let Some((_, k)) = best {
         tempo.dealing = true;
-        return (Choice::Line(line_to(&nodes, k)), nodes.len());
-    }
-    let bit = if deals_left == 0 { 1 } else { 2 };
-    if cfg.last_flip & bit != 0 {
-        let wide = search_state(nodes[0].state.clone(), &LineConfig { splits: 3, beam: cfg.beam.max(300), ..*cfg });
-        let best = (1..wide.len())
-            .filter(|&k| wide[k].leaf && !visited.contains(&wide[k].state.hash()))
-            .filter(|&k| deals_left == 0 || wide[k].state.len.iter().all(|&l| l > 0))
-            .max_by_key(|&k| (wide[k].parts.value(deals_left, empty), std::cmp::Reverse(k)))
-            .filter(|&k| wide[k].parts.value(deals_left, empty) > LOST);
-        if let Some(k) = best {
-            tempo.dealing = true;
-            return (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len());
-        }
+        return (Choice::Line(line_to(dn, k)), work);
     }
     if deals_left == 0 {
         return (Choice::Stuck, nodes.len());
@@ -776,7 +772,7 @@ pub(crate) fn play_from(g: &Game, cfg: &LineConfig, visited: HashSet<u64>) -> Pl
 /// ends or, with `stop` given, until the player is about to deal with no
 /// more than `stop` deals left. Returns the positions examined and whether
 /// it stopped before a deal.
-pub(crate) fn play_until(g: &mut Game, cfg: &LineConfig, mut visited: HashSet<u64>, stop: Option<usize>) -> (u64, bool) {
+pub fn play_until(g: &mut Game, cfg: &LineConfig, mut visited: HashSet<u64>, stop: Option<usize>) -> (u64, bool) {
     let trace = std::env::var_os("SPIDER_L_TRACE").is_some();
     let mut work = 0;
     let start = g.move_count();

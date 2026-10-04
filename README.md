@@ -198,17 +198,19 @@ scores where every line ends with a visible-only evaluation (completed
 suits, face-down cards, empty columns, same-suit and off-suit links, cards
 out of sequence, distinct ranks on top, squared run lengths) and plays the
 best line that raises it. Failing that, it scores again "about to deal",
-with a lower value for an empty column, and stays in that mode until a card
-turns, a deal or a suit completes. Failing that, it turns any card it can
-reach even at a cost, then fills the empty columns (splitting runs if it
-must) and deals. A position with stock left and fewer than ten cards on the
+with a lower value for an empty column (and, with four suits, a wider
+search that may split runs anywhere), and stays in that mode until a card
+turns, a deal or a suit completes. Failing that, it fills the empty columns
+(splitting runs if it must) and deals. `deal_flip`, a bonus in that mode for
+a line that turns a card, makes no difference at any value: a turned card
+already raises the value by itself. A position with stock left and fewer than ten cards on the
 table is lost, and it never returns to a position it has stood in.
 
 | suits | won                               | ms per game |
 |-------|-----------------------------------|-------------|
 | 1     | 88% (seeds 10001–11000)           | 8           |
 | 2     | 65% (seeds 10001–11000)           | 180         |
-| 4     | 31% (seeds 1–1000, 20001–22000)   | 220         |
+| 4     | 31% (seeds 1–1000, 20001–22000)   | 310         |
 
 `cargo run --release --bin lines -- <suits> <first> <count>` plays the
 seeds on all cores; `SPIDER_L_*` override the weights and search.
@@ -218,7 +220,26 @@ line player's choice and a few alternatives are played out in worlds
 guessed from the visible cards by a cheaper line player, and an
 alternative is played only when it does clearly better. With the current
 line player it adds little (50 against 48 wins on seeds 1–200, at about 130
-s per game).
+s per game). It is not that rollouts cannot improve the line player: given
+the real deal instead of guessed worlds (`SPIDER_P_CHEAT=1`, a diagnostic)
+the same rollouts win 110 of seeds 30001–30200 against its 58. But in
+guessed worlds the outcome depends far more on where the hidden cards are
+than on the candidate, and averaged over worlds the candidates differ by a
+point or two of win rate, too little to tell apart. Also no better (on
+2,000 seeds): choosing where to deal from by sampling the deal and
+searching on after it; judging endgame candidates (stock gone) by solving
+guessed worlds with the full-information solver; making the value of a
+face-down card or an empty column depend on the deals left; and rewarding
+mobility (runs that have somewhere to go), which is much worse at any
+weight.
+
+`--bin winnable` asks the full-information solver, each time the line
+player is about to deal, whether the real game can still be won. On four
+suits (seeds 30001–30320) about 280 of 320 are still winnable at the first
+deal and 136 right after the last; the line player won 99, losing 42 of the
+games that were winnable after the last deal. Those are mostly winnable
+only with knowledge of the face-down cards: guessed worlds give no
+candidate the edge.
 
 ### AlphaZero player
 
