@@ -1,1 +1,4 @@
 /target
+/.venv
+/runs
+__pycache__

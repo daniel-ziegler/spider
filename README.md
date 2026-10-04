@@ -185,6 +185,79 @@ Weights were tuned on seeds 1–200 (2 and 4 suits). `cargo run --release
 prints every decision with the position it was made from and
 `SPIDER_H_QUIET=1` only the summary.
 
+### Line player
+
+`src/lines.rs` is a stronger non-peeking player whose unit of play is a
+*line* of human-sized steps. A step moves a run, or a mixed-suit sequence
+through the empty columns (up to `2^e` same-suit pieces with `e` free
+empty columns), from the top of a column onto a card one rank higher or
+into an empty column. A line is up to eight steps (four suits; searched as
+a beam of the 300 best positions at each depth), each touching a column an
+earlier step touched, and it ends as soon as a card turns over. The player
+scores where every line ends with a visible-only evaluation (completed
+suits, face-down cards, empty columns, same-suit and off-suit links, cards
+out of sequence, distinct ranks on top, squared run lengths) and plays the
+best line that raises it. Failing that, it scores again "about to deal",
+with a lower value for an empty column, and stays in that mode until a card
+turns, a deal or a suit completes. Failing that, it turns any card it can
+reach even at a cost, then fills the empty columns (splitting runs if it
+must) and deals. A position with stock left and fewer than ten cards on the
+table is lost, and it never returns to a position it has stood in.
+
+| suits | won                               | ms per game |
+|-------|-----------------------------------|-------------|
+| 1     | 88% (seeds 10001–11000)           | 8           |
+| 2     | 65% (seeds 10001–11000)           | 180         |
+| 4     | 31% (seeds 1–1000, 20001–22000)   | 220         |
+
+`cargo run --release --bin lines -- <suits> <first> <count>` plays the
+seeds on all cores; `SPIDER_L_*` override the weights and search.
+
+`src/pimc.rs` (`--bin pimc`) adds rollouts on top: at each decision the
+line player's choice and a few alternatives are played out in worlds
+guessed from the visible cards by a cheaper line player, and an
+alternative is played only when it does clearly better. With the current
+line player it adds little (50 against 48 wins on seeds 1–200, at about 130
+s per game).
+
+### AlphaZero player
+
+`src/az.rs`, `src/bin/azplay.rs` and `az/train.py` train a network by
+self-play to choose between the line player's lines. A decision offers the
+lines that raise the line player's evaluation (normally or about to deal),
+every line that turns a card, the best 24 of them, and the deal. The search
+is MCTS with expectimax over hidden cards. A line that turns a card leads
+to a chance node with a child for every card that can come up, weighted by
+how many of it are unseen, all valued by the network at once. A deal has
+six sampled outcomes. A chance node's value is the weighted mean of its
+children's values. The search never looks at a hidden card.
+
+The Rust side runs hundreds of games in lockstep and sends their positions
+to the Python side in batches, where a small transformer over the ten
+columns runs on the GPU. Two halves of the games take turns, so that one
+half searches while the other's batch is on the GPU. The network gives each
+position a value (the expected outcome, `(suits completed + 4 if won) /
+12`) and a policy score. A move's prior is the softmax of the scores of the
+positions the moves lead to. The network starts by imitating the line
+player, then trains on self-play: its policy learns the search's visit
+counts and its value learns a mix of the outcome and the search's value.
+
+    python -m venv .venv && .venv/bin/pip install torch numpy
+    cargo build --release
+    .venv/bin/python az/train.py imitate --suits 4 --games 4000 --out runs/L4
+    .venv/bin/python az/train.py selfplay --suits 4 --out runs/L4b --init runs/L4/imitate.pt
+    .venv/bin/python az/train.py eval --suits 4 --ckpt runs/L4b/latest.pt --first 1 --count 200
+
+| four suits, seeds 1–200       | won   | suits per game |
+|-------------------------------|-------|----------------|
+| line player (old version)     | 13%   | 1.60           |
+| imitation network, 64 sims    | 18.5% | 1.84           |
+| after 7,700 self-play games   | 16%   | 1.46           |
+
+Self-play has not yet improved on the imitation network (learning rate
+2e-4, 64 simulations per move, about 0.5 games per second, limited by the
+line search on the CPU).
+
 ### Superhint: following the solver's line
 
 `H` shows the winning line's next move on the solver line, marks its next

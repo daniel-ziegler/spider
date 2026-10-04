@@ -82,6 +82,17 @@ pub(crate) const MAXC: usize = 48;
 /// (they are just not merged with themselves when entered elsewhere).
 const CLASS_CAP: usize = 20_000;
 
+/// Hash of a column with these cards, `down` of them face down.
+pub(crate) fn col_hash(col: &[u8], down: u8) -> u64 {
+    let mut h = mix(0x51_7CC1_B727_220A, col.len() as u64 | (down as u64) << 8);
+    for chunk in col.chunks(8) {
+        let mut w = [0u8; 8];
+        w[..chunk.len()].copy_from_slice(chunk);
+        h = mix(h, u64::from_le_bytes(w));
+    }
+    h
+}
+
 /// Compact fixed-size state for the search: no heap allocation per position.
 #[derive(Clone)]
 pub(crate) struct State {
@@ -127,15 +138,22 @@ impl State {
         out
     }
 
-    fn rehash(&mut self, c: usize) {
-        let mut h = mix(0x51_7CC1_B727_220A, self.len[c] as u64 | (self.down[c] as u64) << 8);
-        let col = &self.cols[c][..self.len[c] as usize];
-        for chunk in col.chunks(8) {
-            let mut w = [0u8; 8];
-            w[..chunk.len()].copy_from_slice(chunk);
-            h = mix(h, u64::from_le_bytes(w));
+    pub(crate) fn rehash(&mut self, c: usize) {
+        self.colh[c] = col_hash(&self.cols[c][..self.len[c] as usize], self.down[c]);
+    }
+
+    /// [`State::hash`] of this position with the hashes of two columns
+    /// replaced.
+    pub(crate) fn hash_with(&self, a: (usize, u64), b: (usize, u64)) -> u64 {
+        let mut hs = self.colh;
+        hs[a.0] = a.1;
+        hs[b.0] = b.1;
+        hs.sort_unstable();
+        let mut h: u64 = 0x9E3779B97F4A7C15 ^ (self.deals_done as u64) << 8 ^ self.completed as u64;
+        for x in hs {
+            h = mix(h, x);
         }
-        self.colh[c] = h;
+        h
     }
 
     #[inline]
@@ -172,7 +190,7 @@ impl State {
     }
 
     #[inline]
-    fn remove_if_complete(&mut self, c: usize) {
+    pub(crate) fn remove_if_complete(&mut self, c: usize) {
         if self.len[c] >= 13 && self.top(c) % 13 == 0 && self.run_len(c) >= 13 {
             self.len[c] -= 13;
             self.completed += 1;

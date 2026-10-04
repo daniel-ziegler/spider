@@ -99,7 +99,7 @@ impl HumanConfig {
     }
 
     /// Score of a position from its visible cards only.
-    fn eval(&self, s: &State) -> i32 {
+    pub(crate) fn eval(&self, s: &State) -> i32 {
         let mut score = self.completed * s.completed as i32;
         for c in 0..NUM_COLS {
             let n = s.len[c] as usize;
@@ -143,22 +143,18 @@ pub enum Decision {
     Stuck,
 }
 
-struct Node {
-    state: State,
-    parent: u32,
-    mv: Move,
+pub(crate) struct Node {
+    pub(crate) state: State,
+    pub(crate) parent: u32,
+    pub(crate) mv: Move,
     /// Turned a card over: what lies beyond is unknown, so not expanded.
-    leaf: bool,
+    pub(crate) leaf: bool,
 }
 
-/// Decide from a masked position (see [`mask`]). `deals_left` is the number
-/// of stock deals remaining. Returns the decision and the positions examined.
-pub fn decide(obs: &Game, deals_left: usize, cfg: &HumanConfig) -> (Decision, usize) {
-    if obs.is_won() {
-        return (Decision::Stuck, 0);
-    }
+/// Breadth-first search from the masked position `obs` over moves that
+/// reveal nothing, up to `cfg.nodes` positions; node 0 is `obs` itself.
+pub(crate) fn search(obs: &Game, cfg: &HumanConfig) -> Vec<Node> {
     let root = State::from_game(obs);
-    let base = cfg.eval(&root);
     let mut nodes = vec![Node { state: root.clone(), parent: u32::MAX, mv: Move::Deal, leaf: false }];
     let mut seen: HashMap<u64, (), IdBuild> = HashMap::default();
     seen.insert(root.hash(), ());
@@ -202,6 +198,22 @@ pub fn decide(obs: &Game, deals_left: usize, cfg: &HumanConfig) -> (Decision, us
         }
         i += 1;
     }
+    nodes
+}
+
+/// Decide from a masked position (see [`mask`]). `deals_left` is the number
+/// of stock deals remaining. Returns the decision and the positions examined.
+pub fn decide(obs: &Game, deals_left: usize, cfg: &HumanConfig) -> (Decision, usize) {
+    if obs.is_won() {
+        return (Decision::Stuck, 0);
+    }
+    let nodes = search(obs, cfg);
+    (choose(&nodes, deals_left, cfg), nodes.len())
+}
+
+/// The player's choice among the positions `search` found.
+pub(crate) fn choose(nodes: &[Node], deals_left: usize, cfg: &HumanConfig) -> Decision {
+    let base = cfg.eval(&nodes[0].state);
 
     // Best strict improvement; the breadth-first order makes ties go to the
     // shorter line.
@@ -248,17 +260,17 @@ pub fn decide(obs: &Game, deals_left: usize, cfg: &HumanConfig) -> (Decision, us
         // below the current position, and looking again from there would
         // just walk back.
         return match pick {
-            Some(k) => (Decision::Deal(line_to(&nodes, k)), nodes.len()),
-            None => (Decision::Stuck, nodes.len()),
+            Some(k) => Decision::Deal(line_to(nodes, k)),
+            None => Decision::Stuck,
         };
     }
     if best == 0 {
-        return (Decision::Stuck, nodes.len());
+        return Decision::Stuck;
     }
-    (Decision::Play(line_to(&nodes, best)), nodes.len())
+    Decision::Play(line_to(nodes, best))
 }
 
-fn line_to(nodes: &[Node], mut k: usize) -> Vec<Move> {
+pub(crate) fn line_to(nodes: &[Node], mut k: usize) -> Vec<Move> {
     let mut line = Vec::new();
     while k != 0 {
         line.push(nodes[k].mv);
@@ -280,36 +292,58 @@ pub struct PlayResult {
 
 /// Play `g` to the end, deciding every move from the masked position only.
 pub fn play(g: &Game, cfg: &HumanConfig) -> PlayResult {
+    let trace = std::env::var_os("SPIDER_H_TRACE").is_some();
+    play_until(g, cfg, 0, true, trace)
+}
+
+/// Play until the game is won or stuck, or the stock is down to
+/// `stop_level` deals: with `play_on`, play that stage out and stop
+/// before dealing again; without, stop as soon as it is reached.
+pub(crate) fn play_until(g: &Game, cfg: &HumanConfig, stop_level: usize, play_on: bool, trace: bool) -> PlayResult {
     let mut g = g.clone();
     let mut work = 0;
     let start = g.move_count();
     while !g.is_won() && g.move_count() - start < 5000 {
+        if !play_on && g.deals_remaining() <= stop_level {
+            break;
+        }
         let (d, w) = decide(&mask(&g), g.deals_remaining(), cfg);
         work += w as u64;
-        if std::env::var_os("SPIDER_H_TRACE").is_some() {
+        if matches!(d, Decision::Deal(_)) && g.deals_remaining() <= stop_level {
+            break;
+        }
+        if trace {
             eprintln!("{}\n{d:?} ({w} positions)", show(&g));
         }
-        match d {
-            Decision::Play(line) => {
-                for mv in line {
-                    g.apply(mv).expect("planned move is legal");
-                }
-            }
-            Decision::Deal(line) => {
-                let mut flipped = false;
-                for mv in line {
-                    g.apply(mv).expect("planned move is legal");
-                    flipped |= !g.history().last().unwrap().flips.is_empty();
-                }
-                if !flipped {
-                    g.apply(Move::Deal).expect("deal is legal");
-                }
-            }
-            Decision::Stuck => break,
+        if !apply_decision(&mut g, &d) {
+            break;
         }
     }
     let moves = g.history()[start..].iter().map(|r| r.mv).collect();
     PlayResult { won: g.is_won(), moves, completed: g.completed.len(), work }
+}
+
+/// Carry out a decision on the real game; false for [`Decision::Stuck`].
+pub fn apply_decision(g: &mut Game, d: &Decision) -> bool {
+    match d {
+        Decision::Play(line) => {
+            for &mv in line {
+                g.apply(mv).expect("planned move is legal");
+            }
+        }
+        Decision::Deal(line) => {
+            let mut flipped = false;
+            for &mv in line {
+                g.apply(mv).expect("planned move is legal");
+                flipped |= !g.history().last().unwrap().flips.is_empty();
+            }
+            if !flipped {
+                g.apply(Move::Deal).expect("deal is legal");
+            }
+        }
+        Decision::Stuck => return false,
+    }
+    true
 }
 
 /// The visible position as text, one column per line (`##` = face down).

@@ -1,7 +1,11 @@
+pub mod az;
 pub mod beam;
 pub mod certify;
 pub mod game;
 pub mod human;
+pub mod lines;
 pub mod lineopt;
+pub mod pimc;
+pub mod smart;
 pub mod rollout;
 pub mod solver;
