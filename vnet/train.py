@@ -151,8 +151,14 @@ def load(path, dev):
 
 
 def read_data(paths):
-    arrs = [np.fromfile(p, np.uint8).reshape(-1, RECORD) for p in paths]
-    return np.concatenate(arrs) if len(arrs) > 1 else arrs[0]
+    sizes = [os.path.getsize(p) // RECORD for p in paths]
+    data = np.empty((sum(sizes), RECORD), np.uint8)
+    at = 0
+    for p, n in zip(paths, sizes):
+        with open(p, "rb") as f:
+            f.readinto(memoryview(data[at : at + n]).cast("B"))
+        at += n
+    return data
 
 
 def split(data, val_mod):

@@ -145,6 +145,8 @@ pub struct VConfig {
     pub margin: f32,
     /// A line must beat dealing by this much.
     pub deal_margin: f32,
+    /// Added to a line's value per point the evaluation gains by it.
+    pub hand: f32,
     /// Decisions without a card turned, a deal or a completed suit after
     /// which the player deals (or, with the stock gone, stops).
     pub max_idle: usize,
@@ -158,7 +160,7 @@ pub struct VConfig {
 
 impl VConfig {
     /// Defaults with `SPIDER_V_*` overrides (TOP_NORMAL, TOP_DEAL,
-    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, DEAL_MARGIN, MAX_IDLE, EXPLORE, RECORD); `SPIDER_L_*` for the line
+    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, DEAL_MARGIN, HAND, MAX_IDLE, EXPLORE, RECORD); `SPIDER_L_*` for the line
     /// search.
     pub fn from_env(suits: u8) -> VConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -172,6 +174,7 @@ impl VConfig {
             deal_samples: get("DEAL_SAMPLES", 8),
             margin: get("MARGIN", f32::NAN),
             deal_margin: get("DEAL_MARGIN", 0.0),
+            hand: get("HAND", 0.0),
             max_idle: get("MAX_IDLE", 20),
             explore: get("EXPLORE", 0.0),
             record: get("RECORD", 0.0),
@@ -184,6 +187,9 @@ impl VConfig {
 pub struct Proposal {
     pub encs: Vec<u8>,
     lines: Vec<Vec<Move>>,
+    /// The evaluation's gain (normal mode) of each line's end over the
+    /// current position.
+    gains: Vec<i32>,
     deals: usize,
 }
 
@@ -227,6 +233,8 @@ pub fn propose(g: &Game, visited: &HashSet<u64>, cfg: &VConfig) -> Proposal {
         encode(&nodes[k].state, deals_left, &mut encs[(i + 1) * ENC..]);
     }
     let lines = picked.iter().map(|&k| line_to(&nodes, k).concat()).collect();
+    let root_value = nodes[0].parts.value(deals_left, cfg.line.empty);
+    let gains = picked.iter().map(|&k| nodes[k].parts.value(deals_left, cfg.line.empty).saturating_sub(root_value)).collect();
     let mut deals = 0;
     if deals_left > 0 && root.len.iter().all(|&l| l > 0 && (l as usize) < MAXC) {
         let count = unseen_counts(&obs);
@@ -246,7 +254,7 @@ pub fn propose(g: &Game, visited: &HashSet<u64>, cfg: &VConfig) -> Proposal {
             deals += 1;
         }
     }
-    Proposal { encs, lines, deals }
+    Proposal { encs, lines, gains, deals }
 }
 
 /// What the player does.
@@ -264,10 +272,11 @@ pub fn choose(g: &Game, p: &Proposal, v: &[f32], visited: &HashSet<u64>, idle: u
     let can_deal = p.deals > 0;
     let deal_v = can_deal.then(|| v[1 + n..].iter().sum::<f32>() / p.deals as f32);
     if idle < cfg.max_idle {
-        let best = (0..n).max_by(|&a, &b| v[1 + a].total_cmp(&v[1 + b]));
+        let score = |k: usize| v[1 + k] + cfg.hand * p.gains[k] as f32;
+        let best = (0..n).max_by(|&a, &b| score(a).total_cmp(&score(b)));
         if let Some(b) = best {
-            let over_root = cfg.margin.is_nan() || v[1 + b] > v[0] + cfg.margin;
-            if over_root && deal_v.is_none_or(|d| v[1 + b] > d + cfg.deal_margin) {
+            let over_root = cfg.margin.is_nan() || score(b) > v[0] + cfg.margin;
+            if over_root && deal_v.is_none_or(|d| score(b) > d + cfg.deal_margin) {
                 return Action::Play(p.lines[b].clone());
             }
         }
