@@ -103,9 +103,9 @@ impl SmartConfig {
 }
 
 /// splitmix64.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
