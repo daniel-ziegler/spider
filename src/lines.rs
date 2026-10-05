@@ -100,6 +100,11 @@ pub struct LineConfig {
     /// Such a column whose sequence has somewhere to go now (half of it for
     /// a card just turned, which is unknown).
     pub turnable: i32,
+    /// A line is chosen at random among those within this much of the
+    /// best (0: always the best).
+    pub waver: i32,
+    /// Seeds the random choice (a different salt, a different game).
+    pub salt: u64,
 }
 
 impl LineConfig {
@@ -133,6 +138,8 @@ impl LineConfig {
             hidden_sq: 0,
             dig: 0,
             turnable: 0,
+            waver: 0,
+            salt: 0,
         };
         match suits {
             1 => LineConfig {
@@ -181,7 +188,7 @@ impl LineConfig {
 
     /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
     /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
-    /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE).
+    /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT).
     pub fn from_env(suits: u8) -> LineConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
             std::env::var(format!("SPIDER_L_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -213,6 +220,8 @@ impl LineConfig {
             hidden_sq: get("HIDDEN_SQ", d.hidden_sq),
             dig: get("DIG", d.dig),
             turnable: get("TURNABLE", d.turnable),
+            waver: get("WAVER", d.waver),
+            salt: get("SALT", d.salt),
         }
     }
 
@@ -601,6 +610,10 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
                 best_score = sc;
             }
         }
+        if cfg.waver > 0 && best.is_some() {
+            let near: Vec<usize> = (1..nodes.len()).filter(|&k| fresh(k) && value(k, mode, empty) > base.max(best_score - cfg.waver - 1)).collect();
+            best = Some(near[waver_pick(&nodes[0].state, cfg, near.len())]);
+        }
         best
     };
     if !tempo.dealing {
@@ -623,11 +636,19 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
         if v > LOST && dn[k].leaf { v + cfg.deal_flip } else { v }
     };
     let base = dn[0].parts.value(deals_left, empty);
-    let best = (1..dn.len())
+    let mut best = (1..dn.len())
         .filter(|&k| !visited.contains(&dn[k].state.hash()))
         .map(|k| (deal_value(k), k))
         .filter(|&(v, _)| v > base)
         .max_by_key(|&(v, k)| (v, std::cmp::Reverse(k)));
+    if let (true, Some((top, _))) = (cfg.waver > 0, best) {
+        let near: Vec<(i32, usize)> = (1..dn.len())
+            .filter(|&k| !visited.contains(&dn[k].state.hash()))
+            .map(|k| (deal_value(k), k))
+            .filter(|&(v, _)| v > base && v >= top - cfg.waver)
+            .collect();
+        best = Some(near[waver_pick(&dn[0].state, cfg, near.len())]);
+    }
     let work = if widen { nodes.len() + dn.len() } else { nodes.len() };
     if let Some((_, k)) = best {
         tempo.dealing = true;
@@ -657,6 +678,16 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
         Some(k) => (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len()),
         None => (Choice::Stuck, nodes.len() + wide.len()),
     }
+}
+
+/// A random index below `n` for the wavering choice in `root`, the same
+/// every time for the same position and salt.
+fn waver_pick(root: &State, cfg: &LineConfig, n: usize) -> usize {
+    let mut x = root.hash() ^ cfg.salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    (x % n as u64) as usize
 }
 
 /// The cards not visible in the masked position `obs`, by card.
