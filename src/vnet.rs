@@ -139,16 +139,26 @@ pub struct VConfig {
     /// Sampled deals averaged to value dealing.
     pub deal_samples: usize,
     /// A line must beat the position's own value by this much (in win
-    /// probability) to be played.
+    /// probability) to be played; NaN: it need not (the position's value
+    /// already counts its best continuation, so the best line beats it
+    /// only by chance).
     pub margin: f32,
+    /// A line must beat dealing by this much.
+    pub deal_margin: f32,
     /// Decisions without a card turned, a deal or a completed suit after
     /// which the player deals (or, with the stock gone, stops).
     pub max_idle: usize,
+    /// Probability that a line played is instead a random one of the best
+    /// four by the network (for training data).
+    pub explore: f64,
+    /// Probability that a decision's position (and the end of the line
+    /// played) is recorded.
+    pub record: f64,
 }
 
 impl VConfig {
     /// Defaults with `SPIDER_V_*` overrides (TOP_NORMAL, TOP_DEAL,
-    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, MAX_IDLE); `SPIDER_L_*` for the line
+    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, DEAL_MARGIN, MAX_IDLE, EXPLORE, RECORD); `SPIDER_L_*` for the line
     /// search.
     pub fn from_env(suits: u8) -> VConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -160,8 +170,11 @@ impl VConfig {
             top_deal: get("TOP_DEAL", 64),
             top_flip: get("TOP_FLIP", 32),
             deal_samples: get("DEAL_SAMPLES", 8),
-            margin: get("MARGIN", 0.0),
+            margin: get("MARGIN", f32::NAN),
+            deal_margin: get("DEAL_MARGIN", 0.0),
             max_idle: get("MAX_IDLE", 20),
+            explore: get("EXPLORE", 0.0),
+            record: get("RECORD", 0.0),
         }
     }
 }
@@ -253,7 +266,8 @@ pub fn choose(g: &Game, p: &Proposal, v: &[f32], visited: &HashSet<u64>, idle: u
     if idle < cfg.max_idle {
         let best = (0..n).max_by(|&a, &b| v[1 + a].total_cmp(&v[1 + b]));
         if let Some(b) = best {
-            if v[1 + b] > v[0] + cfg.margin && deal_v.is_none_or(|d| v[1 + b] > d) {
+            let over_root = cfg.margin.is_nan() || v[1 + b] > v[0] + cfg.margin;
+            if over_root && deal_v.is_none_or(|d| v[1 + b] > d + cfg.deal_margin) {
                 return Action::Play(p.lines[b].clone());
             }
         }
@@ -282,13 +296,16 @@ pub struct Live {
     idle: usize,
     start: usize,
     pub done: bool,
+    rng: Rng,
+    /// Recorded positions (see [`VConfig::record`]), `ENC` bytes each.
+    encs: Vec<u8>,
 }
 
 impl Live {
     pub fn new(suits: u8, seed: u64) -> Live {
         let game = Game::new(suits, seed);
         let start = game.move_count();
-        Live { seed, game, visited: HashSet::new(), idle: 0, start, done: false }
+        Live { seed, game, visited: HashSet::new(), idle: 0, start, done: false, rng: Rng(seed ^ 0x5E1F), encs: Vec::new() }
     }
 
     /// The next decision's proposal (marks the game done if it is over).
@@ -305,7 +322,24 @@ impl Live {
     /// Act on the network's values for the proposal.
     pub fn act(&mut self, p: &Proposal, v: &[f32], cfg: &VConfig) {
         let before = progress(&self.game);
-        let action = choose(&self.game, p, v, &self.visited, self.idle, cfg);
+        let unit = |rng: &mut Rng| (rng.next() >> 11) as f64 / (1u64 << 53) as f64;
+        let mut action = choose(&self.game, p, v, &self.visited, self.idle, cfg);
+        let n = p.lines.len();
+        if matches!(action, Action::Play(_)) && n > 0 && unit(&mut self.rng) < cfg.explore {
+            // A random line among the best four by the network.
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| v[1 + b].total_cmp(&v[1 + a]));
+            let k = order[(self.rng.next() % n.min(4) as u64) as usize];
+            action = Action::Play(p.lines[k].clone());
+        }
+        if cfg.record > 0.0 && unit(&mut self.rng) < cfg.record {
+            self.encs.extend_from_slice(&p.encs[..ENC]);
+            if let Action::Play(moves) = &action {
+                if let Some(k) = p.lines.iter().position(|l| l == moves) {
+                    self.encs.extend_from_slice(&p.encs[(1 + k) * ENC..(2 + k) * ENC]);
+                }
+            }
+        }
         if std::env::var_os("SPIDER_V_TRACE").is_some() {
             let best = v[1..1 + p.lines.len()].iter().cloned().fold(f32::NAN, f32::max);
             let deal = (p.deals > 0).then(|| v[1 + p.lines.len()..].iter().sum::<f32>() / p.deals as f32);
@@ -321,6 +355,19 @@ impl Live {
             Action::Stop => self.done = true,
         }
         self.idle = if progress(&self.game) == before { self.idle + 1 } else { 0 };
+    }
+
+    /// The recorded positions as training records (see [`RECORD`]), once
+    /// the game is over.
+    pub fn records(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for e in self.encs.chunks(ENC) {
+            out.extend_from_slice(e);
+            out.push(self.game.is_won() as u8);
+            out.push(self.game.completed.len() as u8);
+            out.extend_from_slice(&(self.seed as u32).to_le_bytes());
+        }
+        out
     }
 }
 

@@ -227,7 +227,8 @@ def cmd_play(a, dev):
     net = load(a.ckpt, dev)
     env = dict(os.environ)
     env["SPIDER_V_CONCURRENT"] = str(a.concurrent)
-    p = subprocess.Popen([VPLAY, str(a.suits), str(a.first), str(a.count)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    args = [VPLAY, str(a.suits), str(a.first), str(a.count)] + ([a.record] if a.record else [])
+    p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     out, inp = p.stdout, p.stdin
     games = won = suits = 0
     evals = 0
@@ -291,6 +292,7 @@ def main():
     p.add_argument("--concurrent", type=int, default=256)
     p.add_argument("--chunk", type=int, default=8192)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--record", help="append the games' records here (set SPIDER_V_RECORD)")
     a = ap.parse_args()
     dev = torch.device("cuda")
     {"train": cmd_train, "play": cmd_play}[a.cmd](a, dev)

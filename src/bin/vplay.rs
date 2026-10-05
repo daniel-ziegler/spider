@@ -1,7 +1,8 @@
 //! The value network player, games in lockstep, the network served by
 //! `vnet/train.py` over stdin/stdout.
-//! Usage: vplay suits first count   (SPIDER_V_CONCURRENT games at once;
-//! SPIDER_V_* and SPIDER_L_* settings, see `VConfig`)
+//! Usage: vplay suits first count [records.bin]   (SPIDER_V_CONCURRENT
+//! games at once; SPIDER_V_* and SPIDER_L_* settings, see `VConfig`; with
+//! SPIDER_V_RECORD, records of the games are appended to records.bin)
 //!
 //! Messages to the server (little-endian):
 //!   'E' n:u32, n positions of ENC bytes: the server answers n f32 win
@@ -19,6 +20,7 @@ fn main() -> std::io::Result<()> {
     let concurrent: usize = std::env::var("SPIDER_V_CONCURRENT").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let cfg = VConfig::from_env(suits);
+    let mut rec_out = a.get(4).map(|p| std::io::BufWriter::new(std::fs::OpenOptions::new().create(true).append(true).open(p).unwrap()));
     let mut out = std::io::BufWriter::with_capacity(1 << 22, std::io::stdout().lock());
     let mut inp = std::io::stdin().lock();
     let mut next = first;
@@ -73,6 +75,9 @@ fn main() -> std::io::Result<()> {
         while i < live.len() {
             if live[i].done {
                 let l = live.swap_remove(i);
+                if let Some(f) = rec_out.as_mut() {
+                    f.write_all(&l.records())?;
+                }
                 out.write_all(b"G")?;
                 out.write_all(&l.seed.to_le_bytes())?;
                 out.write_all(&[l.game.completed.len() as u8, l.game.is_won() as u8])?;
@@ -81,6 +86,9 @@ fn main() -> std::io::Result<()> {
                 i += 1;
             }
         }
+    }
+    if let Some(f) = rec_out.as_mut() {
+        f.flush()?;
     }
     out.write_all(b"Q")?;
     out.flush()?;
