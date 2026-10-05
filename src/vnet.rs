@@ -156,11 +156,16 @@ pub struct VConfig {
     /// Probability that a decision's position (and the end of the line
     /// played) is recorded.
     pub record: f64,
+    /// The line player decides while it raises the normal value; the
+    /// network only once it would turn to dealing (or giving up), choosing
+    /// among lines by the about-to-deal evaluation, lines that turn a card,
+    /// and dealing.
+    pub deal_only: bool,
 }
 
 impl VConfig {
     /// Defaults with `SPIDER_V_*` overrides (TOP_NORMAL, TOP_DEAL,
-    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, DEAL_MARGIN, HAND, MAX_IDLE, EXPLORE, RECORD); `SPIDER_L_*` for the line
+    /// TOP_FLIP, DEAL_SAMPLES, MARGIN, DEAL_MARGIN, HAND, MAX_IDLE, EXPLORE, RECORD, DEAL_ONLY); `SPIDER_L_*` for the line
     /// search.
     pub fn from_env(suits: u8) -> VConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -178,6 +183,7 @@ impl VConfig {
             max_idle: get("MAX_IDLE", 20),
             explore: get("EXPLORE", 0.0),
             record: get("RECORD", 0.0),
+            deal_only: get("DEAL_ONLY", 0u8) != 0,
         }
     }
 }
@@ -209,7 +215,9 @@ pub fn propose(g: &Game, visited: &HashSet<u64>, cfg: &VConfig) -> Proposal {
     let obs = mask(g);
     let deals_left = g.deals_remaining();
     let root = State::from_game(&obs);
-    let nodes = search_state(root.clone(), &cfg.line);
+    // Deciding only about dealing: the line player's wider search for it.
+    let lc = if cfg.deal_only && cfg.line.deal_splits != 0 { LineConfig { splits: cfg.line.deal_splits, ..cfg.line } } else { cfg.line };
+    let nodes = search_state(root.clone(), &lc);
     let fresh: Vec<usize> = (1..nodes.len())
         .filter(|&k| !visited.contains(&nodes[k].state.hash()) && nodes[k].parts.value(deals_left, cfg.line.empty) > LOST)
         .filter(|&k| nodes[k].state.len.iter().all(|&l| (l as usize) <= MAXC))
@@ -223,7 +231,9 @@ pub fn propose(g: &Game, visited: &HashSet<u64>, cfg: &VConfig) -> Proposal {
             }
         }
     };
-    take(&mut fresh.iter().map(|&k| (nodes[k].parts.value(deals_left, cfg.line.empty), k)).collect(), cfg.top_normal);
+    if !cfg.deal_only {
+        take(&mut fresh.iter().map(|&k| (nodes[k].parts.value(deals_left, cfg.line.empty), k)).collect(), cfg.top_normal);
+    }
     let end_empty = if deals_left > 0 { cfg.line.deal_empty } else { cfg.line.end_empty };
     take(&mut fresh.iter().map(|&k| (nodes[k].parts.value(deals_left, end_empty), k)).collect(), cfg.top_deal);
     take(&mut fresh.iter().filter(|&&k| nodes[k].leaf).map(|&k| (nodes[k].parts.value(deals_left, cfg.line.empty), k)).collect(), cfg.top_flip);
@@ -304,6 +314,8 @@ pub struct Live {
     visited: HashSet<u64>,
     idle: usize,
     start: usize,
+    /// The line player's tempo (with [`VConfig::deal_only`]).
+    tempo: Tempo,
     pub done: bool,
     rng: Rng,
     /// Recorded positions (see [`VConfig::record`]), `ENC` bytes each.
@@ -314,18 +326,41 @@ impl Live {
     pub fn new(suits: u8, seed: u64) -> Live {
         let game = Game::new(suits, seed);
         let start = game.move_count();
-        Live { seed, game, visited: HashSet::new(), idle: 0, start, done: false, rng: Rng(seed ^ 0x5E1F), encs: Vec::new() }
+        Live { seed, game, visited: HashSet::new(), idle: 0, start, tempo: Tempo::default(), done: false, rng: Rng(seed ^ 0x5E1F), encs: Vec::new() }
     }
 
     /// The next decision's proposal (marks the game done if it is over).
     pub fn propose(&mut self, cfg: &VConfig) -> Option<Proposal> {
-        let g = &self.game;
-        if g.is_won() || g.move_count() - self.start >= 5000 || g.columns.iter().any(|c| c.len() > MAXC) {
-            self.done = true;
-            return None;
+        loop {
+            let g = &self.game;
+            if g.is_won() || g.move_count() - self.start >= 5000 || g.columns.iter().any(|c| c.len() > MAXC) {
+                self.done = true;
+                return None;
+            }
+            let obs = mask(g);
+            self.visited.insert(masked_hash(&obs));
+            if !cfg.deal_only || self.tempo.dealing {
+                return Some(propose(g, &self.visited, cfg));
+            }
+            // The line player plays its normal lines; once it would turn to
+            // dealing, the network decides.
+            let mut tempo = self.tempo;
+            match decide_steps(&obs, g.deals_remaining(), &self.visited, &mut tempo, &cfg.line).0 {
+                Choice::Line(steps) if !tempo.dealing => {
+                    let before = progress(&self.game);
+                    for mv in steps.concat() {
+                        self.game.apply(mv).expect("planned move is legal");
+                    }
+                    if progress(&self.game) != before {
+                        self.idle = 0;
+                    }
+                }
+                _ => {
+                    self.tempo.dealing = true;
+                    return Some(propose(&self.game, &self.visited, cfg));
+                }
+            }
         }
-        self.visited.insert(masked_hash(&mask(g)));
-        Some(propose(g, &self.visited, cfg))
     }
 
     /// Act on the network's values for the proposal.
@@ -364,6 +399,9 @@ impl Live {
             Action::Stop => self.done = true,
         }
         self.idle = if progress(&self.game) == before { self.idle + 1 } else { 0 };
+        if self.idle == 0 {
+            self.tempo = Tempo::default();
+        }
     }
 
     /// The recorded positions as training records (see [`RECORD`]), once
