@@ -161,12 +161,38 @@ def split(data, val_mod):
     return np.nonzero(~val)[0], np.nonzero(val)[0]
 
 
-def batch_of(data, idx, dev):
+def batch_of(data, idx, dev, target=None):
     rec = torch.from_numpy(data[idx]).to(dev, non_blocking=True)
     x = rec[:, :ENC]
-    won = rec[:, ENC].float()
+    won = rec[:, ENC].float() if target is None else torch.from_numpy(target[idx]).to(dev)
     suits = rec[:, ENC + 1].float() / 8
     return x, won, suits
+
+
+@torch.no_grad()
+def predict(net, data, dev, bs=4096):
+    net.eval()
+    out = np.empty(len(data), np.float32)
+    for i in range(0, len(data), bs):
+        x = torch.from_numpy(data[i : i + bs, :ENC]).to(dev)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            w, _ = net(x)
+        out[i : i + bs] = torch.sigmoid(w.float()).cpu().numpy()
+    return out
+
+
+def td_targets(data, pred, lam):
+    """Lambda-returns: records of a game are consecutive, in order; the
+    last one's return is the outcome, an earlier one's (1 - lam) times the
+    next record's value plus lam times the next record's return."""
+    seed = data[:, ENC + 2 :].copy().view("<u4")[:, 0]
+    won = data[:, ENC].astype(np.float32)
+    same = np.r_[seed[1:] == seed[:-1], False]
+    g = won.copy()
+    for i in range(len(data) - 2, -1, -1):
+        if same[i]:
+            g[i] = (1 - lam) * pred[i + 1] + lam * g[i + 1]
+    return g
 
 
 @torch.no_grad()
@@ -195,6 +221,14 @@ def cmd_train(a, dev):
     net = Net(a.d, a.layers, a.heads, a.ff).to(dev)
     if a.init:
         net.load_state_dict(torch.load(a.init, map_location=dev, weights_only=False)["model"])
+    target = None
+    if a.td_lambda is not None:
+        tnet = load(a.td_net or a.init, dev)
+        t0 = time.time()
+        pred = predict(tnet, data, dev)
+        target = td_targets(data, pred, a.td_lambda)
+        print(json.dumps(dict(td_lambda=a.td_lambda, mean_target=round(float(target.mean()), 4), secs=round(time.time() - t0))), flush=True)
+        del tnet
     params = sum(p.numel() for p in net.parameters())
     print(json.dumps(dict(records=len(data), train=len(tr), val=len(va), win_rate=round(float(base), 4), base_loss=round(ent, 4), params=params)), flush=True)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=a.wd)
@@ -205,7 +239,7 @@ def cmd_train(a, dev):
     run = 0.0
     for step in range(1, steps + 1):
         idx = np.sort(rng.choice(tr, a.batch, replace=False)) if len(tr) < 4 * a.batch else np.sort(tr[rng.integers(0, len(tr), a.batch)])
-        x, won, suits = batch_of(data, idx, dev)
+        x, won, suits = batch_of(data, idx, dev, target)
         perm = torch.argsort(torch.rand(len(idx), NUM_COLS, device=dev), 1)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             w, s = net(x, perm)
@@ -284,6 +318,8 @@ def main():
     t.add_argument("--val-size", type=int, default=100000)
     t.add_argument("--log-every", type=int, default=1000)
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--td-lambda", type=float, help="train on lambda-returns bootstrapped by --td-net (default --init)")
+    t.add_argument("--td-net")
     p = sub.add_parser("play")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--suits", type=int, default=4)
