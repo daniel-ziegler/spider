@@ -279,6 +279,38 @@ Self-play has not yet improved on the imitation network (learning rate
 2e-4, 64 simulations per move, about 0.5 games per second, limited by the
 line search on the CPU).
 
+### Value network player
+
+`src/vnet.rs`, `src/bin/vplay.rs` and `vnet/train.py` train only a value
+network, which judges where the line player's lines end. A position is a
+token per card (its rank, suit, row and column embeddings summed with
+features: how it links to the cards above and below, how much of its
+same-suit run is above and below it, whether its column is one run), a
+token per empty column and one for the deals left and suits completed: a
+transformer of 160k parameters (3 layers, width 64). A decision values the
+line player's best few lines by each of its evaluations and a few sampled
+deals, and plays the best line or deals. Training data is 200,000 line
+player games, then self-play, with TD(λ) targets bootstrapped from the
+previous network.
+
+    .venv/bin/python vnet/train.py play --ckpt runs/vnet/v3.pt --first 20001 --count 2000
+
+| four suits, seeds 20001–22000                          | won   |
+|--------------------------------------------------------|-------|
+| line player                                            | 630   |
+| network on outcomes of line player games               | 548   |
+| after a round of self-play, TD(0.7) targets            | 599   |
+| another round of self-play                             | 567   |
+| line player until it would deal, network from there    | 638   |
+
+Valuing more lines makes it worse: the network's errors are larger than
+the differences between good lines, so the more it chooses from the more
+likely it picks one it overrates. Deciding only about dealing
+(`SPIDER_V_DEAL_ONLY=1`), it is no better than the line player at any
+margin by which a line must beat dealing (`SPIDER_V_DEAL_MARGIN`, best at
+0.1); dealing as soon as the line player stops raising its normal value
+does as well (628).
+
 ### Superhint: following the solver's line
 
 `H` shows the winning line's next move on the solver line, marks its next
