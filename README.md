@@ -191,7 +191,7 @@ prints every decision with the position it was made from and
 *line* of human-sized steps. A step moves a run, or a mixed-suit sequence
 through the empty columns (up to `2^e` same-suit pieces with `e` free
 empty columns), from the top of a column onto a card one rank higher or
-into an empty column. A line is up to eight steps (four suits; searched as
+into an empty column. A line is up to 14 steps (four suits; searched as
 a beam of the 300 best positions at each depth), each touching a column an
 earlier step touched, and it ends as soon as a card turns over. The player
 scores where every line ends with a visible-only evaluation (completed
@@ -210,7 +210,12 @@ table is lost, and it never returns to a position it has stood in.
 |-------|-----------------------------------|-------------|
 | 1     | 88% (seeds 10001–11000)           | 8           |
 | 2     | 65% (seeds 10001–11000)           | 180         |
-| 4     | 31% (seeds 1–1000, 20001–22000)   | 310         |
+| 4     | 34% (seeds 1–2000, 20001–22000)   | 520         |
+
+With four suits, longer lines are what more time buys: over the 4,000
+seeds, 8 steps win 30.4%, 12 steps 33.1%, 14 steps 34.1% and 16 steps
+33.7%, while a wider beam (1,000 or 3,000 positions) gains nothing and
+splitting runs anywhere in the normal search loses.
 
 `cargo run --release --bin lines -- <suits> <first> <count>` plays the
 seeds on all cores; `SPIDER_L_*` override the weights and search.
@@ -297,7 +302,7 @@ previous network.
 
 | four suits, seeds 20001–22000                          | won   |
 |--------------------------------------------------------|-------|
-| line player                                            | 630   |
+| line player (8-step lines; 14 steps: 707)              | 630   |
 | network on outcomes of line player games               | 548   |
 | after a round of self-play, TD(0.7) targets            | 599   |
 | another round of self-play                             | 567   |

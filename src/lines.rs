@@ -163,7 +163,7 @@ impl LineConfig {
                 ..base
             },
             _ => LineConfig {
-                max_steps: 8,
+                max_steps: 14,
                 beam: 300,
                 deal_splits: 3,
                 hidden: 71,
