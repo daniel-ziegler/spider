@@ -299,7 +299,7 @@ pub fn choose(g: &Game, p: &Proposal, v: &[f32], visited: &HashSet<u64>, idle: u
     }
     // Nothing better and no deal possible: the line player decides, about
     // to deal (filling empty columns, or giving up with the stock gone).
-    let mut tempo = Tempo { dealing: true };
+    let mut tempo = Tempo { dealing: true, ..Tempo::default() };
     match decide_steps(&mask(g), g.deals_remaining(), visited, &mut tempo, &cfg.line).0 {
         Choice::Line(steps) => Action::Play(steps.concat()),
         Choice::Deal => Action::Deal,
@@ -344,7 +344,7 @@ impl Live {
             }
             // The line player plays its normal lines; once it would turn to
             // dealing, the network decides.
-            let mut tempo = self.tempo;
+            let mut tempo = self.tempo.clone();
             match decide_steps(&obs, g.deals_remaining(), &self.visited, &mut tempo, &cfg.line).0 {
                 Choice::Line(steps) if !tempo.dealing => {
                     let before = progress(&self.game);

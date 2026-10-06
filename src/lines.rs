@@ -105,6 +105,9 @@ pub struct LineConfig {
     pub waver: i32,
     /// Seeds the random choice (a different salt, a different game).
     pub salt: u64,
+    /// Play at most this many steps of the chosen line, then search again
+    /// (0: the whole line).
+    pub replan: usize,
 }
 
 impl LineConfig {
@@ -140,6 +143,7 @@ impl LineConfig {
             turnable: 0,
             waver: 0,
             salt: 0,
+            replan: 0,
         };
         match suits {
             1 => LineConfig {
@@ -172,6 +176,7 @@ impl LineConfig {
             _ => LineConfig {
                 max_steps: 14,
                 beam: 300,
+                expect_top: 4,
                 deal_splits: 3,
                 hidden: 71,
                 empty: 83,
@@ -222,6 +227,7 @@ impl LineConfig {
             turnable: get("TURNABLE", d.turnable),
             waver: get("WAVER", d.waver),
             salt: get("SALT", d.salt),
+            replan: get("REPLAN", d.replan),
         }
     }
 
@@ -562,6 +568,18 @@ pub(crate) fn line_to(nodes: &[Node], mut k: usize) -> Vec<Vec<Move>> {
 pub fn decide(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut Tempo, cfg: &LineConfig) -> (Decision, usize) {
     let (d, n) = decide_steps(obs, deals_left, visited, tempo, cfg);
     let d = match d {
+        Choice::Line(steps) if cfg.replan > 0 => {
+            // A new line replaces the plan only if it ends better than the
+            // plan does (in the same mode), so that replanning cannot
+            // wander.
+            if tempo.plan.is_empty() || tempo.dealing != tempo.plan_dealing || tempo.value > tempo.plan_value {
+                tempo.plan = steps;
+                tempo.plan_value = tempo.value;
+                tempo.plan_dealing = tempo.dealing;
+            }
+            let n = cfg.replan.min(tempo.plan.len());
+            Decision::Play(tempo.plan.drain(..n).flatten().collect())
+        }
         Choice::Line(steps) => Decision::Play(steps.concat()),
         Choice::Deal => Decision::Deal,
         Choice::Stuck => Decision::Stuck,
@@ -571,12 +589,19 @@ pub fn decide(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut
 
 /// What the player keeps from one decision to the next until a card turns,
 /// a deal or a suit completes.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Tempo {
     /// It is about to deal (it played a line for that), so it does not go
     /// back to raising the normal value: going back and forth between the
     /// two could go on for ever without repeating a position.
     pub dealing: bool,
+    /// The value (in its mode) of where the line chosen last ends.
+    pub value: i32,
+    /// With [`LineConfig::replan`]: the rest of the line being played, the
+    /// value where it ends, and whether that is about to deal.
+    pub plan: Vec<Vec<Move>>,
+    pub plan_value: i32,
+    pub plan_dealing: bool,
 }
 
 /// A decision with the line split into its steps.
@@ -618,6 +643,7 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
     };
     if !tempo.dealing {
         if let Some(k) = best_raising(0, cfg.empty) {
+            tempo.value = value(k, 0, cfg.empty);
             return (Choice::Line(line_to(&nodes, k)), nodes.len());
         }
     }
@@ -650,8 +676,9 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
         best = Some(near[waver_pick(&dn[0].state, cfg, near.len())]);
     }
     let work = if widen { nodes.len() + dn.len() } else { nodes.len() };
-    if let Some((_, k)) = best {
+    if let Some((v, k)) = best {
         tempo.dealing = true;
+        tempo.value = v;
         return (Choice::Line(line_to(dn, k)), work);
     }
     if deals_left == 0 {
@@ -671,11 +698,15 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
             .filter(|&k| nodes[k].parts.value(deals_left, empty) > LOST)
     };
     if let Some(k) = fill(&nodes) {
+        tempo.value = nodes[k].parts.value(deals_left, empty);
         return (Choice::Line(line_to(&nodes, k)), nodes.len());
     }
     let wide = search_state(nodes[0].state.clone(), &LineConfig { splits: 3, beam: cfg.beam.max(100), ..*cfg });
     match fill(&wide) {
-        Some(k) => (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len()),
+        Some(k) => {
+            tempo.value = wide[k].parts.value(deals_left, empty);
+            (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len())
+        }
         None => (Choice::Stuck, nodes.len() + wide.len()),
     }
 }
