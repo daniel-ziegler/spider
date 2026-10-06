@@ -23,7 +23,12 @@ suits. They are listed in `challenges.txt` (`date suits seed`), which is built
 into the server. `tools/dailies` picks them: for each date and suit count, the
 first candidate seed (from a hash of the date) that the peeking solver proves
 winnable. It keeps dates already in the file, so extending the list never
-changes a past challenge:
+changes a past challenge. From 2026-10-06 the four-suit challenges are instead
+taken (in shuffled order) from `tools/dailies/picked4.txt`: seeds that the
+non-peeking line player, choosing at random among nearly equal lines, wins
+more than 70% of the time and a weak one (short lines, narrow search) less
+than 40% (`src/bin/pick_seeds.rs`; 544 found in seeds 1–20000, 452 used
+through 2027-12-31):
 
 ```
 cd tools/dailies && cargo run --release -- 2028-01-01 2028-12-31
