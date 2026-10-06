@@ -206,16 +206,51 @@ a line that turns a card, makes no difference at any value: a turned card
 already raises the value by itself. A position with stock left and fewer than ten cards on the
 table is lost, and it never returns to a position it has stood in.
 
+With two and four suits, two further things:
+
+* **Expectimax over the turned card.** The best four lines that turn a
+  card (by each evaluation) are valued not at where they end but at the
+  mean, over every card that can come up weighted by how many of it are
+  unseen, of the best position a small search (4 steps, beam 20) reaches
+  after it.
+* **Replanning.** It plays only the first four steps of the chosen line
+  and searches again. It keeps to the rest of the line unless the new
+  search finds one that ends better (in the same mode), so it cannot
+  wander among equally good positions.
+
 | suits | won                               | ms per game |
 |-------|-----------------------------------|-------------|
 | 1     | 88% (seeds 10001–11000)           | 8           |
-| 2     | 65% (seeds 10001–11000)           | 180         |
-| 4     | 34% (seeds 1–2000, 20001–22000)   | 520         |
+| 2     | 70% (seeds 10001–14000)           | 1,400       |
+| 4     | 38.6% (seeds 1–2000, 20001–22000) | 2,100       |
 
-With four suits, longer lines are what more time buys: over the 4,000
-seeds, 8 steps win 30.4%, 12 steps 33.1%, 14 steps 34.1% and 16 steps
-33.7%, while a wider beam (1,000 or 3,000 positions) gains nothing and
-splitting runs anywhere in the normal search loses.
+| four suits, wins of 4,000 seeds (1–2000, 20001–22000) | won   | ms per game |
+|-------------------------------------------------------|-------|-------------|
+| 14-step lines                                         | 34.1% | 850         |
+| expectimax, best 2 lines that turn a card (1–2000)    | 33.6% | 780         |
+| expectimax, best 4                                    | 36.1% | 1,200       |
+| expectimax, best 8 (1–2000)                           | 33.9% | 1,800       |
+| expectimax, best 4, replanning after every step       | 38.8% | 6,500       |
+| expectimax, best 4, replanning after 4 steps          | 38.6% | 2,100       |
+
+On seeds 1–2000 alone, replanning after 2, 6 and 8 steps wins 37.0%,
+36.4% and 36.0% (4 steps: 37.4%); a deeper search after the turned card
+(8 steps, beam 50) does no better at four times the cost, nor does
+expectimax in the wider about-to-deal search, and dropping the rule that
+every step touch a column touched before loses a little (32.0%).
+Replanning after every step without expectimax was far slower (stopped
+after 40 minutes on the 2,000 seeds, which take under 2 minutes without
+replanning); why is not yet understood.
+
+With two suits the lines were 6 steps with no beam: replanning alone does
+nothing there (65%), expectimax alone gives 67%, and lines as long as with
+four suits, expectimax and replanning 70%. One suit gains nothing from
+either.
+
+Before expectimax, with four suits, longer lines were what more time
+bought: over the 4,000 seeds, 8 steps win 30.4%, 12 steps 33.1%, 14 steps
+34.1% and 16 steps 33.7%, while a wider beam (1,000 or 3,000 positions)
+gains nothing and splitting runs anywhere in the normal search loses.
 
 `cargo run --release --bin lines -- <suits> <first> <count>` plays the
 seeds on all cores; `SPIDER_L_*` override the weights and search.

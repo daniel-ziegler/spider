@@ -14,7 +14,9 @@
 //! card turns over, since what comes up is unknown. With four suits the
 //! lines are searched as a beam: at each depth only the best positions by
 //! the evaluation are taken further. The player scores where every line
-//! ends with a visible-only evaluation and plays the best line that raises
+//! ends with a visible-only evaluation (a few of the best lines that turn
+//! a card are scored instead by expectimax over the card that comes up,
+//! `expect_top`) and plays the best line that raises
 //! the value; failing that, it scores the same lines again "about to deal",
 //! with a separate (lower) value for an empty column, since a deal needs
 //! every column filled (and a line that turns a card can earn a bonus,
@@ -23,7 +25,9 @@
 //! (going back and forth between the two values could go on for ever
 //! without repeating a position). If nothing raises the value it deals,
 //! first filling the empty columns, splitting runs if it must; with the
-//! stock gone it gives up.
+//! stock gone it gives up. With `replan` it plays only the first few steps
+//! of a line and searches again, keeping to the line unless the new search
+//! finds one that ends better.
 //!
 //! The evaluation counts completed suits, face-down cards, empty columns,
 //! same-suit links, off-suit links (with an amount per rank of the lower
@@ -111,9 +115,10 @@ pub struct LineConfig {
 }
 
 impl LineConfig {
-    /// Defaults (four suits tuned on seeds 30001-34000: 31% won on seeds
-    /// 1-1000 and 20001-22000; two suits: 65% of seeds 10001-11000; one
-    /// suit, with two-step lines: 88%).
+    /// Defaults (weights for four suits tuned on seeds 30001-34000, with
+    /// expectimax and replanning 38.6% won on seeds 1-2000 and
+    /// 20001-22000; two suits: 70% of seeds 10001-14000; one suit, with
+    /// two-step lines: 88%).
     pub fn for_suits(suits: u8) -> LineConfig {
         let base = LineConfig {
             max_steps: 6,
@@ -161,6 +166,10 @@ impl LineConfig {
                 ..base
             },
             2 => LineConfig {
+                max_steps: 14,
+                beam: 300,
+                expect_top: 4,
+                replan: 4,
                 hidden: 22,
                 empty: 26,
                 deal_empty: -28,
@@ -177,6 +186,7 @@ impl LineConfig {
                 max_steps: 14,
                 beam: 300,
                 expect_top: 4,
+                replan: 4,
                 deal_splits: 3,
                 hidden: 71,
                 empty: 83,
@@ -193,7 +203,7 @@ impl LineConfig {
 
     /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
     /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
-    /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT).
+    /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT, REPLAN).
     pub fn from_env(suits: u8) -> LineConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
             std::env::var(format!("SPIDER_L_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
