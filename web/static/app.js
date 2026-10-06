@@ -36,7 +36,8 @@ async function api(method, path, body) {
 // ---------------------------------------------------------------- state
 
 let me = null; // {username, settings} when logged in
-let settings = { colors: 'mine', ...store.get('spider:settings', {}) };
+let settings = { colors: 'mine', breaks: true, ...store.get('spider:settings', {}) };
+applySettings({}, false);
 
 let g; // the Game
 let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
