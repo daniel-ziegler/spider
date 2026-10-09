@@ -238,9 +238,18 @@ On seeds 1–2000 alone, replanning after 2, 6 and 8 steps wins 37.0%,
 (8 steps, beam 50) does no better at four times the cost, nor does
 expectimax in the wider about-to-deal search, and dropping the rule that
 every step touch a column touched before loses a little (32.0%).
-Replanning after every step without expectimax was far slower (stopped
-after 40 minutes on the 2,000 seeds, which take under 2 minutes without
-replanning); why is not yet understood.
+Replanning after every step without expectimax wins 35.0% of seeds 1–2000
+(2.6 s per game). Without the rule that a new line must end better than
+the plan, replanning wanders between near-equal positions for thousands
+of moves.
+
+Retuning the 13 evaluation weights for this search (coordinate search on
+seeds 30001–32000) found nothing that holds up. An empty column at 103
+instead of 83 gained 34 wins on the tuning seeds and 11 on the 4,000
+others; the full tuned set (also `hidden_sq` -6, `end_empty` 29, one win
+each on the tuning seeds) lost 62 there. Small weight changes move the
+result by a few dozen wins per 2,000 seeds either way, so the weights are
+left as they were.
 
 With two suits the lines were 6 steps with no beam: replanning alone does
 nothing there (65%), expectimax alone gives 67%, and lines as long as with
