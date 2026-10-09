@@ -368,7 +368,7 @@ function homeHtml() {
     <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider</h1></div>
     <section class="box">
       <h2>Today's challenges</h2>
-      <p class="dim">${today ? `${longDate(today.date)} · every one can be won` : dailies ? 'No challenges today.' : 'Loading…'}</p>
+      <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
       ${today ? `<div class="tiles">${today.challenges.map(challengeTile).join('')}</div>` : ''}
       <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
     </section>
