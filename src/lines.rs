@@ -116,7 +116,7 @@ pub struct LineConfig {
 
 impl LineConfig {
     /// Defaults (weights for four suits tuned on seeds 30001-34000, with
-    /// expectimax and replanning 38.6% won on seeds 1-2000 and
+    /// expectimax and replanning 38.9% won on seeds 1-2000 and
     /// 20001-22000; two suits: 70% of seeds 10001-14000; one suit, with
     /// two-step lines: 88%).
     pub fn for_suits(suits: u8) -> LineConfig {
@@ -189,7 +189,7 @@ impl LineConfig {
                 replan: 4,
                 deal_splits: 3,
                 hidden: 71,
-                empty: 83,
+                empty: 103,
                 end_empty: 39,
                 off: -10,
                 run_sq: 7,

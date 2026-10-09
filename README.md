@@ -222,7 +222,7 @@ With two and four suits, two further things:
 |-------|-----------------------------------|-------------|
 | 1     | 88% (seeds 10001–11000)           | 8           |
 | 2     | 70% (seeds 10001–14000)           | 1,400       |
-| 4     | 38.6% (seeds 1–2000, 20001–22000) | 2,100       |
+| 4     | 38.9% (seeds 1–2000, 20001–22000) | 2,100       |
 
 | four suits, wins of 4,000 seeds (1–2000, 20001–22000) | won   | ms per game |
 |-------------------------------------------------------|-------|-------------|
@@ -232,6 +232,7 @@ With two and four suits, two further things:
 | expectimax, best 8 (1–2000)                           | 33.9% | 1,800       |
 | expectimax, best 4, replanning after every step       | 38.8% | 6,500       |
 | expectimax, best 4, replanning after 4 steps          | 38.6% | 2,100       |
+| the same, an empty column valued at 103 (was 83)      | 38.9% | 2,100       |
 
 On seeds 1–2000 alone, replanning after 2, 6 and 8 steps wins 37.0%,
 36.4% and 36.0% (4 steps: 37.4%); a deeper search after the turned card
@@ -248,8 +249,9 @@ seeds 30001–32000) found nothing that holds up. An empty column at 103
 instead of 83 gained 34 wins on the tuning seeds and 11 on the 4,000
 others; the full tuned set (also `hidden_sq` -6, `end_empty` 29, one win
 each on the tuning seeds) lost 62 there. Small weight changes move the
-result by a few dozen wins per 2,000 seeds either way, so the weights are
-left as they were.
+result by a few dozen wins per 2,000 seeds either way. Only the empty
+column's value was changed (to 103): over all 6,000 seeds it is 45 wins
+ahead, the full set 26 behind.
 
 With two suits the lines were 6 steps with no beam: replanning alone does
 nothing there (65%), expectimax alone gives 67%, and lines as long as with
