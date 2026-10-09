@@ -28,7 +28,12 @@ taken (in shuffled order) from `tools/dailies/picked4.txt`: seeds that the
 non-peeking line player, choosing at random among nearly equal lines, wins
 more than 70% of the time and a weak one (short lines, narrow search) less
 than 40% (`src/bin/pick_seeds.rs`; 544 found in seeds 1–20000, 452 used
-through 2027-12-31):
+through 2027-12-31). From 2026-10-10 through 2026-12-31 the two- and
+four-suit challenges come from `picked2_2026.txt` and `picked4_2026.txt`,
+picked the same way with the stronger line player (expectimax and
+replanning; the two-suit weak player uses 2-step lines): 136 found in
+two-suit seeds 1–320 and 172 in four-suit seeds 20001–23200, 83 of each
+used:
 
 ```
 cd tools/dailies && cargo run --release -- 2028-01-01 2028-12-31
