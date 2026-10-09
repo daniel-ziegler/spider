@@ -442,12 +442,12 @@ page.addEventListener('submit', e => {
 });
 
 function accountDialog(mode) {
-  const signup = mode === 'signup';
+  const signup = mode === 'signup', invite = store.get('spider:invite', '');
   openDialog(`<h2>${signup ? 'Sign up' : 'Log in'}</h2>
     <form>
       <label for="u">Username</label><input id="u" type="text" autocomplete="username" autocapitalize="off" required>
       <label for="p">Password</label><input id="p" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" required>
-      ${signup ? '<label for="i">Invite code</label><input id="i" type="text" autocomplete="off" autocapitalize="off" required>' : ''}
+      ${signup ? `<div${invite ? ' hidden' : ''}><label for="i">Invite code</label><input id="i" type="text" autocomplete="off" autocapitalize="off" required value="${esc(invite)}"></div>` : ''}
       <p class="error"></p>
       <div class="row">
         <button type="button" data-switch style="margin-right:auto">${signup ? 'I have an account' : 'New here? Sign up'}</button>
@@ -463,6 +463,7 @@ function accountDialog(mode) {
       me = await api('POST', signup ? '/signup' : '/login', body);
     } catch (err) {
       form.querySelector('.error').textContent = err.message;
+      form.i?.parentElement.removeAttribute('hidden'); // a bad code from an invite link can be fixed
       return;
     }
     dialog.close();
@@ -882,4 +883,11 @@ const startup = Promise.all([
   api('GET', '/me').then(user => { if (user) { me = user; return loggedIn(); } }).catch(() => {}),
   fetchDailies(),
 ]);
+// An invite link, /join/CODE, opens the sign-up form with the code filled in.
+const join = /^\/join\/([^/]+)\/?$/.exec(location.pathname);
+if (join) {
+  store.set('spider:invite', decodeURIComponent(join[1]));
+  history.replaceState(null, '', '/');
+  startup.then(() => { if (!me) accountDialog('signup'); });
+}
 route();
