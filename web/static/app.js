@@ -1,5 +1,6 @@
-// The Spider client: board, mouse/touch and keyboard play, saves in-progress
-// games in this browser, and records wins on the server.
+// The Spider client: a home page with the daily challenges, an archive of past
+// ones, and the board, with mouse/touch and keyboard play. In-progress games
+// are saved in this browser; wins are recorded on the server.
 import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves } from './game.js';
 
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -9,7 +10,7 @@ const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
 
 const $ = s => document.querySelector(s);
-const board = $('#board'), dialog = $('#dialog');
+const board = $('#board'), page = $('#page'), dialog = $('#dialog');
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -39,7 +40,8 @@ let me = null; // {username, settings} when logged in
 let settings = { colors: 'mine', breaks: true, ...store.get('spider:settings', {}) };
 applySettings({}, false);
 
-let g; // the Game
+let view = 'home'; // 'home', 'archive' or 'game'
+let g = null; // the Game, once one is loaded
 let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
@@ -79,8 +81,9 @@ function load(suits, seed, push = false) {
       g = new Game(suits, seed);
     }
   }
-  const url = `/play/${suits}/${seed}`;
-  if (location.pathname !== url) history[push ? 'pushState' : 'replaceState'](null, '', url);
+  setUrl(`/play/${suits}/${seed}`, push);
+  setView('game');
+  computeLayout();
   $('#dangler').hidden = true;
   save();
   render();
@@ -89,15 +92,30 @@ function load(suits, seed, push = false) {
 
 const randomSeed = () => 1 + Math.floor(Math.random() * 999_999_999);
 
-function loadFromUrl() {
+function setUrl(url, push) {
+  if (location.pathname !== url) history[push ? 'pushState' : 'replaceState'](null, '', url);
+}
+
+function setView(v) {
+  view = v;
+  document.body.dataset.view = v;
+}
+
+// The home page or the archive.
+function showPage(name, push = false) {
+  setUrl(name === 'archive' ? '/archive' : '/', push);
+  setView(name);
+  sel = hint = null;
+  $('#dangler').hidden = true;
+  if (dialog.open) dialog.close();
+  render();
+  page.scrollTop = 0;
+}
+
+function route() {
   const m = /^\/play\/([124])\/(\d{1,16})\/?$/.exec(location.pathname);
   if (m && +m[2] <= MAX_SEED) return load(+m[1], +m[2]);
-  const last = store.get('spider:last', null);
-  if (last) {
-    const [suits, seed] = last.split('/').map(Number);
-    return load(suits, seed);
-  }
-  load(2, randomSeed());
+  showPage(location.pathname === '/archive' ? 'archive' : 'home');
 }
 
 // ---------------------------------------------------------------- actions
@@ -238,9 +256,9 @@ function showWinDialog(win, body) {
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
       <b>${plural(win.real_undos, 'real undo')}</b> <span class="dim">(${plural(win.undos, 'undo')} in all)</span></p>
     <div>${body}</div>
-    <div class="row"><button data-close>Look at the board</button><button class="primary" data-new>New game</button></div>`,
+    <div class="row"><button data-close>Look at the board</button><button class="primary" data-home>More games</button></div>`,
   e => {
-    if (e.target.closest('[data-new]')) newGameDialog();
+    if (e.target.closest('[data-home]')) showPage('home', true);
     if (e.target.closest('[data-login]')) accountDialog('login');
   });
 }
@@ -282,43 +300,7 @@ function confirmDialog(title, text, ok, keys = []) {
 
 const suitsLabel = n => plural(n, 'suit');
 
-function newGameDialog() {
-  let suits = g.suits;
-  const choices = () => [1, 2, 4].map(n => `<button type="button" data-suits="${n}" aria-pressed="${n === suits}">${suitsLabel(n)}</button>`).join('');
-  const today = dailies?.days[0];
-  openDialog(`${today && today.date === dailies.today ? `<h2>Today's challenges</h2>
-    <div class="challenges">${today.challenges.map(c => challengeButton(c)).join('')}</div>
-    <div class="row" style="justify-content:flex-start;margin-top:8px"><button type="button" data-archive>Archive of past challenges</button></div>
-    <hr>` : ''}
-    <h2>New game</h2>
-    <form>
-      <label>Suits</label><div class="choices">${choices()}</div>
-      <label for="seed">Deal number</label>
-      <input id="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="random">
-      <p class="error"></p>
-      <div class="row"><button type="button" data-close>Cancel</button><button class="primary">Deal</button></div>
-    </form>`,
-  e => {
-    const b = e.target.closest('[data-suits]');
-    if (b) { suits = +b.dataset.suits; dialog.querySelector('.choices').innerHTML = choices(); }
-    if (e.target.closest('[data-archive]')) archiveDialog();
-    playChallenge(e);
-  });
-  dialog.querySelector('form').onsubmit = e => {
-    e.preventDefault();
-    const text = dialog.querySelector('#seed').value.trim();
-    const seed = text === '' ? randomSeed() : Number(text);
-    if (!/^\d*$/.test(text) || seed > MAX_SEED) {
-      dialog.querySelector('.error').textContent = 'A deal number is a whole number.';
-      return;
-    }
-    dialog.close();
-    load(suits, seed, true);
-  };
-  dialog.querySelector('form .primary').focus();
-}
-
-// ---------------------------------------------------------------- daily challenges
+// ---------------------------------------------------------------- home page and daily challenges
 
 async function fetchDailies() {
   try { dailies = await api('GET', '/dailies'); } catch { /* offline: no dailies */ }
@@ -335,43 +317,129 @@ function dayLabel(date) {
   return new Date(`${date}T12:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-// A challenge's button: the full form for today's, a compact one for the
-// archive (whose columns are labelled with the suits).
-function challengeButton(c, compact = false) {
-  const save = store.get('spider:saves', {})[keyOf(c.suits, c.seed)];
-  const started = save && (save.moves || save.undos);
-  const won = c.solved ? `${c.solved} won` : '&nbsp;';
-  let lines;
-  if (compact) {
-    lines = c.mine ? [`✓ ${c.mine.moves}`, `${c.mine.real_undos} real`, won] : [started ? 'started' : 'play', '&nbsp;', won];
-  } else {
-    const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')}, ${c.mine.real_undos} real` : started ? 'in progress' : '&nbsp;';
-    lines = [suitsLabel(c.suits), status, won];
-  }
+const longDate = date => new Date(`${date}T12:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+const isMe = name => !!me && name.toLowerCase() === me.username.toLowerCase();
+const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf(suits, seed)]; return !!(s && (s.moves || s.undos)); };
+
+// Green once you have won it; yellow if that took real undos.
+const wonClass = c => (c.mine ? (c.mine.real_undos ? ' won undos' : ' won') : '');
+
+function solversText(c) {
+  if (!c.solved) return 'No one has won it yet';
+  if (!c.solvers) return `Won by ${plural(c.solved, 'player')}`;
+  return `Won by ${c.solvers.map(n => (isMe(n) ? 'you' : esc(n))).join(', ')}`;
+}
+
+// A challenge on the home page.
+function challengeTile(c) {
+  const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${c.mine.real_undos ? plural(c.mine.real_undos, 'real undo') : 'no real undos'}`
+    : started(c.suits, c.seed) ? 'In progress' : 'Play';
+  const pips = [...new Set(Array.from({ length: 4 }, (_, i) => (c.suits === 1 ? 0 : c.suits === 2 ? i % 2 : i)))]
+    .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
+  return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${c.suits}/${c.seed}">
+    <span class="pips">${pips}</span><span class="name">${suitsLabel(c.suits)}</span>
+    <small class="status">${status}</small><small class="who">${solversText(c)}</small></button>`;
+}
+
+// A challenge in the archive, whose columns are labelled with the suits.
+function challengeCell(c) {
+  const lines = c.mine ? [`✓ ${c.mine.moves}`, `${c.mine.real_undos} real`]
+    : [started(c.suits, c.seed) ? 'started' : 'play', '&nbsp;'];
+  lines.push(c.solvers?.length ? c.solvers.map(n => (isMe(n) ? 'you' : esc(n))).join(', ') : c.solved ? `${c.solved} won` : '&nbsp;');
   const [first, ...rest] = lines;
-  return `<button type="button" class="challenge${c.mine ? ' won' : ''}" data-play="${c.suits}/${c.seed}">
+  return `<button type="button" class="challenge${wonClass(c)}" data-play="${c.suits}/${c.seed}" title="${solversText(c)}">
     <span>${first}</span>${rest.map(l => `<small>${l}</small>`).join('')}</button>`;
 }
 
-// Click handler part for dialogs listing challenges.
+// The last game played in this browser, unless it is finished.
+function unfinishedGame() {
+  const key = store.get('spider:last', null), s = key && store.get('spider:saves', {})[key];
+  if (!s || !s.moves || s.recorded) return null;
+  const [suits, seed] = key.split('/').map(Number);
+  if (pending().some(p => p.suits === suits && p.seed === seed)) return null;
+  const daily = dailyDate(suits, seed);
+  return { key, label: `${daily ? `daily ${dayLabel(daily)}, ${suitsLabel(suits)}` : `${suitsLabel(suits)}, deal ${seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
+}
+
+function homeHtml() {
+  const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
+  const last = unfinishedGame();
+  return `<div class="pagewrap">
+    <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider</h1></div>
+    <section class="box">
+      <h2>Today's challenges</h2>
+      <p class="dim">${today ? `${longDate(today.date)} · every one can be won` : dailies ? 'No challenges today.' : 'Loading…'}</p>
+      ${today ? `<div class="tiles">${today.challenges.map(challengeTile).join('')}</div>` : ''}
+      <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
+    </section>
+    <section class="box">
+      <h2>Free play</h2>
+      ${last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : ''}
+      <label>Random deal</label>
+      <div class="choices">${[1, 2, 4].map(n => `<button type="button" data-random="${n}">${suitsLabel(n)}</button>`).join('')}</div>
+      <form class="deal">
+        <label for="seed">Or a deal number</label>
+        <div class="choices"><input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 42">
+          <select name="suits" aria-label="Suits">${[1, 2, 4].map(n => `<option value="${n}"${n === 2 ? ' selected' : ''}>${suitsLabel(n)}</option>`).join('')}</select>
+          <button>Play</button></div>
+        <p class="error"></p>
+      </form>
+    </section>
+    <section class="box account">
+      ${me ? `<p>Logged in as <b>${esc(me.username)}</b></p><div class="row start"><button type="button" data-logout>Log out</button></div>`
+        : `<p>Log in to record your wins and see how your friends did.</p>
+          <div class="row start"><button type="button" class="primary" data-login>Log in</button><button type="button" data-signup>Create account</button></div>`}
+    </section>
+  </div>`;
+}
+
+function archiveHtml() {
+  return `<div class="pagewrap">
+    <div class="row start"><button type="button" data-go="home">← Home</button></div>
+    <section class="box">
+      <h2>Daily challenges</h2>
+      <p class="dim">Every deal here can be won. Green means you won it with no real undos, yellow that you needed some.</p>
+      ${dailies ? `<div class="archive"><span></span>${[1, 2, 4].map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
+        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
+        : '<p class="dim">Loading…</p>'}
+    </section>
+  </div>`;
+}
+
+function renderPage() {
+  $('#info').innerHTML = '';
+  page.innerHTML = view === 'archive' ? archiveHtml() : homeHtml();
+}
+
+// Click handler part for anything listing challenges.
 function playChallenge(e) {
   const b = e.target.closest('[data-play]');
   if (!b) return;
   const [suits, seed] = b.dataset.play.split('/').map(Number);
-  dialog.close();
-  if (suits !== g.suits || seed !== g.seed) load(suits, seed, true);
+  if (dialog.open) dialog.close();
+  if (view !== 'game' || suits !== g.suits || seed !== g.seed) load(suits, seed, true);
 }
 
-function archiveDialog() {
-  if (!dailies) return;
-  openDialog(`<h2>Daily challenges</h2>
-    <p class="dim">Every deal here can be won. Results show once you have won a deal yourself.</p>
-    <div class="archive"><span></span>${[1, 2, 4].map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
-      ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>
-      ${d.challenges.map(c => challengeButton(c, true)).join('')}`).join('')}</div>
-    <div class="row"><button data-close>Close</button></div>`, playChallenge);
-  dialog.classList.add('wide');
-}
+page.addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.go) showPage(b.dataset.go, true);
+  else if (b.dataset.random) load(+b.dataset.random, randomSeed(), true);
+  else if ('login' in b.dataset) accountDialog('login');
+  else if ('signup' in b.dataset) accountDialog('signup');
+  else if ('logout' in b.dataset) logout();
+  else playChallenge(e);
+});
+
+page.addEventListener('submit', e => {
+  e.preventDefault();
+  const form = e.target, text = form.seed.value.trim();
+  if (!/^\d+$/.test(text) || Number(text) > MAX_SEED) {
+    form.querySelector('.error').textContent = 'A deal number is a whole number.';
+    return;
+  }
+  load(+form.suits.value, Number(text), true);
+});
 
 function accountDialog(mode) {
   const signup = mode === 'signup';
@@ -399,7 +467,7 @@ function accountDialog(mode) {
     }
     dialog.close();
     await loggedIn();
-    if (g.isWon()) onWin();
+    if (view === 'game' && g.isWon()) onWin();
   };
   form.u.focus();
 }
@@ -449,7 +517,7 @@ function helpDialog() {
     ['<kbd>d</kbd>', 'deal'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
     ['<kbd>R</kbd>', 'restart this deal'],
-    ['<kbd>n</kbd>', 'new game'],
+    ['<kbd>n</kbd>', 'home: daily challenges and new games'],
     ['<kbd>?</kbd>', 'this help'],
   ];
   openDialog(`<h2>How to play</h2>
@@ -463,11 +531,13 @@ function helpDialog() {
 }
 
 function menuDialog() {
+  const playing = view === 'game';
   const items = [
-    ['archive', 'Daily challenge archive', !!dailies],
-    ['restart', 'Restart this deal', g.canUndo()],
-    ['results', 'Results for this deal', g.isWon()],
-    ['link', 'Copy link to this deal', true],
+    ['home', 'Home: daily challenges and new games', view !== 'home'],
+    ['archive', 'Past daily challenges', view !== 'archive'],
+    ['restart', 'Restart this deal', playing && g.canUndo()],
+    ['results', 'Results for this deal', playing && g.isWon()],
+    ['link', 'Copy link to this deal', playing],
     ['settings', 'Settings', true],
     ['help', 'How to play', true],
     me ? ['logout', `Log out (${esc(me.username)})`, true] : ['login', 'Log in or sign up', true],
@@ -479,20 +549,24 @@ function menuDialog() {
     if (!b) return;
     dialog.close();
     switch (b.dataset.m) {
-      case 'archive': return archiveDialog();
+      case 'home': return showPage('home', true);
+      case 'archive': return showPage('archive', true);
       case 'restart': return restart();
       case 'results': return onWin();
       case 'link': return copyLink();
       case 'settings': return settingsDialog();
       case 'help': return helpDialog();
       case 'login': return accountDialog('login');
-      case 'logout':
-        await api('POST', '/logout').catch(() => {});
-        me = null;
-        fetchDailies();
-        return flash('Logged out');
+      case 'logout': return logout();
     }
   });
+}
+
+async function logout() {
+  await api('POST', '/logout').catch(() => {});
+  me = null;
+  fetchDailies();
+  flash('Logged out');
 }
 
 function copyLink() {
@@ -563,6 +637,7 @@ function faceHtml(card, style, extra = '', attrs = '') {
 }
 
 function render() {
+  if (view !== 'game') return renderPage();
   const hinted = hint?.moves[hint.i], hintTo = hinted && !hinted.deal ? hinted.to : null;
   let html = '';
   for (let c = 0; c < NUM_COLS; c++) {
@@ -752,6 +827,12 @@ function changeCount(d) {
 document.addEventListener('keydown', e => {
   if (dialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
+  if (view !== 'game') {
+    if (e.target.closest?.('input, select')) return;
+    if (k === '?') helpDialog();
+    else if (k === 'Escape' && view === 'archive') showPage('home', true);
+    return;
+  }
   if (k === 'Shift') return;
   if (k === 'Tab') return e.preventDefault(), markKeyboardUsed(), cycleHint(e.shiftKey ? -1 : 1);
   if (hint && (k === 'Enter' || k === ' ')) return e.preventDefault(), play(hint.moves[hint.i]);
@@ -767,7 +848,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'u') undo();
   else if (k === 'r') redo();
   else if (k === 'R') restart();
-  else if (k === 'n') newGameDialog();
+  else if (k === 'n') showPage('home', true);
   else if (k === '?') helpDialog();
   else return;
   e.preventDefault();
@@ -784,24 +865,21 @@ function markKeyboardUsed() {
 // ---------------------------------------------------------------- start
 
 for (const b of document.querySelectorAll('#bar button')) b.addEventListener('mousedown', e => e.preventDefault()); // keep keyboard focus on the board
-$('#b-new').onclick = newGameDialog;
+$('#b-new').onclick = () => showPage('home', true);
 $('#b-undo').onclick = undo;
 $('#b-redo').onclick = redo;
 $('#b-hint').onclick = () => cycleHint(1);
 $('#b-menu').onclick = menuDialog;
-$('#b-logo').onclick = helpDialog;
+$('#b-logo').onclick = () => showPage('home', true);
 $('#stock').onclick = () => play(DEAL);
 $('#info').onclick = e => { if (e.target.closest('.seed')) copyLink(); };
-window.addEventListener('resize', () => { computeLayout(); render(); });
-window.addEventListener('popstate', loadFromUrl);
+window.addEventListener('resize', () => { if (view === 'game') { computeLayout(); render(); } });
+window.addEventListener('popstate', route);
 
 document.documentElement.style.setProperty('--back', cardBack());
 applySettings({}, false);
-computeLayout();
-const startPath = location.pathname;
 const startup = Promise.all([
   api('GET', '/me').then(user => { if (user) { me = user; return loggedIn(); } }).catch(() => {}),
   fetchDailies(),
 ]);
-loadFromUrl();
-startup.then(() => { if (startPath === '/archive') archiveDialog(); });
+route();

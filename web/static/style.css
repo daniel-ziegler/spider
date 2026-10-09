@@ -200,16 +200,16 @@ dialog .choices button[aria-pressed=true] { background: var(--accent); color: #2
 dialog .dim { color: var(--ink-dim); }
 dialog.wide { max-width: min(640px, calc(100vw - 32px)); }
 dialog hr { border: none; border-top: 1px solid #ffffff1c; margin: 18px 0 14px; }
-.challenges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .archive { display: grid; grid-template-columns: auto repeat(3, 1fr); gap: 6px 8px; align-items: center; max-height: 60vh; overflow-y: auto; padding-right: 4px; }
 .archive .day { color: var(--ink-dim); font-size: 14px; }
-.archive .head { color: var(--ink-dim); font-size: 13px; position: sticky; top: 0; background: #1f2a27; padding: 2px 0; }
+.archive .head { color: var(--ink-dim); font-size: 13px; position: sticky; top: 0; background: #1f2a27; padding: 2px 0; z-index: 1; }
 button.challenge { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: 6px 10px; text-align: left; line-height: 1.3; }
 button.challenge span { font-weight: 600; }
 button.challenge small { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-button.challenge.won { border-color: #6ee7a8; }
-button.challenge.won span, button.challenge.won small:first-of-type { color: #6ee7a8; }
 button.challenge small:last-child { color: var(--ink-dim); }
+button.challenge.won { --won: #6ee7a8; border-color: var(--won); background: color-mix(in srgb, var(--won) 12%, transparent); }
+button.challenge.won.undos { --won: #ffd54a; }
+button.challenge.won > span:not(.pips), button.challenge.won small:first-of-type { color: var(--won); }
 dialog .error { color: #ff8a80; min-height: 1.4em; }
 dialog .menu { display: grid; gap: 8px; }
 dialog .menu button { text-align: left; }
@@ -229,6 +229,37 @@ dialog dd { margin: 0; color: var(--ink-dim); }
 .swatch.trad span:nth-child(3) { color: var(--hearts); }
 .swatch.trad span:nth-child(4) { color: var(--spades); }
 
+/* Home page and archive (the board and tray are hidden there) */
+body:not([data-view=game]) :is(#board, #tray, #b-new, #b-undo, #b-redo, #b-hint) { display: none; }
+body[data-view=game] #page { display: none; }
+#page { overflow-y: auto; -webkit-user-select: text; user-select: text; }
+.pagewrap { max-width: 680px; margin: 0 auto; padding: 8px max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left)); }
+.hero { display: flex; align-items: flex-end; justify-content: center; gap: 14px; padding-bottom: 14px; }
+.hero h1 { margin: 0 0 4px; font-size: 42px; letter-spacing: 0.05em; }
+.hero .hang { display: flex; flex-direction: column; align-items: center; transform-origin: top center; animation: sway 4s ease-in-out infinite; }
+.hero .thread { width: 1px; height: 34px; background: #fff8; }
+.hero svg { width: 56px; height: 56px; margin-top: -10px; color: #d9cdf0; --spider-eye: #2a1f3d; filter: drop-shadow(0 3px 5px #0007); }
+.box { background: #1f2a27; border-radius: 14px; padding: 18px 20px; margin: 14px 0; box-shadow: 0 8px 30px #0005; }
+.box h2 { margin: 0 0 2px; font-size: 20px; }
+.box p { margin: 6px 0; }
+.box label { display: block; margin: 12px 0 6px; color: var(--ink-dim); font-size: 14px; }
+.box .dim { color: var(--ink-dim); }
+.box .error { color: #ff8a80; min-height: 1.2em; margin: 4px 0 0; font-size: 14px; }
+.box input, .box select { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid #ffffff33; background: #0003; color: inherit; }
+.box input { width: 10em; }
+.box select option { background: #1f2a27; }
+.choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.row.start { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.pagewrap > .row.start { margin-top: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+button.tile { padding: 12px 12px 10px; gap: 2px; border-radius: 12px; min-height: 128px; justify-content: flex-start; }
+button.tile .pips { display: flex; gap: 2px; background: var(--face); border-radius: 6px; padding: 0 6px; font-size: 20px; line-height: 1.3; font-style: normal; margin-bottom: 6px; }
+button.tile .pips i { font-style: normal; color: var(--suit); }
+button.tile .name { font-size: 17px; }
+button.tile small { white-space: normal; font-size: 13px; }
+button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
+.box .archive { max-height: none; overflow: visible; }
+
 /* A spider lowers itself on a thread when you win. */
 #dangler[hidden] { display: none; }
 #dangler { position: fixed; top: 0; right: 12%; z-index: 100; pointer-events: none; display: flex; flex-direction: column; align-items: center; animation: descend 2.2s cubic-bezier(.3,1.4,.5,1) both; }
@@ -237,6 +268,12 @@ dialog dd { margin: 0; color: var(--ink-dim); }
 @keyframes descend { from { transform: translateY(-110%); } to { transform: translateY(0); } }
 
 @media (max-width: 640px) {
+  .tiles { gap: 6px; }
+  button.tile { padding: 10px 8px 8px; min-height: 120px; }
+  button.tile small { font-size: 12px; }
+  .hero .thread { height: 20px; }
+  .hero h1 { font-size: 34px; }
+  .box { padding: 14px; }
   #bar { gap: 4px 6px; padding-top: 4px; padding-bottom: 4px; flex-wrap: wrap; }
   #bar nav { margin-left: auto; }
   #info { order: 3; flex-basis: 100%; }
@@ -248,6 +285,6 @@ dialog dd { margin: 0; color: var(--ink-dim); }
 
 /* Keep the logo and buttons on one row on small phones. */
 @media (max-width: 440px) {
-  .logo .word { display: none; }
+  body[data-view=game] .logo .word { display: none; }
   #bar .logo { padding-left: 26px; }
 }

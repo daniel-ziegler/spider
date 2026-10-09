@@ -310,11 +310,16 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     let user = current_user(&app, &headers)?;
     let today = today();
     let db = app.db.lock().unwrap();
-    let mut solved: HashMap<(u8, i64), i64> = HashMap::new();
-    let mut stmt = db.prepare("SELECT suits, seed, COUNT(DISTINCT user_id) FROM wins GROUP BY suits, seed")?;
+    // Who has won each deal, first winner first. Logged-in friends see the
+    // names; everyone sees how many.
+    let mut solvers: HashMap<(u8, i64), Vec<String>> = HashMap::new();
+    let mut stmt = db.prepare(
+        "SELECT w.suits, w.seed, u.username FROM wins w JOIN users u ON u.id = w.user_id
+         GROUP BY w.suits, w.seed, w.user_id ORDER BY MIN(w.created_at), MIN(w.id)",
+    )?;
     for row in stmt.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))? {
-        let (key, n) = row?;
-        solved.insert(key, n);
+        let (key, name) = row?;
+        solvers.entry(key).or_default().push(name);
     }
     // Worst first, so the best win is inserted last.
     let mut mine: HashMap<(u8, i64), Value> = HashMap::new();
@@ -330,7 +335,11 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     let mut days: Vec<Value> = Vec::new();
     for (date, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
         let key = (*suits, *seed as i64);
-        let challenge = json!({ "suits": suits, "seed": seed, "solved": solved.get(&key).unwrap_or(&0), "mine": mine.get(&key) });
+        let names = solvers.get(&key).map(Vec::as_slice).unwrap_or_default();
+        let mut challenge = json!({ "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
+        if user.is_some() {
+            challenge["solvers"] = json!(names);
+        }
         match days.last_mut() {
             Some(day) if day["date"] == *date => day["challenges"].as_array_mut().unwrap().insert(0, challenge),
             _ => days.push(json!({ "date": date, "challenges": [challenge] })),

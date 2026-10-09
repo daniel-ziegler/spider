@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/style.css">
 <script type="module" src="/app.js"></script>
 </head>
-<body>
+<body data-view="home">
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="spider" viewBox="-50 -50 100 100">
     <g fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
@@ -26,13 +26,13 @@
 </svg>
 
 <header id="bar">
-  <button class="logo" id="b-logo" title="Spider">
+  <button class="logo" id="b-logo" title="Home">
     <span class="thread"></span><svg class="hanging"><use href="#spider"/></svg>
     <span class="word">Spider</span>
   </button>
   <div id="info"></div>
   <nav>
-    <button id="b-new" title="New game (n)">New</button>
+    <button id="b-new" title="Daily challenges and new games (n)">New</button>
     <button id="b-undo" title="Undo (u)">Undo</button>
     <button id="b-redo" title="Redo (r)">Redo</button>
     <button id="b-hint" title="Hint (Tab)">Hint</button>
@@ -41,6 +41,7 @@
 </header>
 
 <main id="board"></main>
+<main id="page"></main>
 
 <footer id="tray">
   <div id="done"></div>
