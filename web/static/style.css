@@ -25,6 +25,7 @@ html, body { margin: 0; height: 100%; }
 body {
   display: grid;
   grid-template-rows: auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
   height: 100dvh;
   background: radial-gradient(ellipse at 50% 30%, var(--felt), var(--felt-dark) 120%) fixed, var(--felt-dark);
   color: var(--ink);
@@ -267,6 +268,13 @@ button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
 #dangler svg { width: 72px; height: 72px; color: #d9cdf0; margin-top: -16px; --spider-eye: #2a1f3d; filter: drop-shadow(0 4px 6px #0008); animation: sway 3s ease-in-out infinite; transform-origin: 50% 0; }
 @keyframes descend { from { transform: translateY(-110%); } to { transform: translateY(0); } }
 
+/* The game info gets its own row when the header is narrow. */
+@media (max-width: 960px) {
+  #bar { gap: 4px 6px; padding-top: 4px; padding-bottom: 4px; flex-wrap: wrap; }
+  #bar nav { margin-left: auto; }
+  #info { order: 3; flex-basis: 100%; }
+}
+
 @media (max-width: 640px) {
   .tiles { gap: 6px; }
   button.tile { padding: 10px 8px 8px; min-height: 120px; }
@@ -274,9 +282,6 @@ button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
   .hero .thread { height: 20px; }
   .hero h1 { font-size: 34px; }
   .box { padding: 14px; }
-  #bar { gap: 4px 6px; padding-top: 4px; padding-bottom: 4px; flex-wrap: wrap; }
-  #bar nav { margin-left: auto; }
-  #info { order: 3; flex-basis: 100%; }
   #bar nav { gap: 4px; }
   #bar nav button { padding: 5px 8px; font-size: 14px; }
   #info { font-size: 13px; }
@@ -287,4 +292,7 @@ button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
 @media (max-width: 440px) {
   body[data-view=game] .logo .word { display: none; }
   #bar .logo { padding-left: 26px; }
+  .hero { gap: 8px; }
+  .hero h1 { font-size: 28px; white-space: nowrap; }
+  .hero svg { width: 44px; height: 44px; }
 }

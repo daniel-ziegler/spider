@@ -368,7 +368,7 @@ function homeHtml() {
   const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
   const last = unfinishedGame();
   return `<div class="pagewrap">
-    <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider</h1></div>
+    <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider Friends</h1></div>
     <section class="box">
       <h2>Today's challenges</h2>
       <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
@@ -546,7 +546,7 @@ function menuDialog() {
     ['help', 'How to play', true],
     me ? ['logout', `Log out (${esc(me.username)})`, true] : ['login', 'Log in or sign up', true],
   ];
-  openDialog(`<h2>Spider</h2><div class="menu">${items.filter(i => i[2]).map(([k, label]) => `<button data-m="${k}">${label}</button>`).join('')}</div>
+  openDialog(`<h2>Spider Friends</h2><div class="menu">${items.filter(i => i[2]).map(([k, label]) => `<button data-m="${k}">${label}</button>`).join('')}</div>
     <div class="row"><button data-close>Close</button></div>`,
   async e => {
     const b = e.target.closest('[data-m]');
