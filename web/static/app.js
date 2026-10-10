@@ -133,6 +133,7 @@ function play(mv) {
   const err = g.apply(mv);
   if (err) return flash(err);
   sel = null;
+  if (hint) clearFlash(); // the hint's text
   after();
 }
 
@@ -685,7 +686,13 @@ function flash(text, ms = 2500) {
   m.textContent = text;
   m.classList.add('flash');
   clearTimeout(msgTimer);
-  msgTimer = setTimeout(() => { m.textContent = ''; m.classList.remove('flash'); }, ms);
+  msgTimer = setTimeout(clearFlash, ms);
+}
+
+function clearFlash() {
+  clearTimeout(msgTimer);
+  $('#msg').textContent = '';
+  $('#msg').classList.remove('flash');
 }
 
 // ---------------------------------------------------------------- mouse and touch
@@ -742,7 +749,17 @@ board.addEventListener('pointerdown', e => {
   if (e.button !== 0) return;
   const col = colAt(e.clientX);
   showCursor = false;
-  hint = null;
+  if (hint) {
+    // Tapping the hinted destination plays the hint; tapping anywhere else
+    // just leaves hint mode.
+    const mv = hint.moves[hint.i];
+    hint = null;
+    clearFlash();
+    if (mv.deal || col !== mv.to) {
+      press = sel = null;
+      return render();
+    }
+  }
   if (col === null) {
     press = null;
     if (sel) { sel = null; render(); }
@@ -847,7 +864,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'Enter' || k === ' ') columnKey(cursor);
   else if (k === 'ArrowUp' || k === '+' || k === '=') changeCount(1);
   else if (k === 'ArrowDown' || k === '-') changeCount(-1);
-  else if (k === 'Escape') { sel = null; render(); }
+  else if (k === 'Escape') { sel = null; clearFlash(); render(); }
   else if (k === 'd') play(DEAL);
   else if (k === 'u') undo();
   else if (k === 'r') redo();
@@ -876,6 +893,9 @@ $('#b-hint').onclick = () => cycleHint(1);
 $('#b-menu').onclick = menuDialog;
 $('#b-logo').onclick = () => showPage('home', true);
 $('#stock').onclick = () => play(DEAL);
+$('#tray').addEventListener('pointerdown', e => {
+  if (hint && !e.target.closest('#stock')) { hint = sel = null; clearFlash(); render(); }
+});
 $('#info').onclick = e => { if (e.target.closest('.seed')) copyLink(); };
 window.addEventListener('resize', () => { if (view === 'game') { computeLayout(); render(); } });
 window.addEventListener('popstate', route);
