@@ -6,6 +6,8 @@ import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves } from '.
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 // U+FE0E keeps phones from drawing the suits as emoji.
 const SUITS = ['♠', '♥', '♦', '♣'].map(s => s + '︎');
+// Three suits are three sets of spades, three of hearts and two of diamonds.
+const SUIT_COUNTS = [1, 2, 3, 4];
 const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
 
@@ -113,7 +115,7 @@ function showPage(name, push = false) {
 }
 
 function route() {
-  const m = /^\/play\/([124])\/(\d{1,16})\/?$/.exec(location.pathname);
+  const m = /^\/play\/([1-4])\/(\d{1,16})\/?$/.exec(location.pathname);
   if (m && +m[2] <= MAX_SEED) return load(+m[1], +m[2]);
   showPage(location.pathname === '/archive' ? 'archive' : 'home');
 }
@@ -334,7 +336,7 @@ function solversText(c) {
 function challengeTile(c) {
   const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${plural(c.mine.real_undos, 'undo')}`
     : started(c.suits, c.seed) ? 'In progress' : 'Play';
-  const pips = [...new Set(Array.from({ length: 4 }, (_, i) => (c.suits === 1 ? 0 : c.suits === 2 ? i % 2 : i)))]
+  const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
   return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${c.suits}/${c.seed}">
     <span class="pips">${pips}</span><span class="name">${suitsLabel(c.suits)}</span>
@@ -376,11 +378,11 @@ function homeHtml() {
       <h2>Free play</h2>
       ${last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : ''}
       <label>Random deal</label>
-      <div class="choices">${[1, 2, 4].map(n => `<button type="button" data-random="${n}">${suitsLabel(n)}</button>`).join('')}</div>
+      <div class="choices">${SUIT_COUNTS.map(n => `<button type="button" data-random="${n}">${suitsLabel(n)}</button>`).join('')}</div>
       <form class="deal">
         <label for="seed">Or a deal number</label>
         <div class="choices"><input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 42">
-          <select name="suits" aria-label="Suits">${[1, 2, 4].map(n => `<option value="${n}"${n === 2 ? ' selected' : ''}>${suitsLabel(n)}</option>`).join('')}</select>
+          <select name="suits" aria-label="Suits">${SUIT_COUNTS.map(n => `<option value="${n}"${n === 2 ? ' selected' : ''}>${suitsLabel(n)}</option>`).join('')}</select>
           <button>Play</button></div>
         <p class="error"></p>
       </form>
@@ -399,8 +401,8 @@ function archiveHtml() {
     <section class="box">
       <h2>Daily challenges</h2>
       <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some. Free undos don't count.</p>
-      ${dailies ? `<div class="archive"><span></span>${[1, 2, 4].map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
-        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
+      ${dailies ? `<div class="archive"><span></span>${SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
+        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${SUIT_COUNTS.map(n => { const c = d.challenges.find(c => c.suits === n); return c ? challengeCell(c) : '<span></span>'; }).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
     </section>
   </div>`;
@@ -787,10 +789,11 @@ function columnKey(c) {
     const run = g.runLen(c);
     if (run) sel = { col: c, count: run };
     render();
-  } else if (sel.col === c) {
-    autoMove(c, sel.count);
   } else {
-    moveTo(sel.col, c, sel.count, true);
+    // A move that doesn't work drops the pick too, so the next key starts over.
+    if (sel.col === c) autoMove(c, sel.count);
+    else moveTo(sel.col, c, sel.count, true);
+    if (sel) { sel = null; render(); }
   }
 }
 
