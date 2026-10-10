@@ -18,8 +18,9 @@ a deal are shown only to players who have won it.
 
 ## Daily challenges
 
-Every day (midnight to midnight Pacific time) has three challenges: 1, 2 and 4
-suits. They are listed in `challenges.txt` (`date suits seed`), which is built
+Every day (midnight to midnight Pacific time) has four challenges: 1, 2, 3 and
+4 suits (three suits, from 2026-10-10, are three sets of spades, three of
+hearts and two of diamonds). They are listed in `challenges.txt` (`date suits seed`), which is built
 into the server. `tools/dailies` picks them: for each date and suit count, the
 first candidate seed (from a hash of the date) that the peeking solver proves
 winnable. It keeps dates already in the file, so extending the list never
@@ -33,7 +34,9 @@ four-suit challenges come from `picked2_2026.txt` and `picked4_2026.txt`,
 picked the same way with the stronger line player (expectimax and
 replanning; the two-suit weak player uses 2-step lines): 136 found in
 two-suit seeds 1–320 and 172 in four-suit seeds 20001–23200, 83 of each
-used:
+used. The three-suit challenges all come from `picked3.txt`, picked the
+same way (weak player with 3-step lines): 567 found in seeds 1–4300, 448
+used through 2027-12-31. To extend the list:
 
 ```
 cd tools/dailies && cargo run --release -- 2028-01-01 2028-12-31

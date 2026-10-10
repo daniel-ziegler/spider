@@ -55,7 +55,7 @@ export class Game {
   constructor(suits, seed) {
     const deck = [];
     for (let set = 0; set < 8; set++) {
-      const suit = suits === 1 ? 0 : suits === 2 ? set % 2 : set % 4;
+      const suit = set % suits; // three suits: 3 sets of spades, 3 of hearts, 2 of diamonds
       for (let rank = 0; rank < 13; rank++) deck.push(suit * 13 + rank);
     }
     const below = rng(seed);

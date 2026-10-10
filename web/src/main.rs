@@ -25,6 +25,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// Seeds stay within JavaScript's exact integer range.
 const MAX_SEED: u64 = (1 << 53) - 1;
 const SESSION_COOKIE: &str = "session";
+/// The first day with a three-suit challenge.
+#[cfg(test)]
+const THREE_SUITS_FROM: &str = "2026-10-10";
 
 /// Daily challenges `(date, suits, seed)` in date order, from challenges.txt
 /// (made by tools/dailies). Days start at midnight Pacific time.
@@ -238,7 +241,7 @@ struct Win {
 
 /// Replay a claimed win; on success, the number of moves in it.
 fn check_win(w: &Win) -> Result<usize, String> {
-    if !matches!(w.suits, 1 | 2 | 4) || w.seed > MAX_SEED {
+    if !matches!(w.suits, 1..=4) || w.seed > MAX_SEED {
         return Err("no such deal".into());
     }
     if w.real_undos > w.undos {
@@ -424,8 +427,12 @@ mod tests {
     #[test]
     fn challenges_are_complete() {
         let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
-        assert!(CHALLENGES.len() == days.len() * 3, "every day has 1, 2 and 4 suits");
-        assert!(CHALLENGES.iter().all(|c| matches!(c.1, 1 | 2 | 4) && c.2 <= MAX_SEED));
+        for day in &days {
+            let suits: Vec<u8> = CHALLENGES.iter().filter(|c| c.0 == *day).map(|c| c.1).collect();
+            let want: &[u8] = if *day < THREE_SUITS_FROM { &[1, 2, 4] } else { &[1, 2, 3, 4] };
+            assert_eq!(suits, want, "{day}");
+        }
+        assert!(CHALLENGES.iter().all(|c| c.2 <= MAX_SEED));
         assert!(days.contains(today().as_str()), "challenges.txt has run out: run tools/dailies");
     }
 

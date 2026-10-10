@@ -1,5 +1,5 @@
-//! Picks the daily challenges: for every date in a range and each of 1, 2
-//! and 4 suits, the first candidate deal that the solver proves winnable.
+//! Picks the daily challenges: for every date in a range and each of 1, 2,
+//! 3 and 4 suits (3 from 2026-10-10), the first candidate deal that the solver proves winnable.
 //! Candidates come from a hash of the date, so a rerun picks the same deals.
 //! Dates already in the file are kept as they are.
 //!
@@ -12,7 +12,7 @@ use spider::solver::{Solver, Verdict};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const SUITS: [u8; 3] = [1, 2, 4];
+const SUITS: [u8; 4] = [1, 2, 3, 4];
 const BUDGET: u64 = 3_000_000;
 
 fn splitmix(mut z: u64) -> u64 {
@@ -59,6 +59,7 @@ fn main() {
         .iter_days()
         .take_while(|d| *d <= last)
         .flat_map(|d| SUITS.map(|s| (d, s)))
+        .filter(|key| key.1 != 3 || key.0 >= NaiveDate::from_ymd_opt(2026, 10, 10).unwrap())
         .filter(|key| !picks.contains_key(key))
         .collect();
     let next = AtomicUsize::new(0);

@@ -11,7 +11,7 @@ const rand = n => {
 };
 
 for (let i = 0; i < 60; i++) {
-  const suits = [1, 2, 4][i % 3];
+  const suits = 1 + i % 4;
   const seed = i < 50 ? i : 2 ** 53 - 1 - i; // include seeds above 2^32
   const g = new Game(suits, seed);
   const start = g.positionText(), stock = g.stock.join(',');
