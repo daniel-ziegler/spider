@@ -25,9 +25,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// Seeds stay within JavaScript's exact integer range.
 const MAX_SEED: u64 = (1 << 53) - 1;
 const SESSION_COOKIE: &str = "session";
-/// The first day with a three-suit challenge.
-#[cfg(test)]
-const THREE_SUITS_FROM: &str = "2026-10-10";
 
 /// Daily challenges `(date, suits, seed)` in date order, from challenges.txt
 /// (made by tools/dailies). Days start at midnight Pacific time.
@@ -429,8 +426,7 @@ mod tests {
         let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
         for day in &days {
             let suits: Vec<u8> = CHALLENGES.iter().filter(|c| c.0 == *day).map(|c| c.1).collect();
-            let want: &[u8] = if *day < THREE_SUITS_FROM { &[1, 2, 4] } else { &[1, 2, 3, 4] };
-            assert_eq!(suits, want, "{day}");
+            assert_eq!(suits, [1, 2, 3, 4], "{day}");
         }
         assert!(CHALLENGES.iter().all(|c| c.2 <= MAX_SEED));
         assert!(days.contains(today().as_str()), "challenges.txt has run out: run tools/dailies");

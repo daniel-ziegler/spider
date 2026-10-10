@@ -453,7 +453,7 @@ function archiveHtml() {
       <h2>Daily challenges</h2>
       <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some. Free undos don't count.</p>
       ${dailies ? `<div class="archive"><span></span>${SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
-        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${SUIT_COUNTS.map(n => { const c = d.challenges.find(c => c.suits === n); return c ? challengeCell(c) : '<span></span>'; }).join('')}`).join('')}</div>`
+        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
     </section>
   </div>`;
