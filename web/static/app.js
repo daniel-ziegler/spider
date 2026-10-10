@@ -51,6 +51,8 @@ let cursor = 0, showCursor = false; // keyboard column cursor
 let hint = null; // while Tab cycles through hints: {moves, i}
 let dailies = null; // daily challenges up to today, from the server: {today, days: [{date, challenges}]}
 let keyboardUsed = store.get('spider:keyboard', false); // then columns show their number keys
+let finish = null; // once every card is dealt and face up: {key, line}, line being a winning line once one is found
+let finishing = false; // while auto-complete plays its line
 let L; // layout, see computeLayout
 
 // ---------------------------------------------------------------- saving and loading
@@ -201,6 +203,54 @@ async function restart() {
   if (!await confirmDialog('Restart this deal?', text, 'Restart', ['R'])) return;
   while (g.canUndo()) undoOne();
   sel = null;
+  after();
+}
+
+// ---------------------------------------------------------------- auto-complete
+
+// Once every card is dealt and face up, a worker looks for a way to win
+// (see solve.js); a new position replaces any search still running.
+let solver = null;
+
+function updateFinish() {
+  const open = g.stock.length === 0 && g.faceDown.every(n => n === 0) && !g.isWon();
+  const key = open ? `${g.suits}/${g.seed}/${g.positionText()}` : null;
+  if (finish?.key !== key) {
+    solver?.terminate();
+    solver = null;
+    finish = key && { key, line: null };
+    if (key) {
+      solver = new Worker('/solve.js', { type: 'module' });
+      solver.onmessage = ({ data }) => {
+        solver?.terminate();
+        solver = null;
+        if (finish?.key !== data.key) return;
+        finish.line = data.line && parseMoves(data.line);
+        $('#b-finish').hidden = !finish.line || finishing;
+      };
+      solver.postMessage({ key, suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()) });
+    }
+  }
+  $('#b-finish').hidden = !finish?.line || finishing;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function autoComplete() {
+  if (!finish?.line || finishing) return;
+  const line = finish.line;
+  finishing = true;
+  sel = hint = null;
+  try {
+    for (const mv of line) {
+      if (view !== 'game' || g.apply(mv)) break; // left the board, or (shouldn't happen) an illegal move
+      save();
+      render();
+      await sleep(140);
+    }
+  } finally {
+    finishing = false;
+  }
   after();
 }
 
@@ -519,6 +569,7 @@ function helpDialog() {
     ['<kbd>Tab</kbd>', 'hint: step through useful moves, best first (<kbd>Shift</kbd> <kbd>Tab</kbd> back); <kbd>Enter</kbd> plays it'],
     ['<kbd>Esc</kbd>', 'drop the selection'],
     ['<kbd>d</kbd>', 'deal'],
+    ['<kbd>a</kbd>', 'auto-complete, once every card is dealt and face up and a win is found'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
     ['<kbd>R</kbd>', 'restart this deal'],
     ['<kbd>n</kbd>', 'home: daily challenges and new games'],
@@ -676,8 +727,9 @@ function render() {
   $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
     : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
     <b>${g.history.length}</b> moves · <b>${realUndos}</b> undos · <b>${undos - realUndos}</b> free undos`;
-  $('#b-undo').disabled = !g.canUndo();
-  $('#b-redo').disabled = !g.canRedo();
+  $('#b-undo').disabled = !g.canUndo() || finishing;
+  $('#b-redo').disabled = !g.canRedo() || finishing;
+  updateFinish();
 }
 
 let msgTimer;
@@ -746,7 +798,7 @@ function endDrag() {
 }
 
 board.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || finishing) return;
   const col = colAt(e.clientX);
   showCursor = false;
   if (hint) {
@@ -846,7 +898,7 @@ function changeCount(d) {
 }
 
 document.addEventListener('keydown', e => {
-  if (dialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (dialog.open || finishing || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
   if (view !== 'game') {
     if (e.target.closest?.('input, select')) return;
@@ -866,6 +918,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'ArrowDown' || k === '-') changeCount(-1);
   else if (k === 'Escape') { sel = null; clearFlash(); render(); }
   else if (k === 'd') play(DEAL);
+  else if (k === 'a') autoComplete();
   else if (k === 'u') undo();
   else if (k === 'r') redo();
   else if (k === 'R') restart();
@@ -889,10 +942,11 @@ for (const b of document.querySelectorAll('#bar button')) b.addEventListener('mo
 $('#b-new').onclick = () => showPage('home', true);
 $('#b-undo').onclick = undo;
 $('#b-redo').onclick = redo;
-$('#b-hint').onclick = () => cycleHint(1);
+$('#b-hint').onclick = () => { if (!finishing) cycleHint(1); };
 $('#b-menu').onclick = menuDialog;
 $('#b-logo').onclick = () => showPage('home', true);
-$('#stock').onclick = () => play(DEAL);
+$('#stock').onclick = () => { if (!finishing) play(DEAL); };
+$('#b-finish').onclick = autoComplete;
 $('#tray').addEventListener('pointerdown', e => {
   if (hint && !e.target.closest('#stock')) { hint = sel = null; clearFlash(); render(); }
 });
