@@ -177,7 +177,7 @@ async function undo() {
   if (!g.canUndo()) return;
   if (g.undoRevealsInfo()) {
     const what = g.history.at(-1).mv.deal ? 'a deal' : 'a move that turned a card over';
-    if (!await confirmDialog('Real undo?', `This takes back ${what}, so it counts as a real undo.`, 'Undo', ['u'])) return;
+    if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo', ['u'])) return;
   }
   undoOne();
   sel = null;
@@ -193,7 +193,7 @@ function redo() {
 async function restart() {
   if (!g.canUndo()) return;
   const real = g.history.filter(r => r.mv.deal || r.flips.length).length;
-  const text = real ? `Going back to the start takes back cards you have seen: ${plural(real, 'real undo')}.`
+  const text = real ? `Going back to the start takes back cards you have seen: ${plural(real, 'undo')}.`
     : 'Your moves go onto the redo stack.';
   if (!await confirmDialog('Restart this deal?', text, 'Restart', ['R'])) return;
   while (g.canUndo()) undoOne();
@@ -254,7 +254,7 @@ function showWinDialog(win, body) {
   openDialog(`<h2 data-win>Solved!</h2>
     <p>${date ? `Daily challenge · ${dayLabel(date)} · ${suitsLabel(win.suits)}` : `${suitsLabel(win.suits)} · deal ${win.seed}`}<br>
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
-      <b>${plural(win.real_undos, 'real undo')}</b> <span class="dim">(${plural(win.undos, 'undo')} in all)</span></p>
+      <b>${plural(win.real_undos, 'undo')}</b> <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span></p>
     <div>${body}</div>
     <div class="row"><button data-close>Look at the board</button><button class="primary" data-home>More games</button></div>`,
   e => {
@@ -265,7 +265,7 @@ function showWinDialog(win, body) {
 
 function resultsTable(rows) {
   const mine = me?.username.toLowerCase();
-  return `<table><tr><th>Player</th><th class="num">Real undos</th><th class="num">Moves</th><th>Date</th></tr>
+  return `<table><tr><th>Player</th><th class="num">Undos</th><th class="num">Moves</th><th>Date</th></tr>
     ${rows.map(r => `<tr class="${r.username.toLowerCase() === mine ? 'me' : ''}"><td>${esc(r.username)}</td>
       <td class="num">${r.real_undos}</td><td class="num">${r.moves}</td>
       <td>${new Date(r.at * 1000).toLocaleDateString()}</td></tr>`).join('')}</table>`;
@@ -332,7 +332,7 @@ function solversText(c) {
 
 // A challenge on the home page.
 function challengeTile(c) {
-  const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${c.mine.real_undos ? plural(c.mine.real_undos, 'real undo') : 'no real undos'}`
+  const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${plural(c.mine.real_undos, 'undo')}`
     : started(c.suits, c.seed) ? 'In progress' : 'Play';
   const pips = [...new Set(Array.from({ length: 4 }, (_, i) => (c.suits === 1 ? 0 : c.suits === 2 ? i % 2 : i)))]
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
@@ -343,7 +343,7 @@ function challengeTile(c) {
 
 // A challenge in the archive, whose columns are labelled with the suits.
 function challengeCell(c) {
-  const lines = c.mine ? [`✓ ${c.mine.moves}`, `${c.mine.real_undos} real`]
+  const lines = c.mine ? [`✓ ${c.mine.moves}`, plural(c.mine.real_undos, 'undo')]
     : [started(c.suits, c.seed) ? 'started' : 'play', '&nbsp;'];
   lines.push(c.solvers?.length ? c.solvers.map(n => (isMe(n) ? 'you' : esc(n))).join(', ') : c.solved ? `${c.solved} won` : '&nbsp;');
   const [first, ...rest] = lines;
@@ -398,7 +398,7 @@ function archiveHtml() {
     <div class="row start"><button type="button" data-go="home">← Home</button></div>
     <section class="box">
       <h2>Daily challenges</h2>
-      <p class="dim">Every deal here can be won. Green means you won it with no real undos, yellow that you needed some.</p>
+      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some. Free undos don't count.</p>
       ${dailies ? `<div class="archive"><span></span>${[1, 2, 4].map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
         ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
@@ -525,8 +525,8 @@ function helpDialog() {
     <p>Build runs from king down to ace in one suit; a finished run is cleared. Win by clearing all eight.
     Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
     <b>Hint</b> steps through useful moves, best first; tap the column outlined in green to play one.</p>
-    <p>Undos are free, except a <b>real undo</b>: one that takes back a card turned over or a deal.
-    Wins record your moves and real undos.</p>
+    <p>An <b>undo</b> takes back a card turned over or a deal. Taking back anything else is a <b>free undo</b>.
+    Wins record your moves and undos.</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     <div class="row"><button class="primary" data-close>Got it</button></div>`);
 }
@@ -672,7 +672,7 @@ function render() {
   const daily = dailyDate(g.suits, g.seed);
   $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
     : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
-    <b>${g.history.length}</b> moves · <b>${undos}</b> undos${realUndos ? ` (<b>${realUndos}</b> real)` : ''}`;
+    <b>${g.history.length}</b> moves · <b>${realUndos}</b> undos · <b>${undos - realUndos}</b> free undos`;
   $('#b-undo').disabled = !g.canUndo();
   $('#b-redo').disabled = !g.canRedo();
 }
