@@ -7,7 +7,7 @@
 //! estimated over runs with different salts. The strong player is the
 //! default line player (`SPIDER_L_*`); the weak one the same without
 //! expectimax or replanning, with SPIDER_W_STEPS (default 4; 2 with two
-//! suits) steps per line, a beam of SPIDER_W_BEAM (50) and
+//! suits, 3 with three) steps per line, a beam of SPIDER_W_BEAM (50) and
 //! SPIDER_W_DEAL_SPLITS (0). A seed is kept when the weak player wins
 //! fewer than SPIDER_W_MAX (40%) of SPIDER_W_RUNS (20) runs and the strong
 //! one more than SPIDER_S_MIN (70%) of SPIDER_S_RUNS (20); the weak runs go
@@ -38,7 +38,7 @@ fn main() {
         strong.waver = 2;
     }
     let weak = LineConfig {
-        max_steps: get("SPIDER_W_STEPS", if suits == 2 { 2 } else { 4 }),
+        max_steps: get("SPIDER_W_STEPS", match suits { 2 => 2, 3 => 3, _ => 4 }),
         expect_top: 0,
         replan: 0,
         beam: get("SPIDER_W_BEAM", 50),

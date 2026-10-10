@@ -738,6 +738,7 @@ pub(crate) fn unseen_counts(obs: &Game) -> [u8; 52] {
         let suit = match obs.suits {
             1 => 0,
             2 => set % 2,
+            3 => set % 3,
             _ => set % 4,
         };
         for rank in 0..13 {

@@ -1152,7 +1152,7 @@ fn draw_help(out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
         "",
         "Solver verdicts:  SOLVABLE = a winning line exists from this exact position;",
         "UNSOLVABLE = proven impossible;  UNKNOWN = the work budget ran out first.",
-        "Start with:  spider --suits 1|2|4  --seed N  --budget N  --threads N  --solver",
+        "Start with:  spider --suits 1|2|3|4  --seed N  --budget N  --threads N  --solver",
     ];
     let bw = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let bh = lines.len() as u16 + 2;
@@ -1190,8 +1190,8 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--suits" | "-s" => {
                 a.suits = value("--suits")?.parse().map_err(|_| "bad --suits")?;
-                if !matches!(a.suits, 1 | 2 | 4) {
-                    return Err("--suits must be 1, 2 or 4".into());
+                if !matches!(a.suits, 1..=4) {
+                    return Err("--suits must be 1 to 4".into());
                 }
             }
             "--seed" => a.seed = value("--seed")?.parse().map_err(|_| "bad --seed")?,
@@ -1201,7 +1201,7 @@ fn parse_args() -> Result<Args, String> {
             "--replay" => a.replay = parse_moves(&value("--replay")?)?,
             "--redo" => a.redo = parse_moves(&value("--redo")?)?,
             "-h" | "--help" => {
-                println!("usage: spider [--suits 1|2|4] [--seed N] [--budget WORK] [--threads N] [--solver]");
+                println!("usage: spider [--suits 1|2|3|4] [--seed N] [--budget WORK] [--threads N] [--solver]");
                 println!("  --suits   number of suits (default 2)");
                 println!("  --seed    deal number; the same seed always gives the same deal");
                 println!("  --budget  solver work limit per thread before it answers UNKNOWN (default {DEFAULT_BUDGET})");

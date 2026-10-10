@@ -133,14 +133,16 @@ impl Rng {
 }
 
 impl Game {
-    /// Create a new shuffled game. `suits` must be 1, 2 or 4.
+    /// Create a new shuffled game. `suits` must be 1, 2, 3 or 4; three suits
+    /// are three sets of spades, three of hearts and two of diamonds.
     pub fn new(suits: u8, seed: u64) -> Game {
-        assert!(matches!(suits, 1 | 2 | 4), "suits must be 1, 2 or 4");
+        assert!(matches!(suits, 1..=4), "suits must be 1 to 4");
         let mut deck: Vec<Card> = Vec::with_capacity(TOTAL_CARDS);
         for set in 0..8u8 {
             let suit = match suits {
                 1 => 0,
                 2 => set % 2,
+                3 => set % 3,
                 _ => set % 4,
             };
             for rank in 0..13 {

@@ -163,6 +163,7 @@ fn unseen_of(g: &Game) -> Unseen {
         let suit = match g.suits {
             1 => 0,
             2 => set % 2,
+            3 => set % 3,
             _ => set % 4,
         };
         for rank in 0..13 {
