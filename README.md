@@ -1,6 +1,7 @@
 # spider
 
-Terminal Spider Solitaire (1, 2 or 4 suits) with an optional **peeking solver**
+Terminal Spider Solitaire (1, 2, 3 or 4 suits; three suits are three sets
+of spades, three of hearts and two of diamonds) with an optional **peeking solver**
 that looks at the face-down cards and the stock order and tells you whether the
 current position can still be won.
 
@@ -206,7 +207,7 @@ a line that turns a card, makes no difference at any value: a turned card
 already raises the value by itself. A position with stock left and fewer than ten cards on the
 table is lost, and it never returns to a position it has stood in.
 
-With two and four suits, two further things:
+With two or more suits, two further things:
 
 * **Expectimax over the turned card.** The best four lines that turn a
   card (by each evaluation) are valued not at where they end but at the
@@ -222,6 +223,7 @@ With two and four suits, two further things:
 |-------|-----------------------------------|-------------|
 | 1     | 88% (seeds 10001–11000)           | 8           |
 | 2     | 70% (seeds 10001–14000)           | 1,400       |
+| 3     | 54.3% (seeds 40001–41000, 42001–44000) | 2,100  |
 | 4     | 38.9% (seeds 1–2000, 20001–22000) | 2,100       |
 
 | four suits, wins of 4,000 seeds (1–2000, 20001–22000) | won   | ms per game |
@@ -252,6 +254,13 @@ each on the tuning seeds) lost 62 there. Small weight changes move the
 result by a few dozen wins per 2,000 seeds either way. Only the empty
 column's value was changed (to 103): over all 6,000 seeds it is 45 wins
 ahead, the full set 26 behind.
+
+Three suits play with the four-suit search and weights, which win 54.3%
+of seeds 40001–41000 and 42001–44000 (the two-suit weights 49.6% of the first 1,000,
+against 53.7%). A coordinate search over the 13 weights on seeds
+40001–41000 moved only the empty column (103 to 127) and `end_empty` (39
+to 47), from 537 wins to 571, and on seeds 42001–44000 that set won 1,088
+against 1,091, so nothing was changed.
 
 With two suits the lines were 6 steps with no beam: replanning alone does
 nothing there (65%), expectimax alone gives 67%, and lines as long as with
