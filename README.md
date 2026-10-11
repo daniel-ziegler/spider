@@ -285,6 +285,9 @@ gains: 814 wins against the line player's 797 on seeds 20001–22000 (65
 games gained, 48 lost), and 43 more on 1,600 of seeds 50001–51600, about a
 point and a half in all, at 23 s per game (see
 [stage-wise evaluation](#stage-wise-evaluation-a-plateau-until-the-last-deal)).
+A network trained to rank the same candidates does as well without the
+rollouts: 39.9% of 6,000 games against the line player's 38.6%, at 3.1 s
+per game (see [contrasts](#contrasts-is-another-choice-better-and-a-network-that-ranks-them)).
 At every decision of the game (`SPIDER_P_FROM=5 SPIDER_P_STAGE=0`), with
 an earlier line player, it added nothing (50 against 48 wins on seeds
 1–200, at about 130 s per game). It is not that rollouts cannot improve
@@ -410,6 +413,97 @@ wins that the solver did not find, 43% were still winnable by a player who
 sees every card, against 36.5% won. 45% is not within reach of this kind
 of player: it would have to come from more games surviving the deals, and
 between deals nothing measured gains.
+
+### Contrasts: is another choice better, and a network that ranks them
+
+The stage-wise measure cannot see a choice that the fitted value is blind
+to, such as how the position dealt from is arranged. `src/contrast.rs`
+measures choices directly: the line player's candidates at a decision
+(`--bin contrast`: its choice, the next-best lines by either evaluation, the
+best line turning each set of columns), or other arrangements to deal from
+(`--bin dealgen`), are each played on *in the same worlds* (the real cards
+and reshuffles of the hidden ones) by the line player until it is next
+about to deal, where the fitted value counts. Within a decision most of the
+luck cancels. `stage/headroom.py` reads the files.
+
+**Nothing to gain at the deal.** From 865 positions the line player dealt
+from (seeds 50001–50300, four worlds each), with up to seven other
+arrangements reachable without turning a card: those with the same
+evaluation are within ±0.4 points of the one chosen in every stage, those
+with a lower one 1 to 2 points worse, and picking the best by two worlds
+loses 0.2 to 1 point in the other two.
+
+**Little to gain between deals, and only late.** A world's luck moves a
+candidate's value by 6 to 9 points, the candidates really differ by 1 to 2,
+and nearly all of that is alternatives being worse. With the standard
+player playing on (24,000 decisions with two or one deals left, one world
+each), in points of fitted win probability against the choice:
+
+| alternative, the choice turning a card             | two deals left | one deal left |
+|----------------------------------------------------|----------------|---------------|
+| a line turning another card                        | −1.24 ± 0.15   | −1.52 ± 0.22  |
+| a line turning none                                | −0.10 ± 0.18   | +0.01 ± 0.31  |
+| a line instead of dealing (the choice the deal)    | −1.75 ± 0.55   |               |
+
+Dealing where the line player would still play a line is 4 to 15 points
+worse (1,300 decisions, four worlds). No class of alternative picked out by
+the evaluations is better than the choice.
+
+**A network that ranks the candidates.** `vnet/adv.py` trains the value
+network's transformer on these files: it values the position after each
+candidate (also given whether the candidate is the line player's choice and
+how its two evaluations compare with the choice's), and the loss is mostly
+on the differences within a decision. `src/advnet.rs` evaluates it on the
+CPU (4 ms a position), and the rollout player plays the candidate it puts
+first if that is ahead of the line player's choice by a margin
+(`SPIDER_P_NET=vnet/rank.bin SPIDER_P_NET_MARGIN=0.04`; `SPIDER_P_FROM`: with at
+most so many deals left), instead of rollouts.
+
+    SPIDER_V_MODEL=runs/stage/v.txt SPIDER_P_ROLLOUT_STEPS=14 SPIDER_P_ROLLOUT_BEAM=300 \
+      SPIDER_P_ROLLOUT_EXPECT=4 SPIDER_P_ROLLOUT_REPLAN=4 \
+      cargo run --release --bin contrast -- 4 500001 100000 1 1.0 2 1 > runs/predeal/s21.csv
+    .venv/bin/python vnet/adv.py train --data runs/predeal/s*.csv --init runs/predeal/a4.pt --lr 1e-4 --epochs 3 --out runs/predeal/a5.pt
+    .venv/bin/python vnet/adv.py export --ckpt runs/predeal/a5.pt --out vnet/rank.bin
+    SPIDER_P_NET=vnet/rank.bin SPIDER_P_FROM=1 SPIDER_P_NET_MARGIN=0.04 cargo run --release --bin pimc -- 4 20001 2000
+
+It was trained from the old value network (`v5`) on 105,000 decisions of
+all stages labelled by a cheap player playing on (no expectimax or
+replanning, the narrow search before a deal: five times faster), then on
+24,000 with two or one deals left labelled by the standard player. One
+stage played with it, from the reference positions:
+
+| deals left in the stage                                 | points of win rate          |
+|---------------------------------------------------------|-----------------------------|
+| 3 (cheap labels only, 1,000 positions)                  | −0.27 ± 0.25                |
+| 2 (cheap labels only, margin 0.01 / 0.02)               | −0.69 ± 0.17 / −0.25 ± 0.13 |
+| 2                                                       | −0.17 ± 0.12                |
+| 1 (4,000 positions; margin 0.04 on 2,000: +0.42 ± 0.17) | +0.26 ± 0.15                |
+| 0 (4,000 positions, the game's result)                  | +1.25 ± 0.36                |
+
+So it gains where the rollouts did, after the last deal and a little in
+the stage before, and loses earlier, where there is nothing to find and
+its mistakes cost. In whole games, ranking only with one or no deals left
+(`SPIDER_P_FROM=1`, margin 0.04), on seeds it has not seen:
+
+| four suits, wins of 2,000 | line player | with the network     | with rollouts |
+|---------------------------|-------------|----------------------|---------------|
+| seeds 1–2000              | 759         | 788                  | 774 (64)      |
+| seeds 20001–22000         | 797         | 828                  | 814 (128)     |
+| seeds 700001–702000       | 758         | 779                  |               |
+| all 6,000                 | 38.6%       | 39.9% (+1.35 ± 0.35) |               |
+
+267 games gained and 186 lost, at 3.1 s per game against 2.1 (the
+rollouts: 23 s).
+
+Two things about the method. The player that plays on must be the real
+one: on held-out decisions labelled by the cheap player the network
+trained on those labels looked 0.3 points a decision better than the line
+player with two deals left, on decisions labelled by the standard player
+0.1 worse, and in play it was worse. And decisions of one game share its
+hidden cards, so errors must be counted per game, not per decision. The
+old value networks, trained on the outcomes of games, rank the candidates
+about as well by correlation (0.12 against 0.13 to 0.2) but pick nothing
+better than the line player's choice at any margin.
 
 ### AlphaZero player
 

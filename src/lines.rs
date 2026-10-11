@@ -637,6 +637,9 @@ pub struct Tempo {
     pub plan: Vec<Vec<Move>>,
     pub plan_value: i32,
     pub plan_dealing: bool,
+    /// For the rollout player's network: it has overruled the line player
+    /// since the last card turned, deal or completed suit.
+    pub overruled: bool,
 }
 
 /// A decision with the line split into its steps.

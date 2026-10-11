@@ -1,3 +1,4 @@
+pub mod advnet;
 pub mod az;
 pub mod beam;
 pub mod certify;
@@ -6,6 +7,7 @@ pub mod human;
 pub mod lines;
 pub mod lineopt;
 pub mod pimc;
+pub mod contrast;
 pub mod smart;
 pub mod rollout;
 pub mod solver;

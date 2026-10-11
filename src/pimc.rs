@@ -14,6 +14,9 @@
 //! By default it does this only once the stock is gone, where the rollouts
 //! run to the end of the game and count wins: that is where it gains
 //! (see the README). Before that it plays as the line player does.
+//!
+//! With a network ([`PimcConfig::net`]) there are no rollouts: the
+//! network ranks the candidates, at a small fraction of the cost.
 
 use crate::game::{Game, Move, NUM_COLS};
 use crate::human::{mask, PlayResult};
@@ -61,6 +64,15 @@ pub struct PimcConfig {
     /// gives up by (`end_empty`) are candidates too, as those raising the
     /// about-to-deal value are before.
     pub end_lines: bool,
+    /// Instead of rollouts, a network ranks the candidates by the position
+    /// each leads to ([`crate::advnet`]; `SPIDER_P_NET`, the weights' file),
+    /// and one is played instead of the line player's choice if its value
+    /// (a probability) is higher by `net_margin`.
+    pub net: Option<&'static crate::advnet::AdvNet>,
+    pub net_margin: f32,
+    /// The network overrules the line player once at most until a card
+    /// turns, a deal or a suit completes.
+    pub net_once: bool,
 }
 
 impl PimcConfig {
@@ -82,12 +94,15 @@ impl PimcConfig {
             stage: true,
             from: 0,
             end_lines: true,
+            net: None,
+            net_margin: 0.0,
+            net_once: false,
         }
     }
 
     /// [`PimcConfig::for_suits`] with `SPIDER_P_*` overrides (ROLLOUT_STEPS, ROLLOUT_BEAM,
-    /// ROLLOUT_EXPECT, ROLLOUT_REPLAN, MAX_CANDS, EXTRA_IMPROVE, EXTRA_DEAL, MAX_FLIPS, MAX_IDLE,
-    /// ROLLOUTS, HORIZON, WIN_BONUS, Z, SEED, STAGE, FROM, END_LINES); `SPIDER_L_*` set the weights of both
+    /// ROLLOUT_EXPECT, ROLLOUT_REPLAN, ROLLOUT_DEAL_SPLITS, MAX_CANDS, EXTRA_IMPROVE, EXTRA_DEAL, MAX_FLIPS, MAX_IDLE,
+    /// ROLLOUTS, HORIZON, WIN_BONUS, Z, SEED, STAGE, FROM, END_LINES, NET, NET_MARGIN, NET_ONCE); `SPIDER_L_*` set the weights of both
     /// players. The rollout player has no expectimax or replanning unless asked for.
     pub fn from_env(suits: u8) -> PimcConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -102,6 +117,7 @@ impl PimcConfig {
                 beam: get("ROLLOUT_BEAM", d.rollout.beam),
                 expect_top: get("ROLLOUT_EXPECT", 0),
                 replan: get("ROLLOUT_REPLAN", 0),
+                deal_splits: get("ROLLOUT_DEAL_SPLITS", base.deal_splits),
                 ..base
             },
             max_cands: get("MAX_CANDS", d.max_cands),
@@ -117,6 +133,12 @@ impl PimcConfig {
             stage: get::<u8>("STAGE", d.stage as u8) != 0,
             from: get("FROM", d.from),
             end_lines: get::<u8>("END_LINES", d.end_lines as u8) != 0,
+            net: std::env::var("SPIDER_P_NET").ok().map(|p| {
+                static NET: std::sync::OnceLock<crate::advnet::AdvNet> = std::sync::OnceLock::new();
+                NET.get_or_init(|| crate::advnet::AdvNet::load(&p))
+            }),
+            net_margin: get("NET_MARGIN", d.net_margin),
+            net_once: get::<u8>("NET_ONCE", d.net_once as u8) != 0,
         }
     }
 }
@@ -128,7 +150,7 @@ pub enum Cand {
     Deal,
 }
 
-fn apply(g: &mut Game, c: &Cand) {
+pub(crate) fn apply(g: &mut Game, c: &Cand) {
     match c {
         Cand::Line(moves) => {
             for &mv in moves {
@@ -148,7 +170,7 @@ pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: 
 /// [`candidates`], the line player's choice being the whole line it plans,
 /// and what it plays of that line now (with replanning, its first steps;
 /// `None` if the game is over).
-fn candidates_plan(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut Tempo, cfg: &PimcConfig) -> (Vec<Cand>, Option<Cand>) {
+pub(crate) fn candidates_plan(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut Tempo, cfg: &PimcConfig) -> (Vec<Cand>, Option<Cand>) {
     let (first, play) = match crate::lines::decide(obs, deals_left, visited, tempo, &cfg.base).0 {
         Decision::Play(moves) => {
             let mut line = moves.clone();
@@ -272,11 +294,55 @@ pub fn decide(obs: &Game, deals_left: usize, visited: &HashSet<u64>, idle: usize
     let planned: Vec<Move> = tempo.plan.iter().flatten().copied().collect();
     let (mut cands, play) = candidates_plan(obs, deals_left, visited, tempo, cfg);
     let continuing = !planned.is_empty() && cands.first() == Some(&Cand::Line(planned));
-    if idle >= cfg.max_idle || deals_left > cfg.from || continuing {
+    if idle >= cfg.max_idle || deals_left > cfg.from || continuing || (cfg.net_once && tempo.overruled) {
         cands.truncate(1);
     }
     let mut stats = DecideStats { candidates: cands.len(), ..Default::default() };
     if cands.len() <= 1 || cfg.rollouts == 0 {
+        return (play, stats);
+    }
+    if let Some(net) = cfg.net {
+        let mut first: Option<State> = None;
+        let v: Vec<f32> = cands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut after = obs.clone();
+                if let Cand::Line(_) = c {
+                    apply(&mut after, c);
+                }
+                if after.columns.iter().any(|col| col.len() > MAXC) {
+                    return f32::MIN;
+                }
+                let st = State::from_game(&after);
+                let mut enc = vec![0; crate::vnet::ENC];
+                crate::vnet::encode(&st, deals_left, &mut enc);
+                if *c == Cand::Deal {
+                    enc[crate::vnet::ENC - 2] += 16;
+                }
+                let f = first.get_or_insert_with(|| st.clone());
+                enc.extend_from_slice(&crate::contrast::extras(&st, f, i == 0, deals_left, &cfg.base));
+                1.0 / (1.0 + (-net.value(&enc)).exp())
+            })
+            .collect();
+        let best = (1..cands.len()).max_by(|&a, &b| v[a].total_cmp(&v[b]).then(b.cmp(&a))).unwrap();
+        if v[best] > v[0] + cfg.net_margin {
+            stats.chosen = best;
+            if std::env::var_os("SPIDER_P_NET_TRACE").is_some() {
+                let flips = |c: &Cand| {
+                    let mut after = obs.clone();
+                    if let Cand::Line(_) = c {
+                        apply(&mut after, c);
+                    }
+                    after.face_down.iter().sum::<usize>() < obs.face_down.iter().sum::<usize>()
+                };
+                eprintln!("overrule k={deals_left} idle={idle} cands={} best={best} dv={:.3} base_flips={} cand_flips={} base_deal={}", cands.len(), v[best] - v[0], flips(&cands[0]), flips(&cands[best]), cands[0] == Cand::Deal);
+            }
+            // As in the network's training data: the line player goes on
+            // from the candidate afresh.
+            *tempo = Tempo { overruled: true, ..Tempo::default() };
+            return (Some(cands[best].clone()), stats);
+        }
         return (play, stats);
     }
     let seed = mix(cfg.seed ^ 0x5EED, State::from_game(obs).hash());
