@@ -28,12 +28,12 @@ when a move has lost it. `static/winnable.js` is a port of the peeking solver
 answer and then 2,000,000 (two or three seconds). It searches step for step
 as the Rust solver does: `cargo test` in the repository root solves some 290
 positions from play with both (`test/winnable.mjs`) and compares verdict,
-work and winning line. "Can't be won" is a proof. It nearly always comes only
-once the stock is empty: about a third of lost four-suit games get it on the
-last deal, most of the rest within a few moves of getting stuck. Before that
-a lost game shows "No win found", which a winnable position also gets now and
-then (one four-suit position in ten at 500,000 work, one in fifty or more
-with fewer suits).
+work and winning line. "Can't be won" is a proof. It comes late: before the
+last deal in about one lost game in six, on the last deal in about a third of
+lost four-suit games, and in most of the rest within a few moves of getting
+stuck. Before that a lost game shows "No win found", which a winnable
+position also gets now and then (one four-suit position in ten at 500,000
+work, one in fifty or more with fewer suits).
 
 ## Daily challenges
 

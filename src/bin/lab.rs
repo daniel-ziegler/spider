@@ -147,6 +147,15 @@ fn main() {
                 for mv in parse_moves(f[4]).unwrap() {
                     g.apply(mv).unwrap();
                 }
+                if mode == "deals" {
+                    let (points, lost, all) = spider::solver::deal_points_lost(&g, budget as usize);
+                    let now = {
+                        let mut d = g.clone();
+                        d.apply(Move::Deal).is_ok() && spider::certify::top_rank_certificate(&d)
+                    };
+                    println!("{} {} won {} : deal points {points} proved lost {lost} exhausted {all} dealing now {now}", f[0], f[1], f[3]);
+                    continue;
+                }
                 if mode == "cert1" {
                     println!("{} {} left {}: {} {}", f[0], f[1], f[2], spider::certify::first_event_certificate(&g), spider::certify::top_rank_certificate(&g));
                     continue;

@@ -392,7 +392,7 @@ class Solver {
 
   // ---------------------------------------------------------------- the top-rank certificate
 
-  // Is the position in slot 0, the stock being empty, proved lost by the
+  // Is the position at b, the stock being empty, proved lost by the
   // top-rank certificate (certify.rs, which has the argument)? While no
   // column is empty the ranks of the ten top cards change only when a card
   // leaves a card that is not one rank higher, and a card can only leave a
@@ -401,29 +401,29 @@ class Solver {
   // have never moved, in whole units (a card and the same-suit run on it),
   // and the ranks of the tops. If it cannot empty a column or complete a
   // suit, neither can the real one. this.certNodes counts its positions.
-  topRankDead() {
+  topRankDead(b) {
     const M = this.M, left = new Uint8Array(NC), tops = new Uint8Array(14);
     this.certNodes = 0;
     for (let c = 0; c < NC; c++) {
-      const n = M[LEN + c];
+      const n = M[b + LEN + c];
       if (n === 0) return false;
       left[c] = n;
-      tops[M[c * MAXC + n - 1] % 13]++;
+      tops[M[b + c * MAXC + n - 1] % 13]++;
     }
     this.certSeen = new Set();
-    return !this.certEvent(left, tops);
+    return !this.certEvent(b, left, tops);
   }
 
   // Where the top unit of column c starts when `left` cards have not moved.
-  certUnit(c, left) {
-    const M = this.M, o = c * MAXC, d = M[DOWN + c];
+  certUnit(b, c, left) {
+    const M = this.M, o = b + c * MAXC, d = M[b + DOWN + c];
     let u = left - 1;
     while (u > d && M[o + u - 1] === M[o + u] + 1 && M[o + u] % 13 !== 12) u--;
     return u;
   }
 
   // Can a column be emptied or a suit completed? Says yes when it gives up.
-  certEvent(left, tops) {
+  certEvent(b, left, tops) {
     if (++this.certNodes > CERTIFY_LIMIT) return true;
     const M = this.M;
     // Steps that leave the tops' ranks as they are cost nothing: take them
@@ -433,17 +433,17 @@ class Solver {
       steps = [];
       free = false;
       for (let c = 0; c < NC; c++) {
-        const u = this.certUnit(c, left[c]), rank = M[c * MAXC + u] % 13;
+        const u = this.certUnit(b, c, left[c]), o = b + c * MAXC + u, rank = M[o] % 13;
         if (tops[rank + 1] === 0) continue;
         if (u === 0) return true; // the column is emptied
-        const under = M[c * MAXC + u - 1] % 13;
+        const under = M[o - 1] % 13;
         if (under === rank + 1) {
           left[c] = u;
           free = true;
         } else steps.push(c, u, rank + 1, under);
       }
     }
-    if (this.certCompletable(left)) return true;
+    if (this.certCompletable(b, left)) return true;
     const key = String.fromCharCode(...left);
     if (this.certSeen.has(key)) return false;
     this.certSeen.add(key);
@@ -452,30 +452,38 @@ class Solver {
       l[steps[i]] = steps[i + 1];
       t[steps[i + 2]]--;
       t[steps[i + 3]]++;
-      if (this.certEvent(l, t)) return true;
+      if (this.certEvent(b, l, t)) return true;
     }
     return false;
   }
 
   // Might some suit be completed: is a king's unit on top of its column,
   // with a copy of every lower card of the suit moved or in a top unit?
-  certCompletable(left) {
+  certCompletable(b, left) {
     const M = this.M, starts = [];
-    for (let c = 0; c < NC; c++) starts.push(this.certUnit(c, left[c]));
+    for (let c = 0; c < NC; c++) starts.push(this.certUnit(b, c, left[c]));
     for (let c = 0; c < NC; c++) {
-      const king = M[c * MAXC + starts[c]];
+      const king = M[b + c * MAXC + starts[c]];
       if (king % 13 !== 12) continue;
-      const lowest = M[c * MAXC + left[c] - 1];
+      const lowest = M[b + c * MAXC + left[c] - 1];
       let all = true;
       for (let card = king - 12; card < lowest && all; card++) {
         all = false;
         for (let j = 0; j < NC && !all; j++) {
-          for (let i = starts[j], n = M[LEN + j]; i < n && !all; i++) all = M[j * MAXC + i] === card;
+          for (let i = starts[j], n = M[b + LEN + j]; i < n && !all; i++) all = M[b + j * MAXC + i] === card;
         }
       }
       if (all) return true;
     }
     return false;
+  }
+
+  // Deal onto the position at b.
+  dealAt(b) {
+    const M = this.M, deal = this.deals[M[b + DEALT]];
+    for (let c = 0; c < NC; c++) M[b + c * MAXC + M[b + LEN + c]++] = deal[c];
+    M[b + DEALT]++;
+    for (let c = 0; c < NC; c++) this.removeIfComplete(b, c);
   }
 
   // ---------------------------------------------------------------- classes
@@ -712,7 +720,7 @@ class Solver {
       if (stage.end) {
         // A position the top-rank certificate proves lost is not searched
         // (its work is the certificate's).
-        const dead = this.topRankDead();
+        const dead = this.topRankDead(0);
         this.work += this.certNodes;
         if (dead) {
           found.add(kl, kh);
@@ -761,8 +769,26 @@ class Solver {
       }
       if (classDeals.length > DEALS_PER_CLASS) {
         classDeals.sort((a, b) => b[0] - a[0] || b[1] - a[1]);
+        // The deal points dropped make the search incomplete, unless this
+        // is the last deal and the certificate proves the position after
+        // each of them lost.
+        const lastDeal = M[DEALT] + 1 === this.deals.length, scratch = n * MS;
+        for (let i = DEALS_PER_CLASS; i < classDeals.length; i++) {
+          if (!lastDeal) {
+            this.incomplete = true;
+            break;
+          }
+          const from = classDeals[i][1] * MS;
+          M.copyWithin(scratch, from, from + MS);
+          this.dealAt(scratch);
+          const dead = this.topRankDead(scratch);
+          this.work += 1 + this.certNodes;
+          if (!dead) {
+            this.incomplete = true;
+            break;
+          }
+        }
         classDeals.length = DEALS_PER_CLASS;
-        this.incomplete = true;
       }
       for (const [key, m] of classDeals) {
         const rec = this.alloc(); // the member; the deal is made when the stage is opened
@@ -837,11 +863,8 @@ class Solver {
       }
       if (c.stage < 0) {
         // Deal, and open the stage after it.
-        const M = this.M, deal = this.deals[this.PA[c.rec * PACKED + 1]];
         this.unpackFrom(this.PA, c.rec * PACKED, 0);
-        for (let col = 0; col < NC; col++) M[col * MAXC + M[LEN + col]++] = deal[col];
-        M[DEALT]++;
-        for (let col = 0; col < NC; col++) this.removeIfComplete(0, col);
+        this.dealAt(0);
         this.packInto(0, this.PA, c.rec * PACKED);
         this.pkey[c.rec] = this.evalAt(0);
         sid = this.newStage(this.pushNode(c.nid, c.off, c.len), c.rec, c.key, c.origin);

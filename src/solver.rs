@@ -1232,8 +1232,25 @@ impl Solver {
             }
             if class_deals.len() > self.cfg.deals_per_class {
                 class_deals.sort_unstable_by(|a, b| b.cmp(a));
+                // The deal points dropped make the search incomplete, unless
+                // this is the last deal and the certificate proves the
+                // position after each of them lost.
+                let last_deal = self.certify && entry_state.deals_done as usize + 1 == self.deals.len();
+                for &(_, mi) in &class_deals[self.cfg.deals_per_class..] {
+                    if !last_deal {
+                        self.incomplete = true;
+                        break;
+                    }
+                    let mut t = cls.members[mi as usize].state.clone();
+                    t.apply(Move::Deal, &self.deals);
+                    let (dead, nodes) = top_rank_dead(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), CERTIFY_LIMIT);
+                    self.work += 1 + nodes;
+                    if !dead {
+                        self.incomplete = true;
+                        break;
+                    }
+                }
                 class_deals.truncate(self.cfg.deals_per_class);
-                self.incomplete = true;
             }
             for (k, mi) in class_deals {
                 self.seq += 1;
@@ -1442,6 +1459,40 @@ pub(crate) fn stock_deals(g: &Game) -> Vec<[u8; DEAL_SIZE]> {
         deals.push(d);
     }
     deals
+}
+
+/// An experiment, for a position with one deal left: the positions reachable
+/// without dealing and without splitting runs, up to `cap` of them, and for
+/// each that can deal, whether the top-rank certificate proves the position
+/// after the deal lost. Returns (deal points, those proved lost, whether the
+/// reachable positions were exhausted).
+pub fn deal_points_lost(g: &Game, cap: usize) -> (usize, usize, bool) {
+    let deals = stock_deals(g);
+    assert_eq!(deals.len(), 1, "one deal left");
+    let mut found = HashSet::default();
+    let mut cls = Class::default();
+    let mut queue = vec![State::from_game(g)];
+    let (mut points, mut lost, mut seen) = (0, 0, 0);
+    while let Some(s) = queue.pop() {
+        if found.contains(&s.key()) {
+            continue;
+        }
+        if seen > cap {
+            return (points, lost, false);
+        }
+        enumerate_class_into(&s, &deals, CLASS_CAP, false, false, None, &mut found, &mut cls);
+        seen += cls.members.len();
+        for ex in &cls.exits {
+            if ex.mv == Move::Deal {
+                points += 1;
+                let t = &ex.result;
+                lost += top_rank_dead(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), CERTIFY_LIMIT).0 as usize;
+            } else {
+                queue.push(ex.result.clone());
+            }
+        }
+    }
+    (points, lost, true)
 }
 
 /// Static evaluation of a game position with the given weights.

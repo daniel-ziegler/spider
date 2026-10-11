@@ -40,6 +40,7 @@ for (let i = 0; i < 24; i++) {
       moves = moves.length ? [moves[rand(moves.length)]] : [];
     }
     if (!moves.length) break;
+    if (moves[0].deal) report(g, 60_000); // before a deal: the last one has its own rule
     g.apply(moves[0]);
     if (step % 60 === 0 || (g.stock.length === 0 && step % 15 === 0)) report(g, 60_000);
   }

@@ -137,12 +137,20 @@ lost four-suit games (seeds 30001–30048), the position where the line player
 gave up is now proved lost in all 29 with at most 41K work (before: 22 at
 400K work, 25 at 20M), and the position after the last deal in 12, with 8
 winnable and 9 unknown at 20M (before: 9, 8 and 12). Solving 640 games every
-fourth move at 500K work, no won game ever got `UNSOLVABLE`; in the lost
-ones the proof nearly always comes only once the stock is empty (with a deal
-left in 8 games of 148 that got one). Nothing here proves a position with
-stock left lost, which is where most games are lost: the last position the
-solver still finds a win from (at 500K work) has two or more deals left in
-half the lost four-suit games.
+fourth move at 500K work, no won game ever got `UNSOLVABLE`.
+
+With one deal left the search also uses it on the deal points it would
+otherwise drop (it keeps the best four per class, which made every search
+with stock left incomplete): if the position after each of them is proved
+lost, nothing was lost by dropping them. So a position can be proved lost
+before the last deal, when every way of making it is: at 2M work, the
+position where the line player is about to make the last deal in 18 of the
+106 lost four-suit games (13 of 70 with three suits, 7 of 44 with two, 2 of
+17 with one; 33 of the 106 could still be won there), and in none of the 403
+won games. Nothing proves a position with two or more deals left lost, which
+is where most games are lost: the last position the solver still finds a win
+from (at 500K work) has two or more deals left in half the lost four-suit
+games.
 
 **The first-event certificate** is a counting argument for any number of
 deals left: before the first column is emptied or suit completed, every moved
