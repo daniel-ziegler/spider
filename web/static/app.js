@@ -221,22 +221,25 @@ async function restart() {
 // ---------------------------------------------------------------- auto-complete
 
 // Once every card is dealt and face up, a worker looks for a way to win
-// (see solve.js); a new position replaces any search still running.
+// (see solve.js), sending shorter lines as it finds them; a new position
+// replaces any search still running.
 let solver = null;
 
 function updateFinish() {
   const open = g.stock.length === 0 && g.faceDown.every(n => n === 0) && !g.isWon();
   const key = open ? `${g.suits}/${g.seed}/${g.positionText()}` : null;
-  if (finish?.key !== key) {
+  if (finish?.key !== key && !finishing) {
     solver?.terminate();
     solver = null;
     finish = key && { key, line: null };
     if (key) {
       solver = new Worker('/solve.js', { type: 'module' });
       solver.onmessage = ({ data }) => {
-        solver?.terminate();
-        solver = null;
         if (finish?.key !== data.key) return;
+        if (data.done) {
+          solver?.terminate();
+          solver = null;
+        }
         finish.line = data.line && parseMoves(data.line);
         $('#b-finish').hidden = !finish.line || finishing;
       };
