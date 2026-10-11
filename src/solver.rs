@@ -1266,10 +1266,11 @@ impl Solver {
         }
         let st = &mut self.stages[sid as usize];
         st.pending_deals = found_deals;
-        if suspended && heap.len() > SUSPEND_KEEP {
+        let keep: usize = env_or("SPIDER_SUSPEND_KEEP", SUSPEND_KEEP);
+        if suspended && heap.len() > keep {
             let mut v = heap.into_vec();
             v.sort_unstable_by(|a, b| b.cmp(a));
-            v.truncate(SUSPEND_KEEP);
+            v.truncate(keep);
             heap = BinaryHeap::from(v);
             self.incomplete = true;
         }
