@@ -14,7 +14,7 @@ import { Game, parseMoves, encodeMoves } from './game.js';
 
 const WEIGHT = 3;
 const MAX_POSITIONS = 400000;
-const MAX_MS = 4000;
+const MAX_MS = 500;
 
 // A column is a string, one char per card; a position is its ten columns.
 
