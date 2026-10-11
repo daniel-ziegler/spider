@@ -122,6 +122,12 @@ button.primary:hover { background: #ffe27a; }
   background: var(--back) center / 100% 100%, var(--back-color);
   border: 1px solid #0008;
 }
+/* Face down again after an undo, but remembered: half face, half back. */
+.card.up.seen {
+  background: linear-gradient(#fffdf780, #fffdf780), var(--back) center / 100% 100%, var(--back-color);
+  border-color: #0008;
+  cursor: default;
+}
 .card .corner {
   position: absolute;
   top: 1px;

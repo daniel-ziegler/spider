@@ -45,6 +45,7 @@ applySettings({}, false);
 let view = 'home'; // 'home', 'archive' or 'game'
 let g = null; // the Game, once one is loaded
 let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
+let seen = []; // per column, the fewest face-down cards it has had: those from there up have been seen, and stay half shown when an undo turns them back over
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
@@ -59,10 +60,15 @@ let L; // layout, see computeLayout
 
 const keyOf = (suits, seed) => `${suits}/${seed}`;
 
+function noteSeen() {
+  seen = g.faceDown.map((n, c) => Math.min(n, seen[c] ?? n));
+}
+
 function save() {
+  noteSeen();
   const saves = store.get('spider:saves', {});
   saves[keyOf(g.suits, g.seed)] = {
-    moves: encodeMoves(g.moves()), redo: encodeMoves(g.redoMoves()), undos, realUndos, recorded, t: Date.now(),
+    moves: encodeMoves(g.moves()), redo: encodeMoves(g.redoMoves()), undos, realUndos, seen, recorded, t: Date.now(),
   };
   for (const k of Object.keys(saves).sort((a, b) => saves[b].t - saves[a].t).slice(MAX_SAVES)) delete saves[k];
   store.set('spider:saves', saves);
@@ -72,17 +78,23 @@ function save() {
 function load(suits, seed, push = false) {
   g = new Game(suits, seed);
   undos = realUndos = 0;
+  seen = [];
   recorded = '';
   sel = null;
   const s = store.get('spider:saves', {})[keyOf(suits, seed)];
   if (s) {
     try {
       const redo = parseMoves(s.redo);
-      for (const mv of [...parseMoves(s.moves), ...redo]) if (g.apply(mv)) throw new Error('bad save');
+      for (const mv of [...parseMoves(s.moves), ...redo]) {
+        if (g.apply(mv)) throw new Error('bad save');
+        noteSeen();
+      }
       for (const _ of redo) g.undo();
       [undos, realUndos, recorded] = [s.undos, s.realUndos, s.recorded ?? ''];
+      if (Array.isArray(s.seen)) seen = seen.map((n, c) => Math.min(n, s.seen[c] ?? n));
     } catch {
       g = new Game(suits, seed);
+      seen = [];
     }
   }
   setUrl(`/play/${suits}/${seed}`, push);
@@ -580,6 +592,7 @@ function helpDialog() {
     Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
     <b>Hint</b> steps through useful moves, best first; tap the column outlined in green to play one.</p>
     <p>An <b>undo</b> takes back a card turned over or a deal. Taking back anything else is a <b>free undo</b>.
+    A card you have seen and turned back over stays half shown.
     Wins record your moves and undos.</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     <div class="row"><button class="primary" data-close>Got it</button></div>`);
@@ -673,7 +686,8 @@ const colX = c => L.left0 + c * (L.cw + L.gap);
 
 // Card tops in a column, squeezed to fit the board's height when possible.
 function cardTops(c) {
-  const n = g.columns[c].length, fd = g.faceDown[c], ups = Math.max(0, n - fd - 1);
+  // Face-down cards that have been seen are spaced like face-up ones, to show what they are.
+  const n = g.columns[c].length, fd = Math.min(g.faceDown[c], seen[c]), ups = Math.max(0, n - fd - 1);
   const room = board.clientHeight - L.top0 - L.ch - 8;
   let down = L.down, up = L.up;
   if (fd * down + ups * up > room) {
@@ -700,7 +714,7 @@ function render() {
     html += `<div class="slot${hintTo === c ? ' hint' : ''}" style="left:${x}px;top:${L.top0}px"></div>`;
     col.forEach((card, i) => {
       const style = `left:${x}px;top:${tops[i]}px`, attrs = `data-c="${c}" data-i="${i}"`;
-      if (i < fd) html += `<div class="card down" style="${style}" ${attrs}></div>`;
+      if (i < fd) html += i < seen[c] ? `<div class="card down" style="${style}" ${attrs}></div>` : faceHtml(card, style, 'seen', attrs);
       else {
         const mark = sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '';
         // A break: this card is not one rank lower than the face-up card under it.
