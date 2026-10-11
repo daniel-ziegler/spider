@@ -44,6 +44,7 @@
 //! of permuting columns through an empty column to change which column a
 //! dealt card lands on.
 
+use crate::certify::top_rank_dead;
 use crate::game::{Card, Game, Move, DEAL_SIZE, NUM_COLS};
 use std::collections::{BinaryHeap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -931,6 +932,10 @@ struct Stage {
     end: bool,
 }
 
+/// Positions of its small game the top-rank certificate may look at for one
+/// position of the search.
+const CERTIFY_LIMIT: u64 = 10_000;
+
 /// Pending entries kept when a stage is suspended (the rest are dropped,
 /// which makes the search incomplete).
 const SUSPEND_KEEP: usize = 20_000;
@@ -962,6 +967,9 @@ pub struct Solver {
     class_cap: usize,
     /// Pass 2 (see `solve`): split moves are exits rather than class members.
     split_exits: bool,
+    /// Whether to try the top-rank certificate on stock-empty positions
+    /// (SPIDER_NO_CERT turns it off).
+    certify: bool,
     /// SPIDER_TRACE: print every expanded class to stderr.
     trace: bool,
     debug: bool,
@@ -996,6 +1004,7 @@ impl Solver {
             win: None,
             class_cap: env_or("SPIDER_CLASS_CAP", CLASS_CAP),
             split_exits: false,
+            certify: std::env::var_os("SPIDER_NO_CERT").is_none(),
             trace: std::env::var_os("SPIDER_TRACE").is_some(),
             debug: std::env::var_os("SPIDER_DEBUG").is_some(),
         }
@@ -1167,6 +1176,16 @@ impl Solver {
                 dup += 1;
                 continue;
             }
+            if end && self.certify {
+                // A position the top-rank certificate proves lost is not
+                // searched (its work is the certificate's).
+                let (dead, nodes) = top_rank_dead(std::array::from_fn(|c| &s.cols[c][..s.len[c] as usize]), s.down.map(|d| d as usize), CERTIFY_LIMIT);
+                self.work += nodes;
+                if dead {
+                    self.found.insert(s.key());
+                    continue;
+                }
+            }
             self.expand_class(&s, &mut cls);
             classes += 1;
             if self.debug && self.work >= next_report {
@@ -1266,11 +1285,10 @@ impl Solver {
         }
         let st = &mut self.stages[sid as usize];
         st.pending_deals = found_deals;
-        let keep: usize = env_or("SPIDER_SUSPEND_KEEP", SUSPEND_KEEP);
-        if suspended && heap.len() > keep {
+        if suspended && heap.len() > SUSPEND_KEEP {
             let mut v = heap.into_vec();
             v.sort_unstable_by(|a, b| b.cmp(a));
-            v.truncate(keep);
+            v.truncate(SUSPEND_KEEP);
             heap = BinaryHeap::from(v);
             self.incomplete = true;
         }

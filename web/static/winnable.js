@@ -7,7 +7,9 @@
 // reversible moves form a class, enumerated breadth-first; the search goes
 // depth-first over the irreversible moves out of classes, best evaluation
 // first, in resumable slices per stock stage. Runs that could split are only
-// split in later passes, which run when the first finds no win.
+// split in later passes, which run when the first finds no win. Once the
+// stock is empty, a position that the top-rank certificate (certify.rs)
+// proves lost is not searched.
 //
 // Only the layout differs from solver.rs, to keep the work in typed arrays:
 // * A position being worked on is "expanded": MS bytes, each column in its
@@ -20,8 +22,9 @@
 //   the order of the columns and updates cheaply for a move. Keys are two
 //   32-bit halves.
 //
-// As a worker: gets {key, suits, seed, moves, budget}, replies
-// {key, verdict, line}.
+// As a worker: gets {key, suits, seed, moves, budgets} and solves with each
+// budget in turn until one gives a verdict, replying {key, verdict, line,
+// last} after each.
 import { Game, DEAL, parseMoves, encodeMoves } from './game.js';
 
 const NC = 10, MAXC = 48;
@@ -32,6 +35,7 @@ const PACKED = 128; // completed, deals done, 10 lengths, 10 face-down counts, u
 // The default configuration of solver.rs.
 const W_COMPLETED = 1000, W_HIDDEN = 12, W_SAME = 4, W_DIFF = 1, W_WRONG = 2, W_EMPTY = 30, W_KING = 3;
 const CLASS_CAP = 20000, SUSPEND_KEEP = 20000, STAGE_CAP_MIN = 20000;
+const CERTIFY_LIMIT = 10000;
 const DEALS_PER_CLASS = 4, DEALS_PER_STAGE = 8, RESUME_TAX = 30, SUB_ALLOC = 8, SUB_GROWTH = 2, DEPTH_W = 100000;
 
 const SOLVABLE = 'solvable', UNSOLVABLE = 'unsolvable', NOT_FOUND = 'not found', UNKNOWN = 'unknown';
@@ -386,6 +390,94 @@ class Solver {
     return count === fl || M[col + fl - count - 1] % 13 === bottom % 13 + 1;
   }
 
+  // ---------------------------------------------------------------- the top-rank certificate
+
+  // Is the position in slot 0, the stock being empty, proved lost by the
+  // top-rank certificate (certify.rs, which has the argument)? While no
+  // column is empty the ranks of the ten top cards change only when a card
+  // leaves a card that is not one rank higher, and a card can only leave a
+  // card that is not the next of its suit while some top card is one rank
+  // higher. So a small game is searched instead: per column how many cards
+  // have never moved, in whole units (a card and the same-suit run on it),
+  // and the ranks of the tops. If it cannot empty a column or complete a
+  // suit, neither can the real one. this.certNodes counts its positions.
+  topRankDead() {
+    const M = this.M, left = new Uint8Array(NC), tops = new Uint8Array(14);
+    this.certNodes = 0;
+    for (let c = 0; c < NC; c++) {
+      const n = M[LEN + c];
+      if (n === 0) return false;
+      left[c] = n;
+      tops[M[c * MAXC + n - 1] % 13]++;
+    }
+    this.certSeen = new Set();
+    return !this.certEvent(left, tops);
+  }
+
+  // Where the top unit of column c starts when `left` cards have not moved.
+  certUnit(c, left) {
+    const M = this.M, o = c * MAXC, d = M[DOWN + c];
+    let u = left - 1;
+    while (u > d && M[o + u - 1] === M[o + u] + 1 && M[o + u] % 13 !== 12) u--;
+    return u;
+  }
+
+  // Can a column be emptied or a suit completed? Says yes when it gives up.
+  certEvent(left, tops) {
+    if (++this.certNodes > CERTIFY_LIMIT) return true;
+    const M = this.M;
+    // Steps that leave the tops' ranks as they are cost nothing: take them
+    // all. The others: column, cards left after, rank taken, rank given.
+    let steps;
+    for (let free = true; free; ) {
+      steps = [];
+      free = false;
+      for (let c = 0; c < NC; c++) {
+        const u = this.certUnit(c, left[c]), rank = M[c * MAXC + u] % 13;
+        if (tops[rank + 1] === 0) continue;
+        if (u === 0) return true; // the column is emptied
+        const under = M[c * MAXC + u - 1] % 13;
+        if (under === rank + 1) {
+          left[c] = u;
+          free = true;
+        } else steps.push(c, u, rank + 1, under);
+      }
+    }
+    if (this.certCompletable(left)) return true;
+    const key = String.fromCharCode(...left);
+    if (this.certSeen.has(key)) return false;
+    this.certSeen.add(key);
+    for (let i = 0; i < steps.length; i += 4) {
+      const l = left.slice(), t = tops.slice();
+      l[steps[i]] = steps[i + 1];
+      t[steps[i + 2]]--;
+      t[steps[i + 3]]++;
+      if (this.certEvent(l, t)) return true;
+    }
+    return false;
+  }
+
+  // Might some suit be completed: is a king's unit on top of its column,
+  // with a copy of every lower card of the suit moved or in a top unit?
+  certCompletable(left) {
+    const M = this.M, starts = [];
+    for (let c = 0; c < NC; c++) starts.push(this.certUnit(c, left[c]));
+    for (let c = 0; c < NC; c++) {
+      const king = M[c * MAXC + starts[c]];
+      if (king % 13 !== 12) continue;
+      const lowest = M[c * MAXC + left[c] - 1];
+      let all = true;
+      for (let card = king - 12; card < lowest && all; card++) {
+        all = false;
+        for (let j = 0; j < NC && !all; j++) {
+          for (let i = starts[j], n = M[LEN + j]; i < n && !all; i++) all = M[j * MAXC + i] === card;
+        }
+      }
+      if (all) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------- classes
 
   // Enumerate the class of the position in slot 0 under reversible moves (at
@@ -615,8 +707,18 @@ class Solver {
       const isEntry = this.pseq[p] === 0, parent = this.pparent[p], poff = this.poff[p], plen = this.plen[p];
       const depth = this.pdepth[p] + 1;
       this.free.push(p);
-      const h = M[DONE] * 8 + M[DEALT];
-      if (found.has(MI[SUML] ^ HL[h], MI[SUMH] ^ HH[h])) continue;
+      const h = M[DONE] * 8 + M[DEALT], kl = MI[SUML] ^ HL[h], kh = MI[SUMH] ^ HH[h];
+      if (found.has(kl, kh)) continue;
+      if (stage.end) {
+        // A position the top-rank certificate proves lost is not searched
+        // (its work is the certificate's).
+        const dead = this.topRankDead();
+        this.work += this.certNodes;
+        if (dead) {
+          found.add(kl, kh);
+          continue;
+        }
+      }
       this.enumerate();
       const n = this.nmem;
       this.work += n;
@@ -804,10 +906,13 @@ export function solve(game, budget) {
 }
 
 if (typeof WorkerGlobalScope !== 'undefined') {
-  onmessage = ({ data: { key, suits, seed, moves, budget } }) => {
+  onmessage = ({ data: { key, suits, seed, moves, budgets } }) => {
     const game = new Game(suits, seed);
     for (const mv of parseMoves(moves)) game.applyRaw(mv);
-    const { verdict, line } = solve(game, budget);
-    postMessage({ key, verdict, line: encodeMoves(line) });
+    for (const [i, budget] of budgets.entries()) {
+      const { verdict, line } = solve(game, budget);
+      postMessage({ key, verdict, line: encodeMoves(line), last: i === budgets.length - 1 });
+      if (verdict !== 'unknown') break;
+    }
   };
 }

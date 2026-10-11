@@ -342,35 +342,49 @@ impl Counting {
 /// when a king's unit is on top and every lower card of its suit has a copy
 /// that has moved or is in a top unit.
 pub fn top_rank_certificate(g: &crate::game::Game) -> bool {
-    if !g.stock.is_empty() || g.columns.iter().any(|c| c.is_empty()) {
+    if !g.stock.is_empty() {
         return false;
     }
     let cols: Vec<Vec<u8>> = g.columns.iter().map(|c| c.iter().map(|k| k.0).collect()).collect();
+    let (dead, nodes) = top_rank_dead(std::array::from_fn(|c| cols[c].as_slice()), g.face_down, 1_000_000);
+    if std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
+        eprintln!("top ranks: {} ({nodes} positions)", if dead { "no event" } else { "an event is possible" });
+    }
+    dead
+}
+
+/// [`top_rank_certificate`] for these columns (bottom card first), `down[c]`
+/// cards of column `c` face down, the stock being empty: whether the
+/// position is proved lost, and the positions of the small game looked at,
+/// `limit` at most before giving up.
+pub(crate) fn top_rank_dead(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], limit: u64) -> (bool, u64) {
+    if cols.iter().any(|c| c.is_empty()) {
+        return (false, 0);
+    }
     let mut tops = [0u8; 14];
     let mut left = [0u8; NUM_COLS];
     for c in 0..NUM_COLS {
         tops[(cols[c][cols[c].len() - 1] % 13) as usize] += 1;
         left[c] = cols[c].len() as u8;
     }
-    let mut game = Units { cols, down: g.face_down, seen: std::collections::HashSet::new(), nodes: 0 };
+    let mut game = Units { cols, down, seen: Vec::new(), nodes: 0, limit };
     let event = game.event(left, tops);
-    if std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
-        eprintln!("top ranks: {} ({} positions)", if event { "an event is possible" } else { "no event" }, game.nodes);
-    }
-    !event
+    (!event, game.nodes)
 }
 
-struct Units {
-    cols: Vec<Vec<u8>>,
+struct Units<'a> {
+    cols: [&'a [u8]; NUM_COLS],
     down: [usize; NUM_COLS],
-    seen: std::collections::HashSet<[u8; NUM_COLS]>,
+    /// Positions (cards left per column) from which there is no event.
+    seen: Vec<[u8; NUM_COLS]>,
     nodes: u64,
+    limit: u64,
 }
 
-impl Units {
+impl Units<'_> {
     /// Where the top unit of column `c` starts when `left` cards have not moved.
     fn unit(&self, c: usize, left: u8) -> usize {
-        let col = &self.cols[c];
+        let col = self.cols[c];
         let mut u = left as usize - 1;
         while u > self.down[c] && col[u - 1] == col[u] + 1 && col[u] % 13 != 12 {
             u -= 1;
@@ -381,18 +395,17 @@ impl Units {
     /// Can an event be reached? Says yes when it gives up.
     fn event(&mut self, mut left: [u8; NUM_COLS], tops: [u8; 14]) -> bool {
         self.nodes += 1;
-        if self.nodes > 1_000_000 {
+        if self.nodes > self.limit {
             return true;
         }
         // Steps that leave `tops` as it is cost nothing: take them all.
-        let mut steps = Vec::new();
+        // The others: (column, cards left after, rank taken, rank given).
+        let mut steps = [(0usize, 0u8, 0usize, 0usize); NUM_COLS];
+        let mut n;
         loop {
-            steps.clear();
+            n = 0;
             let mut free = false;
             for c in 0..NUM_COLS {
-                if left[c] == 0 {
-                    continue;
-                }
                 let u = self.unit(c, left[c]);
                 let rank = (self.cols[c][u] % 13) as usize;
                 if tops[rank + 1] == 0 {
@@ -406,7 +419,8 @@ impl Units {
                     left[c] = u as u8;
                     free = true;
                 } else {
-                    steps.push((c, u, rank + 1, under));
+                    steps[n] = (c, u as u8, rank + 1, under);
+                    n += 1;
                 }
             }
             if !free {
@@ -416,12 +430,13 @@ impl Units {
         if self.completable(&left) {
             return true;
         }
-        if !self.seen.insert(left) {
+        if self.seen.contains(&left) {
             return false;
         }
-        for (c, u, takes, gives) in steps.clone() {
+        self.seen.push(left);
+        for &(c, u, takes, gives) in &steps[..n] {
             let (mut l, mut t) = (left, tops);
-            l[c] = u as u8;
+            l[c] = u;
             t[takes] -= 1;
             t[gives] += 1;
             if self.event(l, t) {
@@ -434,11 +449,8 @@ impl Units {
     /// Might some suit be completed: is a king's unit on top of its column,
     /// with a copy of every lower card of the suit moved or in a top unit?
     fn completable(&self, left: &[u8; NUM_COLS]) -> bool {
-        let starts: Vec<usize> = (0..NUM_COLS).map(|c| if left[c] == 0 { 0 } else { self.unit(c, left[c]) }).collect();
+        let starts: [usize; NUM_COLS] = std::array::from_fn(|c| self.unit(c, left[c]));
         (0..NUM_COLS).any(|c| {
-            if left[c] == 0 {
-                return false;
-            }
             let king = self.cols[c][starts[c]];
             if king % 13 != 12 {
                 return false;
@@ -446,5 +458,33 @@ impl Units {
             let lowest = self.cols[c][left[c] as usize - 1];
             (king - 12..lowest).all(|card| (0..NUM_COLS).any(|j| self.cols[j][starts[j]..].contains(&card)))
         })
+    }
+}
+
+#[cfg(test)]
+mod top_rank_tests {
+    use super::*;
+    use crate::game::Game;
+
+    #[test]
+    fn stuck_endgames_are_lost() {
+        // Where the line player gave up on four-suit deal 30003: only runs
+        // split onto other suits still move. The solver took 1.4M work.
+        let stuck = "0;3/36,42,36,45,8,33,32;5/15,20,22,50,21,51,26,47,18,43,3,2,1,0;5/46,38,7,48,18,27,26,37,41,40,30,29,28,27;0/25;4/10,0,44,7,14,44,24,23,45,5,4,3,2,1,39,40,39,17;3/32,35,11,9,34,31,30,29,28,14,13,19,5,4,12,46;0/23,48,8,51,50;2/34,22,20,19,31,17,16,41;3/13,21,37,33,6,47,43,12,49;4/42,15,35,6,9,38,24,10,25,11,49,16";
+        assert!(top_rank_certificate(&Game::from_position_text(4, stuck).unwrap()));
+        // Deal 30002 just after its last deal, with 18 cards face down: the
+        // solver did not refute it in 20M work.
+        let dealt = "0;5/34,8,43,5,9,10,48,21,7,19,18,17,42,41,40,13,25,11,10,0;1/42,7,32,31,4,3,2,1,0,30;5/5,18,39,50,34,51,29,28,27,26,37,45,47;1/43,40,41;0/12,29,28,15,14,13,36,35,49;0/49,48,45,6,1,39,25,8;0/16,15,14,26,12,24,6,16;2/24,9,36,22,21,33,19,47,33,32,31,27;1/46,38,11,23,22,4,3,2,17,30,20;3/35,44,44,51,46,50,38,37,23,20";
+        assert!(top_rank_certificate(&Game::from_position_text(4, dealt).unwrap()));
+    }
+
+    #[test]
+    fn a_column_that_can_empty_is_not_certified() {
+        // Kings on aces of the other suit, except a six that can move onto a seven.
+        let mut cols: Vec<String> = (0..NUM_COLS).map(|c| format!("0/{},{}", (c % 2) * 13, ((c + 1) % 2) * 13 + 12)).collect();
+        assert!(top_rank_certificate(&Game::from_position_text(2, &format!("0;{}", cols.join(";"))).unwrap()));
+        cols[3] = "0/5".into();
+        cols[4] = "0/13,19".into();
+        assert!(!top_rank_certificate(&Game::from_position_text(2, &format!("0;{}", cols.join(";"))).unwrap()));
     }
 }
