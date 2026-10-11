@@ -115,6 +115,56 @@ fn main() {
                     println!("{} {} won {} : moves {} last deal at {last_deal} applies {applies} fires {fires} first {}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
                     continue;
                 }
+                if mode == "sound2" {
+                    // Every position of the game with no empty column: how many, how many the
+                    // certificate with deals calls lost, the first, and the deals left then.
+                    // In a game that was won any such is a bug.
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    let (mut applies, mut fires, mut first, mut gave_up, mut nodes) = (0, 0, None, 0, 0);
+                    for (i, mv) in moves.iter().chain(std::iter::once(&Move::Deal)).enumerate() {
+                        if g.columns.iter().all(|c| !c.is_empty()) {
+                            applies += 1;
+                            let (dead, n) = spider::certify::stock_certificate(&g, budget);
+                            nodes += n;
+                            gave_up += (n > budget) as u32;
+                            if dead {
+                                fires += 1;
+                                first.get_or_insert((i, g.stock.len() / 10));
+                                if f[3] == "1" {
+                                    println!("UNSOUND {} {} after {i} moves: {}", f[0], f[1], g.to_position_text());
+                                }
+                            }
+                        }
+                        if i < moves.len() {
+                            g.apply(*mv).unwrap();
+                        }
+                    }
+                    let (at, left) = first.map_or((-1, -1), |(i, l)| (i as i64, l as i64));
+                    println!("{} {} won {} : moves {} applies {applies} fires {fires} first {at} deals_left {left} gave_up {gave_up} nodes {nodes}", f[0], f[1], f[3], moves.len());
+                    continue;
+                }
+                if mode == "cmp" {
+                    // Positions with stock left and no empty column, every `step` moves: the
+                    // solver's verdict against the certificate with deals, by deals left.
+                    let step: usize = a[3].parse().unwrap();
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    for (i, mv) in moves.iter().enumerate() {
+                        if i % step == 0 && !g.stock.is_empty() && g.columns.iter().all(|c| !c.is_empty()) {
+                            let (dead, n) = spider::certify::stock_certificate(&g, 200_000);
+                            let r = Solver::new(&g, budget).solve(&g);
+                            let v = match r.verdict {
+                                Verdict::Solvable => 'W',
+                                Verdict::Unsolvable => 'L',
+                                Verdict::Unknown => '?',
+                            };
+                            println!("{} {} won {} : left {} cert {} solver {v} work {} nodes {n} at {i}", f[0], f[1], f[3], g.stock.len() / 10, dead as u8, r.nodes);
+                        }
+                        g.apply(*mv).unwrap();
+                    }
+                    continue;
+                }
                 if mode == "trace" || mode == "ptrace" {
                     // The verdict every `step` moves along the game, with the deals left
                     // (ptrace: of the portfolio of four).
@@ -154,6 +204,10 @@ fn main() {
                         d.apply(Move::Deal).is_ok() && spider::certify::top_rank_certificate(&d)
                     };
                     println!("{} {} won {} : deal points {points} proved lost {lost} exhausted {all} dealing now {now}", f[0], f[1], f[3]);
+                    continue;
+                }
+                if mode == "cert2" {
+                    println!("{} {} left {}: {:?}", f[0], f[1], f[2], spider::certify::stock_certificate(&g, budget));
                     continue;
                 }
                 if mode == "cert1" {
