@@ -1,4 +1,4 @@
-// Compares greedy.mjs with the search in static/solve.js on endgames that can
+// Compares auto-complete's rules (static/solve.js) with search.mjs on endgames that can
 // be won: winning play run backwards from the cleared board for a number of
 // moves. For each suit count and depth prints how many each solves, the time
 // each takes, and the lengths of their lines where both solve. Then the same
@@ -6,8 +6,8 @@
 // r8, r6, r4), which is far messier than play gets and often cannot be won.
 //   node bench.mjs [positions per row, default 50]
 import { Game, rankOf, runLen } from '../../static/game.js';
-import { search } from '../../static/solve.js';
-import { greedyLine } from './greedy.mjs';
+import { greedyLine } from '../../static/solve.js';
+import { search } from './search.mjs';
 
 let state = 4242;
 const rand = n => {

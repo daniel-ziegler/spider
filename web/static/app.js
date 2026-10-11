@@ -220,9 +220,8 @@ async function restart() {
 
 // ---------------------------------------------------------------- auto-complete
 
-// Once every card is dealt and face up, a worker looks for a way to win
-// (see solve.js), sending shorter lines as it finds them; a new position
-// replaces any search still running.
+// Once every card is dealt and face up, a worker tries to play out a win
+// (see solve.js); a new position replaces any attempt still running.
 let solver = null;
 
 function updateFinish() {
@@ -235,11 +234,9 @@ function updateFinish() {
     if (key) {
       solver = new Worker('/solve.js', { type: 'module' });
       solver.onmessage = ({ data }) => {
+        solver?.terminate();
+        solver = null;
         if (finish?.key !== data.key) return;
-        if (data.done) {
-          solver?.terminate();
-          solver = null;
-        }
         finish.line = data.line && parseMoves(data.line);
         $('#b-finish').hidden = !finish.line || finishing;
       };
