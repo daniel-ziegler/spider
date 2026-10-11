@@ -1,19 +1,23 @@
 //! A non-peeking player that improves the line player by rollouts.
 //!
-//! At each decision it takes the line player's own choice and a few
+//! At a decision it takes the line player's own choice and a few
 //! alternatives from the same line search: the next-best lines that raise
-//! the value (normally and about to deal), the best line that turns over
-//! each column, and the deal. Each is judged in worlds guessed from the
-//! masked position (the cards not visible dealt at random into the
-//! face-down slots and the stock, see [`determinize`]): the candidate is
-//! played in the world and a cheaper line player finishes the game. Every
-//! candidate is played in the same worlds, sequential halving spends the
-//! rollouts on the candidates still in contention, and the line player's
-//! choice is only overruled by a clear margin.
+//! the value (normally and about to deal or to give up), the best line
+//! that turns over each column, and the deal. Each is judged in worlds
+//! guessed from the masked position (the cards not visible dealt at random
+//! into the face-down slots and the stock, see [`determinize`]): the
+//! candidate is played in the world and a cheaper line player plays on.
+//! Every candidate is played in the same worlds, sequential halving spends
+//! the rollouts on the candidates still in contention, and the line
+//! player's choice is only overruled by a clear margin.
+//!
+//! By default it does this only once the stock is gone, where the rollouts
+//! run to the end of the game and count wins: that is where it gains
+//! (see the README). Before that it plays as the line player does.
 
 use crate::game::{Game, Move, NUM_COLS};
 use crate::human::{mask, PlayResult};
-use crate::lines::{decide_steps, Tempo, line_to, play_until, search_state, Choice, LineConfig, LOST};
+use crate::lines::{line_to, play_until, search_state, Decision, LineConfig, Tempo, LOST};
 use crate::smart::determinize;
 use crate::solver::{mix, State, MAXC};
 use std::collections::HashSet;
@@ -50,6 +54,13 @@ pub struct PimcConfig {
     /// are scored by the fitted value there ([`crate::stagev`]); dealing
     /// is then no alternative to the line player's choice.
     pub stage: bool,
+    /// Rollouts only with at most this many deals left; before that, the
+    /// line player's choice.
+    pub from: usize,
+    /// With the stock gone, the lines raising the value the line player
+    /// gives up by (`end_empty`) are candidates too, as those raising the
+    /// about-to-deal value are before.
+    pub end_lines: bool,
 }
 
 impl PimcConfig {
@@ -57,24 +68,26 @@ impl PimcConfig {
         let base = LineConfig::for_suits(suits);
         PimcConfig {
             base,
-            rollout: LineConfig { max_steps: 3, expect_top: 0, replan: 0, ..base },
-            max_cands: 6,
-            extra_improve: 2,
-            extra_deal: 1,
-            max_flips: 3,
-            max_idle: 6,
-            rollouts: 48,
+            rollout: LineConfig { max_steps: 6, beam: 100, expect_top: 0, replan: 0, ..base },
+            max_cands: 8,
+            extra_improve: 3,
+            extra_deal: 2,
+            max_flips: 5,
+            max_idle: 12,
+            rollouts: 128,
             horizon: 0,
             win_bonus: 4.0,
             z: 1.0,
             seed: 0,
-            stage: false,
+            stage: true,
+            from: 0,
+            end_lines: true,
         }
     }
 
     /// [`PimcConfig::for_suits`] with `SPIDER_P_*` overrides (ROLLOUT_STEPS, ROLLOUT_BEAM,
     /// ROLLOUT_EXPECT, ROLLOUT_REPLAN, MAX_CANDS, EXTRA_IMPROVE, EXTRA_DEAL, MAX_FLIPS, MAX_IDLE,
-    /// ROLLOUTS, HORIZON, WIN_BONUS, Z, SEED, STAGE); `SPIDER_L_*` set the weights of both
+    /// ROLLOUTS, HORIZON, WIN_BONUS, Z, SEED, STAGE, FROM, END_LINES); `SPIDER_L_*` set the weights of both
     /// players. The rollout player has no expectimax or replanning unless asked for.
     pub fn from_env(suits: u8) -> PimcConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
@@ -101,7 +114,9 @@ impl PimcConfig {
             win_bonus: get("WIN_BONUS", d.win_bonus),
             z: get("Z", d.z),
             seed: get("SEED", d.seed),
-            stage: get::<u8>("STAGE", 0) != 0,
+            stage: get::<u8>("STAGE", d.stage as u8) != 0,
+            from: get("FROM", d.from),
+            end_lines: get::<u8>("END_LINES", d.end_lines as u8) != 0,
         }
     }
 }
@@ -127,10 +142,21 @@ fn apply(g: &mut Game, c: &Cand) {
 /// Candidates from a masked position, the line player's choice first
 /// (none if the game is over).
 pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut Tempo, cfg: &PimcConfig) -> Vec<Cand> {
-    let first = match decide_steps(obs, deals_left, visited, tempo, &cfg.base).0 {
-        Choice::Line(steps) => Cand::Line(steps.concat()),
-        Choice::Deal => Cand::Deal,
-        Choice::Stuck => return Vec::new(),
+    candidates_plan(obs, deals_left, visited, tempo, cfg).0
+}
+
+/// [`candidates`], the line player's choice being the whole line it plans,
+/// and what it plays of that line now (with replanning, its first steps;
+/// `None` if the game is over).
+fn candidates_plan(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: &mut Tempo, cfg: &PimcConfig) -> (Vec<Cand>, Option<Cand>) {
+    let (first, play) = match crate::lines::decide(obs, deals_left, visited, tempo, &cfg.base).0 {
+        Decision::Play(moves) => {
+            let mut line = moves.clone();
+            line.extend(tempo.plan.iter().flatten().copied());
+            (Cand::Line(line), Cand::Line(moves))
+        }
+        Decision::Deal => (Cand::Deal, Cand::Deal),
+        Decision::Stuck => return (Vec::new(), None),
     };
     let nodes = search_state(State::from_game(obs), &cfg.base);
     let root = &nodes[0].state;
@@ -160,8 +186,9 @@ pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: 
     for &(_, k) in ranked(cfg.base.empty).iter().take(cfg.extra_improve + 1) {
         push(&mut out, k);
     }
-    if deals_left > 0 {
-        for &(_, k) in ranked(cfg.base.deal_empty).iter().take(cfg.extra_deal + 1) {
+    if deals_left > 0 || cfg.end_lines {
+        let empty = if deals_left > 0 { cfg.base.deal_empty } else { cfg.base.end_empty };
+        for &(_, k) in ranked(empty).iter().take(cfg.extra_deal + 1) {
             push(&mut out, k);
         }
     }
@@ -190,7 +217,7 @@ pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: 
     if !cfg.stage && deals_left > 0 && root.len.iter().all(|&l| l > 0) && !out.contains(&Cand::Deal) && out.len() < cfg.max_cands {
         out.push(Cand::Deal);
     }
-    out
+    (out, Some(play))
 }
 
 thread_local! {
@@ -241,13 +268,16 @@ pub struct DecideStats {
 /// completed suit: from `max_idle` on, only the base choice is played, so
 /// that alternating between the alternatives cannot go on for ever.
 pub fn decide(obs: &Game, deals_left: usize, visited: &HashSet<u64>, idle: usize, tempo: &mut Tempo, cfg: &PimcConfig) -> (Option<Cand>, DecideStats) {
-    let mut cands = candidates(obs, deals_left, visited, tempo, cfg);
-    if idle >= cfg.max_idle {
+    // A line the player is part way through was judged when it was chosen.
+    let planned: Vec<Move> = tempo.plan.iter().flatten().copied().collect();
+    let (mut cands, play) = candidates_plan(obs, deals_left, visited, tempo, cfg);
+    let continuing = !planned.is_empty() && cands.first() == Some(&Cand::Line(planned));
+    if idle >= cfg.max_idle || deals_left > cfg.from || continuing {
         cands.truncate(1);
     }
     let mut stats = DecideStats { candidates: cands.len(), ..Default::default() };
     if cands.len() <= 1 || cfg.rollouts == 0 {
-        return (cands.into_iter().next(), stats);
+        return (play, stats);
     }
     let seed = mix(cfg.seed ^ 0x5EED, State::from_game(obs).hash());
     let mut alive: Vec<usize> = (0..cands.len()).collect();
@@ -289,6 +319,10 @@ pub fn decide(obs: &Game, deals_left: usize, visited: &HashSet<u64>, idle: usize
     let var = diffs.iter().map(|d| (d - m) * (d - m)).sum::<f64>() / (n - 1.0).max(1.0);
     let se = (var / n).sqrt();
     stats.chosen = if m > 0.0 && m > cfg.z * se { ch } else { 0 };
+    if stats.chosen == 0 {
+        return (play, stats);
+    }
+    tempo.plan.clear();
     (Some(cands[stats.chosen].clone()), stats)
 }
 
@@ -354,7 +388,7 @@ mod tests {
         let mut b = a.clone();
         b.columns[0][0] = Card::new(1, 5);
         b.stock.reverse();
-        let cfg = PimcConfig { rollouts: 8, ..PimcConfig::for_suits(4) };
+        let cfg = PimcConfig { rollouts: 8, stage: false, from: 5, ..PimcConfig::for_suits(4) };
         let v = HashSet::new();
         assert_eq!(decide(&mask(&a), 5, &v, 0, &mut Tempo::default(), &cfg).0, decide(&mask(&b), 5, &v, 0, &mut Tempo::default(), &cfg).0);
     }

@@ -275,12 +275,20 @@ gains nothing and splitting runs anywhere in the normal search loses.
 `cargo run --release --bin lines -- <suits> <first> <count>` plays the
 seeds on all cores; `SPIDER_L_*` override the weights and search.
 
-`src/pimc.rs` (`--bin pimc`) adds rollouts on top: at each decision the
-line player's choice and a few alternatives are played out in worlds
-guessed from the visible cards by a cheaper line player, and an
-alternative is played only when it does clearly better. With the current
-line player it adds little (50 against 48 wins on seeds 1–200, at about 130
-s per game). It is not that rollouts cannot improve the line player: given
+`src/pimc.rs` (`--bin pimc`) adds rollouts on top: the line player's
+choice and a few alternatives are played out in worlds guessed from the
+visible cards by a cheaper line player, and an alternative is played only
+when it does clearly better. By default it does so only after the last
+deal (128 rollouts a decision, up to 8 candidates, a six-step line player
+playing each world to the end, wins counted), which is the one place it
+gains: 814 wins against the line player's 797 on seeds 20001–22000 (65
+games gained, 48 lost), and 43 more on 1,600 of seeds 50001–51600, about a
+point and a half in all, at 23 s per game (see
+[stage-wise evaluation](#stage-wise-evaluation-a-plateau-until-the-last-deal)).
+At every decision of the game (`SPIDER_P_FROM=5 SPIDER_P_STAGE=0`), with
+an earlier line player, it added nothing (50 against 48 wins on seeds
+1–200, at about 130 s per game). It is not that rollouts cannot improve
+the line player: given
 the real deal instead of guessed worlds (`SPIDER_P_CHEAT=1`, a diagnostic)
 the same rollouts win 110 of seeds 30001–30200 against its 58. But in
 guessed worlds the outcome depends far more on where the hidden cards are
@@ -301,7 +309,7 @@ games that were winnable after the last deal. Those are mostly winnable
 only with knowledge of the face-down cards: guessed worlds give no
 candidate the edge.
 
-### Stage-wise evaluation: the line player is at a plateau
+### Stage-wise evaluation: a plateau until the last deal
 
 Win counts are a blunt instrument: over 2,000 games the standard error is
 about a point of win rate, and the changes worth finding are smaller.
@@ -338,8 +346,9 @@ Every lost game ends with the stock gone, and 212 of 298 lost games (seeds
 can before it deals: told to turn any card within reach whatever the cost
 before dealing, it plays all but a handful of 6,000 stages the same.
 
-Nothing tried moves the fitted value up by more than its error, in the
-first stage (4,000 positions) or the third (2,000), in points of win rate:
+Before the last deal, nothing tried moves the fitted value up by more
+than its error, in the first stage (4,000 positions) or the third (2,000),
+in points of win rate:
 
 | change                                                    | first stage      | third stage  |
 |-----------------------------------------------------------|------------------|--------------|
@@ -371,13 +380,36 @@ the first stage: digging the deepest columns first (`HIDDEN_SQ` 60,
 `HIDDEN` 45) −3.8, the shortest (`HIDDEN_SQ` −40, `HIDDEN` 85) −0.75,
 tidier (`OFF` −30, `WRONG` −10, `RUN_SQ` 14) +0.01 ± 0.15.
 
-So within a stage the player is at a local optimum of everything that
-could be measured, rollouts over its own lines included, and what it
-reaches is set by the cards. After the last deal the full-information
-solver (300,000 work) finds a win in 160 of 400 reference games, 26 of
-them games the line player lost; with the 12 of its 146 wins that the
-solver did not find, 43% were still winnable by a player who sees every
-card, against 36.5% won. 45% is not within reach of this kind of player.
+So before the last deal the player is at a local optimum of everything
+that could be measured, rollouts over its own lines included, and what it
+reaches is set by the cards.
+
+After the last deal the measure is the game's result, and there rollouts
+to the end of the game do gain (1,600 positions; the line player's own
+variants on 4,000):
+
+| change, after the last deal                                        | points of win rate |
+|--------------------------------------------------------------------|--------------------|
+| 64 rollouts, up to 6 candidates                                    | +1.75 ± 0.51       |
+| 128 rollouts, up to 8 candidates, lines raising the giving-up value too | +2.69 ± 0.54  |
+| line player: replanning after every step                           | +0.25 ± 0.27       |
+| line player: expectimax over the best 8 lines                      | −0.15 ± 0.24       |
+| line player: beam 1,500, 24 steps                                  | +0.33 ± 0.33       |
+| line player: no replanning (800 positions)                         | −2.25 ± 0.86       |
+
+In whole games on other seeds the rollouts gain less: 774 wins against
+759 on seeds 1–2000 (64 rollouts) and 814 against 797 on seeds 20001–22000
+(128, +0.85 ± 0.53), so about a point and a half over all 3,600 games of
+the larger setting. In the stage before the last deal, rollouts to that
+deal scored by the fitted value are +0.45 ± 0.32 (1,000 positions).
+
+There is not much more to be had after the last deal: the
+full-information solver (300,000 work) finds a win in 160 of 400 reference
+games there, 26 of them games the line player lost; with the 12 of its 146
+wins that the solver did not find, 43% were still winnable by a player who
+sees every card, against 36.5% won. 45% is not within reach of this kind
+of player: it would have to come from more games surviving the deals, and
+between deals nothing measured gains.
 
 ### AlphaZero player
 
