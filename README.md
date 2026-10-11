@@ -477,12 +477,14 @@ stage played with it, from the reference positions:
 | 3 (cheap labels only, 1,000 positions)                  | −0.27 ± 0.25                |
 | 2 (cheap labels only, margin 0.01 / 0.02)               | −0.69 ± 0.17 / −0.25 ± 0.13 |
 | 2                                                       | −0.17 ± 0.12                |
-| 1 (4,000 positions; margin 0.04 on 2,000: +0.42 ± 0.17) | +0.26 ± 0.15                |
+| 1 (4,000 positions, margin 0.02 / 0.04)                 | +0.26 ± 0.15 / +0.30 ± 0.12 |
 | 0 (4,000 positions, the game's result)                  | +1.25 ± 0.36                |
 
 So it gains where the rollouts did, after the last deal and a little in
 the stage before, and loses earlier, where there is nothing to find and
-its mistakes cost. In whole games, ranking only with one or no deals left
+its mistakes cost. More data does not help: trained on with 70,000 more
+last-stage decisions (three times as many), it is no better (+0.98 ± 0.35
+and +0.05 ± 0.12 in the last two stages). In whole games, ranking only with one or no deals left
 (`SPIDER_P_FROM=1`, margin 0.04), on seeds it has not seen:
 
 | four suits, wins of 2,000 | line player | with the network     | with rollouts |
