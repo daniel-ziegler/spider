@@ -46,6 +46,10 @@ pub struct PimcConfig {
     /// Standard errors by which a challenger must beat the base choice.
     pub z: f64,
     pub seed: u64,
+    /// Rollouts stop where the rollout player is next about to deal and
+    /// are scored by the fitted value there ([`crate::stagev`]); dealing
+    /// is then no alternative to the line player's choice.
+    pub stage: bool,
 }
 
 impl PimcConfig {
@@ -53,7 +57,7 @@ impl PimcConfig {
         let base = LineConfig::for_suits(suits);
         PimcConfig {
             base,
-            rollout: LineConfig { max_steps: 3, ..base },
+            rollout: LineConfig { max_steps: 3, expect_top: 0, replan: 0, ..base },
             max_cands: 6,
             extra_improve: 2,
             extra_deal: 1,
@@ -64,12 +68,14 @@ impl PimcConfig {
             win_bonus: 4.0,
             z: 1.0,
             seed: 0,
+            stage: false,
         }
     }
 
     /// [`PimcConfig::for_suits`] with `SPIDER_P_*` overrides (ROLLOUT_STEPS, ROLLOUT_BEAM,
-    /// MAX_CANDS, EXTRA_IMPROVE, EXTRA_DEAL, MAX_FLIPS, MAX_IDLE, ROLLOUTS, HORIZON, WIN_BONUS,
-    /// Z, SEED); `SPIDER_L_*` set the weights of both players.
+    /// ROLLOUT_EXPECT, ROLLOUT_REPLAN, MAX_CANDS, EXTRA_IMPROVE, EXTRA_DEAL, MAX_FLIPS, MAX_IDLE,
+    /// ROLLOUTS, HORIZON, WIN_BONUS, Z, SEED, STAGE); `SPIDER_L_*` set the weights of both
+    /// players. The rollout player has no expectimax or replanning unless asked for.
     pub fn from_env(suits: u8) -> PimcConfig {
         fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
             std::env::var(format!("SPIDER_P_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -78,7 +84,13 @@ impl PimcConfig {
         let base = LineConfig::from_env(suits);
         PimcConfig {
             base,
-            rollout: LineConfig { max_steps: get("ROLLOUT_STEPS", d.rollout.max_steps), beam: get("ROLLOUT_BEAM", d.rollout.beam), ..base },
+            rollout: LineConfig {
+                max_steps: get("ROLLOUT_STEPS", d.rollout.max_steps),
+                beam: get("ROLLOUT_BEAM", d.rollout.beam),
+                expect_top: get("ROLLOUT_EXPECT", 0),
+                replan: get("ROLLOUT_REPLAN", 0),
+                ..base
+            },
             max_cands: get("MAX_CANDS", d.max_cands),
             extra_improve: get("EXTRA_IMPROVE", d.extra_improve),
             extra_deal: get("EXTRA_DEAL", d.extra_deal),
@@ -89,6 +101,7 @@ impl PimcConfig {
             win_bonus: get("WIN_BONUS", d.win_bonus),
             z: get("Z", d.z),
             seed: get("SEED", d.seed),
+            stage: get::<u8>("STAGE", 0) != 0,
         }
     }
 }
@@ -174,7 +187,7 @@ pub fn candidates(obs: &Game, deals_left: usize, visited: &HashSet<u64>, tempo: 
     for &(_, _, k) in best.iter().take(cfg.max_flips) {
         push(&mut out, k);
     }
-    if deals_left > 0 && root.len.iter().all(|&l| l > 0) && !out.contains(&Cand::Deal) && out.len() < cfg.max_cands {
+    if !cfg.stage && deals_left > 0 && root.len.iter().all(|&l| l > 0) && !out.contains(&Cand::Deal) && out.len() < cfg.max_cands {
         out.push(Cand::Deal);
     }
     out
@@ -194,9 +207,17 @@ fn rollout(obs: &Game, c: &Cand, visited: &HashSet<u64>, world_seed: u64, cfg: &
     let mut seen = visited.clone();
     seen.insert(State::from_game(&mask(&world)).hash());
     let level = obs.deals_remaining();
-    let stop = (cfg.horizon > 0 && level >= cfg.horizon).then(|| level - cfg.horizon);
+    let stop = if cfg.stage { (level > 0).then_some(level) } else { (cfg.horizon > 0 && level >= cfg.horizon).then(|| level - cfg.horizon) };
     let (work, stopped) = play_until(&mut world, &cfg.rollout, seen, stop);
-    let v = if stopped {
+    let v = if cfg.stage {
+        if world.is_won() {
+            1.0
+        } else if stopped {
+            crate::stagev::deal_value(&world)
+        } else {
+            0.0
+        }
+    } else if stopped {
         let s = State::from_game(&mask(&world));
         cfg.base.eval(&s, world.deals_remaining(), cfg.base.empty) as f64 / cfg.base.completed as f64
     } else {

@@ -9,4 +9,5 @@ pub mod pimc;
 pub mod smart;
 pub mod rollout;
 pub mod solver;
+pub mod stagev;
 pub mod vnet;

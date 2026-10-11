@@ -301,6 +301,84 @@ games that were winnable after the last deal. Those are mostly winnable
 only with knowledge of the face-down cards: guessed worlds give no
 candidate the edge.
 
+### Stage-wise evaluation: the line player is at a plateau
+
+Win counts are a blunt instrument: over 2,000 games the standard error is
+about a point of win rate, and the changes worth finding are smaller.
+`src/bin/stage.rs` and `stage/*.py` judge a change one *stage* at a time (a
+stage is the play between two deals):
+
+* `stage dump` plays reference games (here seeds 50001–58000 with the
+  defaults: 2,929 won, 36.6%) and records their moves.
+* `stage/fit.py` fits, for each number of deals left, the chance that the
+  reference player goes on to win from the position it is about to deal
+  from: logistic regression on 24 visible features (`src/stagev.rs`).
+* `stage/ev.py` plays one stage with the changed player from the positions
+  the reference games stood in at its start, and compares the fitted value
+  where each is about to deal (after the last deal: the game's result),
+  game by game. `stage/tune.py` is a coordinate search on that.
+  `SPIDER_L_K<n>_*` set a weight for the stage with `n` deals left only.
+
+On 2,000–4,000 positions the standard error is 0.05–0.2 points of win rate
+for the first five stages, and a stage costs a sixth of a game (the first,
+less than a tenth). As a check, taking expectimax out loses 0.4–0.9 points
+in every stage, 4.2 ± 1.0 in all (in whole games, 2 to 2.5).
+
+How the game goes is mostly a matter of how many cards are still face down
+at each deal. The count alone carries nearly all of what the 24 features
+say about the result (log loss at the first deal 0.577 with it, 0.575 with
+all; at the last 0.305 and 0.278; 0.657 knowing nothing):
+
+| face down at the first deal (seeds 1–640) | ≤ 23  | 24–27 | 28–31  | 32–35  | 36–39  | ≥ 40  |
+|-------------------------------------------|-------|-------|--------|--------|--------|-------|
+| games won                                 | 60/77 | 31/56 | 47/101 | 45/148 | 40/166 | 16/92 |
+
+Every lost game ends with the stock gone, and 212 of 298 lost games (seeds
+1–480) without one suit completed. The player already turns every card it
+can before it deals: told to turn any card within reach whatever the cost
+before dealing, it plays all but a handful of 6,000 stages the same.
+
+Nothing tried moves the fitted value up by more than its error, in the
+first stage (4,000 positions) or the third (2,000), in points of win rate:
+
+| change                                                    | first stage      | third stage  |
+|-----------------------------------------------------------|------------------|--------------|
+| no expectimax                                             | −0.68 ± 0.16     |              |
+| expectimax over the best 8 lines / 16                     | −0.10 ± 0.08 / – | +0.03 ± 0.10 / +0.24 ± 0.14 |
+| expectimax over the best line for each column turned      | −0.17 ± 0.09     | −0.24 ± 0.15 (best 8) |
+| deeper search after the turned card (8 steps, beam 50 / 6, 40) | +0.01 ± 0.05 | −0.16 ± 0.08 |
+| expectimax over a second turned card (6 sampled cards)    |                  | +0.04 ± 0.12 |
+| replanning after every step                               | +0.04 ± 0.05     | +0.12 ± 0.11 |
+| beam 1,000 (first stage: and 20 steps)                    | +0.00 ± 0.00     | +0.05 ± 0.07 |
+| rollouts to the next deal (below; 320 and 240 positions)  | −0.59 ± 0.65     | +0.13 ± 0.48 |
+
+The rollouts are `SPIDER_P_STAGE=1` of the rollout player: 96 per decision
+in guessed worlds, finished to the next deal by a six-step line player
+without expectimax and scored by the fitted value there, at 80 times the
+cost. The other options in the table gained nothing and are not kept in
+the code. After the last deal, where the measure is the game's result
+(4,000 positions), a wider search (beam 1,500, 24 steps) is +0.33 ± 0.33.
+
+The weights are where they should be. In the third stage, of 28 single
+changes (each weight up and down by a third to a half, and the unused
+`KING`, `DIG`, `TURNABLE`, `SAME`), one is above zero (`RUN_SQ` 2: +0.15 ±
+0.14) and the worst lose a point (`OFF` −4, `WRONG` −12). In the first
+stage `HIDDEN` and `EMPTY` up or down by a quarter are within ±0.08.
+Four new terms (an ace on top of a column, a king lying on another card, a
+column with one card face down, the runs in a column with nothing face
+down) lose at either sign in both stages, as do other styles of play in
+the first stage: digging the deepest columns first (`HIDDEN_SQ` 60,
+`HIDDEN` 45) −3.8, the shortest (`HIDDEN_SQ` −40, `HIDDEN` 85) −0.75,
+tidier (`OFF` −30, `WRONG` −10, `RUN_SQ` 14) +0.01 ± 0.15.
+
+So within a stage the player is at a local optimum of everything that
+could be measured, rollouts over its own lines included, and what it
+reaches is set by the cards. After the last deal the full-information
+solver (300,000 work) finds a win in 160 of 400 reference games, 26 of
+them games the line player lost; with the 12 of its 146 wins that the
+solver did not find, 43% were still winnable by a player who sees every
+card, against 36.5% won. 45% is not within reach of this kind of player.
+
 ### AlphaZero player
 
 `src/az.rs`, `src/bin/azplay.rs` and `az/train.py` train a network by

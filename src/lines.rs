@@ -112,6 +112,9 @@ pub struct LineConfig {
     /// Play at most this many steps of the chosen line, then search again
     /// (0: the whole line).
     pub replan: usize,
+    /// The configuration to play with for each number of deals left, if
+    /// it differs from this one ([`play_until`] switches).
+    pub staged: Option<&'static [LineConfig; 6]>,
 }
 
 impl LineConfig {
@@ -150,6 +153,7 @@ impl LineConfig {
             waver: 0,
             salt: 0,
             replan: 0,
+            staged: None,
         };
         match suits {
             1 => LineConfig {
@@ -205,40 +209,60 @@ impl LineConfig {
     /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
     /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
     /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT, REPLAN).
+    /// `SPIDER_L_K<n>_*` override them for the play with `n` deals left
+    /// only (see [`LineConfig::staged`]).
     pub fn from_env(suits: u8) -> LineConfig {
-        fn get<T: std::str::FromStr>(name: &str, d: T) -> T {
-            std::env::var(format!("SPIDER_L_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+        let mut cfg = LineConfig::from_env_stage(suits, None);
+        if std::env::vars().any(|(k, _)| k.starts_with("SPIDER_L_K")) {
+            let staged: Vec<LineConfig> = (0..=crate::game::NUM_DEALS).map(|k| LineConfig::from_env_stage(suits, Some(k))).collect();
+            cfg.staged = Some(Box::leak(Box::new(<[LineConfig; 6]>::try_from(staged).unwrap())));
+        }
+        cfg
+    }
+
+    /// The configuration from the environment for the play with `stage`
+    /// deals left (`None`: for any).
+    fn from_env_stage(suits: u8, stage: Option<usize>) -> LineConfig {
+        let var = |name: &str| stage.and_then(|k| std::env::var(format!("SPIDER_L_K{k}_{name}")).ok()).or_else(|| std::env::var(format!("SPIDER_L_{name}")).ok());
+        fn parse<T: std::str::FromStr>(v: Option<String>, d: T) -> T {
+            v.and_then(|v| v.parse().ok()).unwrap_or(d)
+        }
+        macro_rules! get {
+            ($name:expr, $d:expr) => {
+                parse(var($name), $d)
+            };
         }
         let d = LineConfig::for_suits(suits);
         LineConfig {
-            max_steps: get("MAX_STEPS", d.max_steps),
-            touch: get::<u8>("TOUCH", d.touch as u8) != 0,
-            beam: get("BEAM", d.beam),
-            expect_top: get("EXPECT_TOP", d.expect_top),
-            deal_splits: get("DEAL_SPLITS", d.deal_splits),
-            expect_steps: get("EXPECT_STEPS", d.expect_steps),
-            expect_beam: get("EXPECT_BEAM", d.expect_beam),
-            splits: get("SPLITS", d.splits),
-            completed: get("COMPLETED", d.completed),
-            hidden: get("HIDDEN", d.hidden),
-            empty: get("EMPTY", d.empty),
-            deal_empty: get("DEAL_EMPTY", d.deal_empty),
-            deal_flip: get("DEAL_FLIP", d.deal_flip),
-            end_empty: get("END_EMPTY", d.end_empty),
-            same: get("SAME", d.same),
-            off: get("OFF", d.off),
-            off_rank: get("OFF_RANK", d.off_rank),
-            king: get("KING", d.king),
-            ranks: get("RANKS", d.ranks),
-            run_sq: get("RUN_SQ", d.run_sq),
-            wrong: get("WRONG", d.wrong),
-            clear: get("CLEAR", d.clear),
-            hidden_sq: get("HIDDEN_SQ", d.hidden_sq),
-            dig: get("DIG", d.dig),
-            turnable: get("TURNABLE", d.turnable),
-            waver: get("WAVER", d.waver),
-            salt: get("SALT", d.salt),
-            replan: get("REPLAN", d.replan),
+            max_steps: get!("MAX_STEPS", d.max_steps),
+            touch: get!("TOUCH", d.touch as u8) != 0,
+            beam: get!("BEAM", d.beam),
+            expect_top: get!("EXPECT_TOP", d.expect_top),
+            deal_splits: get!("DEAL_SPLITS", d.deal_splits),
+            expect_steps: get!("EXPECT_STEPS", d.expect_steps),
+            expect_beam: get!("EXPECT_BEAM", d.expect_beam),
+            splits: get!("SPLITS", d.splits),
+            completed: get!("COMPLETED", d.completed),
+            hidden: get!("HIDDEN", d.hidden),
+            empty: get!("EMPTY", d.empty),
+            deal_empty: get!("DEAL_EMPTY", d.deal_empty),
+            deal_flip: get!("DEAL_FLIP", d.deal_flip),
+            end_empty: get!("END_EMPTY", d.end_empty),
+            same: get!("SAME", d.same),
+            off: get!("OFF", d.off),
+            off_rank: get!("OFF_RANK", d.off_rank),
+            king: get!("KING", d.king),
+            ranks: get!("RANKS", d.ranks),
+            run_sq: get!("RUN_SQ", d.run_sq),
+            wrong: get!("WRONG", d.wrong),
+            clear: get!("CLEAR", d.clear),
+            hidden_sq: get!("HIDDEN_SQ", d.hidden_sq),
+            dig: get!("DIG", d.dig),
+            turnable: get!("TURNABLE", d.turnable),
+            waver: get!("WAVER", d.waver),
+            salt: get!("SALT", d.salt),
+            replan: get!("REPLAN", d.replan),
+            staged: None,
         }
     }
 
@@ -857,6 +881,7 @@ pub fn play_until(g: &mut Game, cfg: &LineConfig, mut visited: HashSet<u64>, sto
         let obs = mask(g);
         visited.insert(State::from_game(&obs).hash());
         let before = progress(g);
+        let cfg = cfg.staged.map_or(cfg, |s| &s[g.deals_remaining()]);
         let (d, w) = decide(&obs, g.deals_remaining(), &visited, &mut tempo, cfg);
         work += w as u64;
         if trace {
