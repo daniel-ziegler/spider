@@ -13,9 +13,9 @@
 //!
 //! Instead the search works over **equivalence classes** of positions that are
 //! mutually reachable through reversible moves. A class is enumerated by a
-//! breadth-first walk over reversible moves and is identified by the minimum
-//! hash of its members, so however the search enters it, it is recognised as
-//! the same node. Edges between classes are the *irreversible* moves:
+//! breadth-first walk over reversible moves, and the hashes of its members
+//! are remembered, so however the search enters it again, it is recognised
+//! as the same node. Edges between classes are the *irreversible* moves:
 //!
 //! * turning over a face-down card,
 //! * completing a K..A suit run (cards leave the tableau),
@@ -45,7 +45,7 @@
 //! dealt card lands on.
 
 use crate::game::{Card, Game, Move, DEAL_SIZE, NUM_COLS};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -248,45 +248,82 @@ impl State {
         h
     }
 
+    /// Position hash for the class search, independent of column order like
+    /// [`State::hash`] but cheaper, and cheap to update for a move: a sum
+    /// over the columns (see `key_part`, `key_of`).
+    #[inline]
+    pub(crate) fn key(&self) -> u64 {
+        self.key_of(self.colh.iter().fold(0u64, |a, &h| a.wrapping_add(key_part(h))))
+    }
+
+    /// The key of a position like this one whose columns' parts sum to `sum`.
+    #[inline]
+    pub(crate) fn key_of(&self, sum: u64) -> u64 {
+        mix(sum, 0x9E3779B97F4A7C15 ^ (self.deals_done as u64) << 8 ^ self.completed as u64)
+    }
+
     /// Static evaluation: higher is closer to winning.
     pub(crate) fn eval(&self, w: &Weights) -> i32 {
         let mut score: i32 = w.completed * self.completed as i32;
-        let mut empties = 0;
         for c in 0..NUM_COLS {
-            let n = self.len[c] as usize;
-            if n == 0 {
-                empties += 1;
-                continue;
-            }
-            let d = self.down[c] as usize;
-            score -= w.hidden * d as i32;
-            let col = &self.cols[c];
-            let mut run = 1;
-            for i in d.max(1)..n {
-                let upper = col[i - 1];
-                let lower = col[i];
-                if upper % 13 == lower % 13 + 1 {
-                    if upper / 13 == lower / 13 {
-                        score += w.same;
-                        run += 1;
-                    } else {
-                        score += w.diff;
-                        score += w.run_sq * run * run / 16;
-                        run = 1;
-                    }
-                } else {
-                    score -= w.wrong;
-                    score += w.run_sq * run * run / 16;
-                    run = 1;
-                }
-            }
-            score += w.run_sq * run * run / 16;
-            if d == 0 && col[0] % 13 == 12 {
-                score += w.king_base;
+            score += col_score(&self.cols[c][..self.len[c] as usize], self.down[c] as usize, w);
+        }
+        score
+    }
+
+    /// What column `c` adds to [`State::eval`] once `card` is dealt onto it,
+    /// including the completed run if that completes one.
+    fn deal_col_score(&self, c: usize, card: u8, w: &Weights) -> i32 {
+        let n = self.len[c] as usize;
+        let mut d = self.down[c] as usize;
+        let mut buf = [0u8; MAXC + 1];
+        buf[..n].copy_from_slice(&self.cols[c][..n]);
+        buf[n] = card;
+        let mut n = n + 1;
+        let mut score = 0;
+        if card % 13 == 0 && n - d >= 13 && (1..13).all(|k| buf[n - 1 - k] == card + k as u8) {
+            n -= 13;
+            score = w.completed;
+            if n > 0 && d == n {
+                d -= 1;
             }
         }
-        score + w.empty * empties
+        score + col_score(&buf[..n], d, w)
     }
+}
+
+/// A column's part of [`State::eval`]: `col` with `d` cards face down.
+#[inline]
+fn col_score(col: &[u8], d: usize, w: &Weights) -> i32 {
+    let n = col.len();
+    if n == 0 {
+        return w.empty;
+    }
+    let mut score = -w.hidden * d as i32;
+    let mut run = 1;
+    for i in d.max(1)..n {
+        let upper = col[i - 1];
+        let lower = col[i];
+        if upper % 13 == lower % 13 + 1 {
+            if upper / 13 == lower / 13 {
+                score += w.same;
+                run += 1;
+            } else {
+                score += w.diff;
+                score += w.run_sq * run * run / 16;
+                run = 1;
+            }
+        } else {
+            score -= w.wrong;
+            score += w.run_sq * run * run / 16;
+            run = 1;
+        }
+    }
+    score += w.run_sq * run * run / 16;
+    if d == 0 && col[0] % 13 == 12 {
+        score += w.king_base;
+    }
+    score
 }
 
 /// Evaluation weights.
@@ -430,6 +467,16 @@ impl Config {
     }
 }
 
+/// A column's term in [`State::key`], from its hash. The hash alone will not
+/// do: its top bits depend linearly on the column's last card, so two columns
+/// that swap their last cards would keep their sum.
+#[inline]
+pub(crate) fn key_part(colh: u64) -> u64 {
+    let x = (colh ^ (colh >> 33)).wrapping_mul(0xFF51AFD7ED558CCD);
+    let x = (x ^ (x >> 33)).wrapping_mul(0xC4CEB9FE1A85EC53);
+    x ^ (x >> 33)
+}
+
 #[inline]
 pub(crate) fn mix(h: u64, v: u64) -> u64 {
     let x = (h ^ v).wrapping_mul(0xFF51AFD7ED558CCD);
@@ -513,12 +560,17 @@ pub(crate) struct Exit {
     pub(crate) result: State,
 }
 
+#[derive(Default)]
 pub(crate) struct Class {
     pub(crate) members: Vec<Member>,
     pub(crate) exits: Vec<Exit>,
-    pub(crate) id: u64,
     /// Index into `exits` of a move that wins outright.
     pub(crate) win: Option<usize>,
+    /// With `deal_scores` (see `enumerate_class_into`), per member: what
+    /// each column would add to the evaluation after a deal.
+    pub(crate) deal_scores: Vec<[i32; NUM_COLS]>,
+    /// Scratch for move generation.
+    moves: Vec<Move>,
 }
 
 /// Every legal move except dealing. Empty columns are interchangeable, so
@@ -526,24 +578,35 @@ pub(crate) struct Class {
 /// when `splits` is set.
 pub(crate) fn legal_moves(s: &State, splits: bool, out: &mut Vec<Move>) {
     out.clear();
-    let first_empty = s.len.iter().position(|&l| l == 0);
+    // Rank of each column's top card, and the columns with each top rank
+    // as a bit set (index 13: the first empty column).
+    let mut tops = [0usize; NUM_COLS];
+    let mut with_top = [0u32; 14];
+    for c in 0..NUM_COLS {
+        if s.len[c] > 0 {
+            tops[c] = (s.top(c) % 13) as usize;
+            with_top[tops[c]] |= 1 << c;
+        } else if with_top[13] == 0 {
+            with_top[13] = 1 << c;
+        }
+    }
     for from in 0..NUM_COLS {
         let fl = s.len[from] as usize;
         if fl == 0 {
             continue;
         }
         let run = s.run_len(from);
-        let top_rank = (s.top(from) % 13) as i32;
-        for to in 0..NUM_COLS {
-            if to == from {
-                continue;
-            }
-            let tl = s.len[to] as usize;
-            if tl == 0 {
-                if first_empty != Some(to) {
-                    continue;
-                }
-                let lo = if splits { 1 } else { run };
+        // The run, or with splits any top part of it, fits a card as many
+        // ranks above its top card as it is long.
+        let lo = if splits { 1 } else { run };
+        let mut targets = with_top[13];
+        for k in lo..=run.min(12 - tops[from]) {
+            targets |= with_top[tops[from] + k];
+        }
+        while targets != 0 {
+            let to = targets.trailing_zeros() as usize;
+            targets &= targets - 1;
+            if s.len[to] == 0 {
                 for k in lo..=run {
                     if k == fl {
                         continue; // whole column onto another empty: no-op
@@ -551,17 +614,14 @@ pub(crate) fn legal_moves(s: &State, splits: bool, out: &mut Vec<Move>) {
                     out.push(Move::Move { from, to, count: k });
                 }
             } else {
-                let k = (s.cols[to][tl - 1] % 13) as i32 - top_rank;
-                if k >= 1 && k as usize <= run && (splits || k as usize == run) {
-                    out.push(Move::Move { from, to, count: k as usize });
-                }
+                out.push(Move::Move { from, to, count: tops[to] - tops[from] });
             }
         }
     }
 }
 
-/// A move is reversible when the moved run can immediately be moved back
-/// as a whole: nothing was turned over or removed, the card it left behind
+/// Whether moving `count` cards `from` -> `to` in `s` is reversible: the moved
+/// run can immediately be moved back as a whole. Nothing was turned over or removed, the card it left behind
 /// is one rank higher than the run's bottom (or the column was left
 /// empty), and it did not join a same-suit predecessor (unless `splits`,
 /// when a join can be split back). With `split_exits`, joins and moves of
@@ -571,103 +631,139 @@ pub(crate) fn legal_moves(s: &State, splits: bool, out: &mut Vec<Move>) {
 /// splits inside can run to millions of positions that the enumeration
 /// crawls through blindly (20K at a time) but exhausts more cheaply.
 #[inline]
-pub(crate) fn reversible(s: &State, t: &State, mv: Move, splits: bool, split_exits: bool) -> bool {
-    let (from, to, count) = match mv {
-        Move::Deal => return false,
-        Move::Move { from, to, count } => (from, to, count),
-    };
-    if t.completed != s.completed || t.down[from] != s.down[from] {
-        return false;
+fn reversible_move(s: &State, from: usize, to: usize, count: usize, splits: bool, split_exits: bool) -> bool {
+    let fl = s.len[from] as usize;
+    let bottom = s.cols[from][fl - count];
+    if count == fl - s.down[from] as usize && s.down[from] > 0 {
+        return false; // turns a card over
     }
-    let bottom = s.cols[from][s.len[from] as usize - count];
-    if (!splits || split_exits) && s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
-        return false; // same-suit join (cannot be undone without a split)
+    if s.len[to] > 0 && s.top(to) / 13 == bottom / 13 {
+        if !splits || split_exits {
+            return false; // same-suit join (cannot be undone without a split)
+        }
+        if s.top(from) % 13 == 0 && s.run_len(to) + count >= 13 {
+            return false; // completes a suit
+        }
     }
     if splits && split_exits && count < s.run_len(from) {
         return false; // split of a same-suit run
     }
-    if t.len[from] == 0 {
-        return true;
-    }
-    t.top(from) % 13 == bottom % 13 + 1
+    count == fl || s.cols[from][fl - count - 1] % 13 == bottom % 13 + 1
 }
 
 /// Enumerate the equivalence class of `entry` under reversible moves (at
 /// most `cap` members; the rest become exits) and collect its irreversible
-/// exits. Positions in `seen` are not re-enumerated. Returns the class and
-/// the hashes of its members.
-pub(crate) fn enumerate_class(
+/// exits. Returns the class and the hashes of its members.
+pub(crate) fn enumerate_class(entry: &State, deals: &[[u8; DEAL_SIZE]], cap: usize, splits: bool, split_exits: bool) -> (Class, HashSet<u64, IdBuild>) {
+    let mut cls = Class::default();
+    let mut found = HashSet::default();
+    enumerate_class_into(entry, deals, cap, splits, split_exits, None, &mut found, &mut cls);
+    (cls, found)
+}
+
+/// [`enumerate_class`] into `cls`, reusing its buffers. The hashes of the
+/// members go into `found`, and a position already there is not a member:
+/// it was enumerated as part of an earlier chunk of this class, or of a
+/// class entered elsewhere. With `deal_scores`, deals are not among the
+/// exits: `cls.deal_scores` says how each member would evaluate after one
+/// (a member differs from the one it was reached from in two columns, so
+/// this is much cheaper than dealing onto every member to evaluate it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enumerate_class_into(
     entry: &State,
     deals: &[[u8; DEAL_SIZE]],
     cap: usize,
     splits: bool,
     split_exits: bool,
-    seen: Option<&HashMap<u64, u64, IdBuild>>,
-) -> (Class, HashMap<u64, u32, IdBuild>) {
-    let stock_left = (entry.deals_done as usize) < deals.len();
-    let mut members: Vec<Member> = vec![Member { state: entry.clone(), parent: 0, mv: Move::Deal }];
-    let mut exits: Vec<Exit> = Vec::new();
-    let mut local: HashMap<u64, u32, IdBuild> = HashMap::default();
-    let mut min_hash = entry.hash();
-    local.insert(min_hash, 0);
-    let mut moves = Vec::with_capacity(48);
-    let mut win = None;
-    let mut truncated = false;
+    deal_scores: Option<&Weights>,
+    found: &mut HashSet<u64, IdBuild>,
+    cls: &mut Class,
+) {
+    let deal = deals.get(entry.deals_done as usize);
+    let stock_left = deal.is_some();
+    let Class { members, exits, win, deal_scores: scores, moves } = cls;
+    members.clear();
+    exits.clear();
+    scores.clear();
+    *win = None;
+    let scored = deal.zip(deal_scores);
+    let score = |s: &State, c: usize| match scored {
+        Some((deal, w)) if s.len[c] > 0 => s.deal_col_score(c, deal[c], w),
+        _ => 0,
+    };
+    if scored.is_some() {
+        scores.push(std::array::from_fn(|c| score(entry, c)));
+    }
+    members.push(Member { state: entry.clone(), parent: 0, mv: Move::Deal });
+    found.insert(entry.key());
     let mut i = 0;
     'bfs: while i < members.len() {
         let s = members[i].state.clone();
-        legal_moves(&s, splits, &mut moves);
-        for &mv in &moves {
-            let mut t = s.clone();
-            if !t.apply(mv, deals) {
+        legal_moves(&s, splits, moves);
+        let parts = s.colh.map(key_part);
+        let sum = parts.iter().fold(0u64, |a, &p| a.wrapping_add(p));
+        for &mv in moves.iter() {
+            let Move::Move { from, to, count } = mv else { unreachable!() };
+            let (fl, tl) = (s.len[from] as usize, s.len[to] as usize);
+            if tl + count > MAXC {
                 continue;
             }
-            if t.completed == 8 {
-                win = Some(exits.len());
-                exits.push(Exit { member: i as u32, mv, result: t });
-                break 'bfs;
-            }
-            if reversible(&s, &t, mv, splits, split_exits) {
-                let h = t.hash();
-                if local.contains_key(&h) {
+            if reversible_move(&s, from, to, count, splits, split_exits) {
+                // Most reversible moves lead back to a member already
+                // found, so hash the result before building it.
+                let nf = col_hash(&s.cols[from][..fl - count], s.down[from]);
+                let mut buf = [0u8; MAXC];
+                buf[..tl].copy_from_slice(&s.cols[to][..tl]);
+                buf[tl..tl + count].copy_from_slice(&s.cols[from][fl - count..fl]);
+                let nt = col_hash(&buf[..tl + count], s.down[to]);
+                let h = s.key_of(sum.wrapping_sub(parts[from]).wrapping_sub(parts[to]).wrapping_add(key_part(nf)).wrapping_add(key_part(nt)));
+                if found.contains(&h) {
                     continue;
                 }
-                if seen.is_some_and(|m| m.contains_key(&h)) {
-                    // Already enumerated as part of an earlier chunk of
-                    // this class (or of a class entered elsewhere).
-                    truncated = true;
-                    continue;
-                }
+                let mut t = s.clone();
+                t.cols[to][..tl + count].copy_from_slice(&buf[..tl + count]);
+                t.len[from] -= count as u8;
+                t.len[to] += count as u8;
+                t.colh[from] = nf;
+                t.colh[to] = nt;
                 if members.len() >= cap {
                     // Class too big to enumerate: hand the rest of it to
                     // the search as ordinary exits, so nothing is lost.
-                    truncated = true;
                     exits.push(Exit { member: i as u32, mv, result: t });
                     continue;
                 }
-                local.insert(h, members.len() as u32);
-                min_hash = min_hash.min(h);
+                found.insert(h);
+                if scored.is_some() {
+                    let mut sc = scores[i];
+                    sc[from] = score(&t, from);
+                    sc[to] = score(&t, to);
+                    scores.push(sc);
+                }
                 members.push(Member { state: t, parent: i as u32, mv });
             } else {
+                let mut t = s.clone();
+                t.apply(mv, deals);
+                let won = t.completed == 8;
                 exits.push(Exit { member: i as u32, mv, result: t });
+                if won {
+                    *win = Some(exits.len() - 1);
+                    break 'bfs;
+                }
             }
         }
-        if stock_left && s.len.iter().all(|&l| l > 0) {
+        if stock_left && deal_scores.is_none() && s.len.iter().all(|&l| l > 0) {
             let mut t = s.clone();
             if t.apply(Move::Deal, deals) {
-                if t.completed == 8 {
-                    win = Some(exits.len());
-                }
+                let won = t.completed == 8;
                 exits.push(Exit { member: i as u32, mv: Move::Deal, result: t });
-                if win.is_some() {
+                if won {
+                    *win = Some(exits.len() - 1);
                     break 'bfs;
                 }
             }
         }
         i += 1;
     }
-    let id = if truncated { entry.hash() } else { min_hash };
-    (Class { members, exits, id, win }, local)
 }
 
 /// An expanded class node: the position it was entered at, and the exit of
@@ -682,8 +778,13 @@ struct SNode {
 /// Encode the moves through a class from its entry to exit `ei`.
 pub(crate) fn encode_path(cls: &Class, ei: usize) -> Box<[u8]> {
     let ex = &cls.exits[ei];
-    let mut moves = vec![ex.mv];
-    let mut m = ex.member;
+    encode_path_via(cls, ex.member, ex.mv)
+}
+
+/// Encode the moves through a class from its entry to `member`, then `mv`.
+fn encode_path_via(cls: &Class, member: u32, mv: Move) -> Box<[u8]> {
+    let mut moves = vec![mv];
+    let mut m = member;
     while m != 0 {
         moves.push(cls.members[m as usize].mv);
         m = cls.members[m as usize].parent;
@@ -836,10 +937,8 @@ const SUSPEND_KEEP: usize = 20_000;
 
 pub struct Solver {
     deals: Vec<[u8; DEAL_SIZE]>,
-    /// Class id -> id of the stage exploration that expanded it.
-    seen: HashMap<u64, u32, IdBuild>,
-    /// Position hash -> id of the (already expanded) class it belongs to.
-    member_of: HashMap<u64, u64, IdBuild>,
+    /// Hashes of the members of every class expanded so far.
+    found: HashSet<u64, IdBuild>,
     queue: BinaryHeap<Cand>,
     stages: Vec<Stage>,
     /// Something was cut short (deal truncation, dropped frontier), so an
@@ -878,8 +977,7 @@ impl Solver {
     pub fn with_config(g: &Game, budget: u64, cfg: Config) -> Solver {
         Solver {
             deals: stock_deals(g),
-            seen: HashMap::default(),
-            member_of: HashMap::default(),
+            found: HashSet::default(),
             queue: BinaryHeap::new(),
             stages: Vec::new(),
             incomplete: false,
@@ -956,8 +1054,7 @@ impl Solver {
 
     /// Forget everything searched so far (between passes).
     fn reset_search(&mut self) {
-        self.seen.clear();
-        self.member_of.clear();
+        self.found.clear();
         self.nodes.clear();
         self.stages.clear();
         self.queue.clear();
@@ -990,23 +1087,18 @@ impl Solver {
     }
 
     /// Enumerate the equivalence class of `entry` under reversible moves and
-    /// collect its irreversible exits.
-    fn expand_class(&mut self, entry: &State) -> Class {
+    /// collect its irreversible exits, into `cls`.
+    fn expand_class(&mut self, entry: &State, cls: &mut Class) {
         let splits = self.splits || (self.cfg.end_splits && !self.stock_left(entry));
-        let (cls, local) = enumerate_class(entry, &self.deals, self.class_cap, splits, self.split_exits, Some(&self.member_of));
+        enumerate_class_into(entry, &self.deals, self.class_cap, splits, self.split_exits, Some(&self.cfg.weights), &mut self.found, cls);
         self.work += cls.members.len() as u64;
         self.classes += 1;
         if self.trace {
             eprintln!(
-                "class {} splits {} members {} exits {} truncated {} eval {} work {}",
-                self.classes, splits, cls.members.len(), cls.exits.len(), cls.id == entry.hash() && cls.members.len() >= self.class_cap.min(cls.members.len() + 1) - 1, entry.eval(&self.cfg.weights), self.work
+                "class {} splits {} members {} exits {} eval {} work {}",
+                self.classes, splits, cls.members.len(), cls.exits.len(), entry.eval(&self.cfg.weights), self.work
             );
         }
-        let id = cls.id;
-        for (h, _) in local {
-            self.member_of.insert(h, id);
-        }
-        cls
     }
 
     /// Open a stage rooted at class node `entry`.
@@ -1059,6 +1151,7 @@ impl Solver {
         let mut suspended = false;
         let mut found_deals: BinaryHeap<Cand> = std::mem::take(&mut self.stages[sid as usize].pending_deals);
 
+        let mut cls = Class::default();
         while let Some(p) = heap.pop() {
             if self.tick() {
                 self.stages[sid as usize].heap = heap;
@@ -1070,13 +1163,11 @@ impl Solver {
                 break;
             }
             let s = p.state.to_state();
-            if let Some(id) = self.member_of.get(&s.hash()) {
-                if self.seen.contains_key(id) {
-                    dup += 1;
-                    continue;
-                }
+            if self.found.contains(&s.key()) {
+                dup += 1;
+                continue;
             }
-            let cls = self.expand_class(&s);
+            self.expand_class(&s, &mut cls);
             classes += 1;
             if self.debug && self.work >= next_report {
                 next_report = self.work + 50_000;
@@ -1087,11 +1178,6 @@ impl Solver {
                     heap.len(), classes, cls.members.len(), cls.exits.len()
                 );
             }
-            if self.seen.contains_key(&cls.id) {
-                dup += 1;
-                continue;
-            }
-            self.seen.insert(cls.id, sid);
             let nid = if p.seq == 0 { entry } else { self.push_node(p.parent, p.path, &s) };
             if let Some(w) = cls.win {
                 let path = encode_path(&cls, w);
@@ -1100,22 +1186,29 @@ impl Solver {
                 self.stages[sid as usize].heap = heap;
                 return Outcome::Solvable;
             }
-            let mut class_deals: Vec<(i32, u32)> = Vec::new();
             for (ei, ex) in cls.exits.iter().enumerate() {
-                let k = ex.result.eval(&w);
-                if ex.mv == Move::Deal {
-                    class_deals.push((k, ei as u32));
-                } else {
-                    self.seq += 1;
-                    self.work += 1;
-                    heap.push(Pending {
-                        key: k + self.cfg.depth_w * (p.depth as i32 + 1),
-                        seq: self.seq,
-                        parent: nid,
-                        path: encode_path(&cls, ei),
-                        depth: p.depth + 1,
-                        state: Compact::from_state(&ex.result),
-                    });
+                self.seq += 1;
+                self.work += 1;
+                // Most exits lead into a class already expanded.
+                if self.found.contains(&ex.result.key()) {
+                    dup += 1;
+                    continue;
+                }
+                heap.push(Pending {
+                    key: ex.result.eval(&w) + self.cfg.depth_w * (p.depth as i32 + 1),
+                    seq: self.seq,
+                    parent: nid,
+                    path: encode_path(&cls, ei),
+                    depth: p.depth + 1,
+                    state: Compact::from_state(&ex.result),
+                });
+            }
+            // The members that can deal, with their evaluation afterwards.
+            let mut class_deals: Vec<(i32, u32)> = Vec::new();
+            for (mi, sc) in cls.deal_scores.iter().enumerate() {
+                let m = &cls.members[mi].state;
+                if m.len.iter().all(|&l| l > 0 && (l as usize) < MAXC) {
+                    class_deals.push((w.completed * m.completed as i32 + sc.iter().sum::<i32>(), mi as u32));
                 }
             }
             if class_deals.len() > self.cfg.deals_per_class {
@@ -1123,17 +1216,16 @@ impl Solver {
                 class_deals.truncate(self.cfg.deals_per_class);
                 self.incomplete = true;
             }
-            for (k, ei) in class_deals {
+            for (k, mi) in class_deals {
                 self.seq += 1;
                 deals += 1;
+                let mut dealt = cls.members[mi as usize].state.clone();
+                dealt.apply(Move::Deal, &self.deals);
+                debug_assert_eq!(dealt.eval(&w), k);
                 found_deals.push(Cand {
                     key: k + self.cfg.deal_bonus * (entry_state.deals_done as i32 + 1),
                     seq: self.seq,
-                    kind: CandKind::Deal {
-                        nid,
-                        path: encode_path(&cls, ei as usize),
-                        state: Compact::from_state(&cls.exits[ei as usize].result),
-                    },
+                    kind: CandKind::Deal { nid, path: encode_path_via(&cls, mi, Move::Deal), state: Compact::from_state(&dealt) },
                     origin: sid,
                     charged: 0,
                 });

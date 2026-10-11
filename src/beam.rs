@@ -240,7 +240,7 @@ impl BeamSolver {
                 let mut next: Vec<Cand> = Vec::new();
                 for &nid in &frontier {
                     let s = self.nodes[nid as usize].state.to_state();
-                    let (cls, local) = enumerate_class(&s, &self.deals, self.p.class_cap, false, false, None);
+                    let (cls, local) = enumerate_class(&s, &self.deals, self.p.class_cap, false, false);
                     self.work += cls.members.len() as u64;
                     self.classes += 1;
                     if let Some(ei) = cls.win {
@@ -248,13 +248,13 @@ impl BeamSolver {
                         decode_path(&encode_path(&cls, ei), &mut line);
                         return Some(line);
                     }
-                    for (h, _) in local {
+                    for h in local {
                         self.seen.insert(h);
                     }
                     let mut deals: Vec<(i32, usize)> = Vec::new();
                     let mut kids: Vec<(i32, usize)> = Vec::new();
                     for (ei, ex) in cls.exits.iter().enumerate() {
-                        let h = ex.result.hash();
+                        let h = ex.result.key();
                         if !self.seen.insert(h) {
                             continue;
                         }

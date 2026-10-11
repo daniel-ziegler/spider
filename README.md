@@ -52,8 +52,8 @@ It searches over *equivalence classes of positions under reversible moves*
 rather than over positions. Moving a run between two parents that are both one
 rank higher (or an empty column) is reversible, and almost all of Spider's
 branching is this kind of shuffling; collapsing each connected component of
-reversible moves into one node, identified by its minimum member hash, removes
-that blow-up entirely. The remaining edges are irreversible: flipping a card,
+reversible moves into one node (the hashes of its members are remembered, so
+entering it anywhere else is recognised) removes that blow-up entirely. The remaining edges are irreversible: flipping a card,
 completing a suit, detaching a run from a wrong parent, joining a run onto its
 same-suit predecessor, and dealing. Within a stock stage these edges increase
 a potential function, so the class graph is a DAG. A class that grows past
@@ -624,7 +624,12 @@ need 5–10M work). On 2-suit deals beam wins the race three times out of four.
 
 100 deals per suit count (seeds 1–100), budget 3,000,000 work per thread,
 winning lines verified by replay. "Work" is positions enumerated; one thread
-does about 1.3M work per second.
+does about 2M work per second on four suits and 4M on one (the wall times in
+the table are from when it did 1.3M: since then the enumeration hashes a
+reversible move's result before building it, keeps one set of member hashes
+instead of a map per class, drops an exit into a class already expanded
+before queueing it, and scores deals column by column instead of dealing
+onto every member; none of that changes what is searched).
 
 | suits | one config | median work | portfolio of 4 | median wall time |
 |-------|-----------|-------------|----------------|------------------|
