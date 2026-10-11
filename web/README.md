@@ -10,7 +10,10 @@ keyboard), log in, and wins are recorded with their move count and real undos.
   compiles `../src/game.rs` directly and replays every claimed win before
   saving it.
 
-In-progress games are saved only in the browser. A win stores the length of
+A game in progress is saved in the browser as the tree of every move played
+in it (undone lines included) and, when logged in, synced to the server
+(`/api/games`), so it can be carried on in another browser; the two copies'
+trees are merged. An undo counts only the first time a move is taken back. A win stores the length of
 the winning line (undone moves don't count), the number of undos, and the
 number of **real undos**: undos that took back a card turned over or a deal.
 Restarting a deal counts as undoing every move back to the start. Results for

@@ -1,7 +1,7 @@
 // The Spider client: a home page with the daily challenges, an archive of past
 // ones, and the board, with mouse/touch and keyboard play. In-progress games
 // are saved in this browser; wins are recorded on the server.
-import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves } from './game.js';
+import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves, parseTree, mergeTree, treeText } from './game.js';
 
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 // U+FE0E keeps phones from drawing the suits as emoji.
@@ -10,6 +10,7 @@ const SUITS = ['♠', '♥', '♦', '♣'].map(s => s + '︎');
 const SUIT_COUNTS = [1, 2, 3, 4];
 const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
+const SYNC_MS = 5000; // a game in progress goes to the server at most this often
 
 const $ = s => document.querySelector(s);
 const board = $('#board'), page = $('#page'), dialog = $('#dialog');
@@ -44,8 +45,8 @@ applySettings({}, false);
 
 let view = 'home'; // 'home', 'archive' or 'game'
 let g = null; // the Game, once one is loaded
-let undos = 0, realUndos = 0; // real undos take back a card flip or a deal
-let seen = []; // per column, the fewest face-down cards it has had: those from there up have been seen, and stay half shown when an undo turns them back over
+let base = [0, 0]; // undos and real undos made before saves kept the whole tree of moves, which counts the rest
+let changedAt = 0; // when this game was last played in, here or (once synced) elsewhere
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
@@ -60,50 +61,136 @@ let L; // layout, see computeLayout
 
 const keyOf = (suits, seed) => `${suits}/${seed}`;
 
-function noteSeen() {
-  seen = g.faceDown.map((n, c) => Math.min(n, seen[c] ?? n));
+// Real undos take back a card flip or a deal; taking the same move back again does not count again.
+const undoCount = () => base[0] + g.undos;
+const realUndoCount = () => base[1] + g.realUndos;
+
+// The game as saved here and on the server: the tree of every move played,
+// and the line of it that is on the board.
+function snapshot() {
+  return { tree: g.treeText(), moves: encodeMoves(g.moves()), base, recorded, at: changedAt };
+}
+
+// Set up g from a snapshot (or nothing, for a new game).
+function restore(suits, seed, s) {
+  g = new Game(suits, seed);
+  base = [0, 0];
+  recorded = '';
+  changedAt = 0;
+  if (!s) return;
+  try {
+    if (typeof s.tree === 'string') {
+      g.adopt(parseTree(s.tree));
+      for (const mv of parseMoves(s.moves)) if (g.apply(mv)) throw new Error('bad save');
+      base = [s.base?.[0] | 0, s.base?.[1] | 0];
+    } else {
+      // A save from before the tree: one line of moves, the undone ones last.
+      const redo = parseMoves(s.redo);
+      for (const mv of [...parseMoves(s.moves), ...redo]) if (g.apply(mv)) throw new Error('bad save');
+      for (const _ of redo) g.undo();
+      base = [Math.max(0, (s.undos | 0) - g.undos), Math.max(0, (s.realUndos | 0) - g.realUndos)];
+    }
+    recorded = s.recorded ?? '';
+    changedAt = s.at ?? s.t ?? 0;
+  } catch {
+    g = new Game(suits, seed);
+    base = [0, 0];
+  }
 }
 
 function save() {
-  noteSeen();
   const saves = store.get('spider:saves', {});
-  saves[keyOf(g.suits, g.seed)] = {
-    moves: encodeMoves(g.moves()), redo: encodeMoves(g.redoMoves()), undos, realUndos, seen, recorded, t: Date.now(),
-  };
+  saves[keyOf(g.suits, g.seed)] = { ...snapshot(), t: Date.now() };
   for (const k of Object.keys(saves).sort((a, b) => saves[b].t - saves[a].t).slice(MAX_SAVES)) delete saves[k];
   store.set('spider:saves', saves);
   store.set('spider:last', keyOf(g.suits, g.seed));
 }
 
-function load(suits, seed, push = false) {
-  g = new Game(suits, seed);
-  undos = realUndos = 0;
-  seen = [];
-  recorded = '';
-  sel = null;
-  const s = store.get('spider:saves', {})[keyOf(suits, seed)];
-  if (s) {
-    try {
-      const redo = parseMoves(s.redo);
-      for (const mv of [...parseMoves(s.moves), ...redo]) {
-        if (g.apply(mv)) throw new Error('bad save');
-        noteSeen();
-      }
-      for (const _ of redo) g.undo();
-      [undos, realUndos, recorded] = [s.undos, s.realUndos, s.recorded ?? ''];
-      if (Array.isArray(s.seen)) seen = seen.map((n, c) => Math.min(n, s.seen[c] ?? n));
-    } catch {
-      g = new Game(suits, seed);
-      seen = [];
-    }
+// The game changed: save it here and, before long, on the server.
+function changed() {
+  changedAt = Date.now();
+  save();
+  queueSync();
+}
+
+// ---------------------------------------------------------------- syncing games to the server
+
+let syncTimer = null, syncedAt = 0, unsynced = false;
+
+function queueSync() {
+  unsynced = true;
+  if (me && !syncTimer) syncTimer = setTimeout(sync, Math.max(0, syncedAt + SYNC_MS - Date.now()));
+}
+
+// Send the game now if it has changed; leaving: the page may be going away.
+function sync(leaving = false) {
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  if (!unsynced || !me || !g) return;
+  unsynced = false;
+  syncedAt = Date.now();
+  const body = JSON.stringify(snapshot());
+  fetch(`/api/games/${g.suits}/${g.seed}`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body,
+    keepalive: leaving && body.length < 60000, // browsers refuse to keep bigger requests alive
+  }).then(res => { if (!res.ok && res.status !== 401) unsynced = true; }, () => { unsynced = true; }); // the next change tries again
+}
+
+// Fetch the server's copy of this game and merge it in: the trees are joined,
+// and the board shows whichever copy was played in last.
+async function pull() {
+  if (!me || view !== 'game') return;
+  const { suits, seed } = g, was = changedAt;
+  let remote;
+  try { remote = (await api('GET', `/games/${suits}/${seed}`)).state; } catch { return; }
+  if (view !== 'game' || g.suits !== suits || g.seed !== seed || finishing) return;
+  const local = snapshot();
+  if (typeof remote?.tree !== 'string') {
+    if (local.tree) queueSync();
+    return;
   }
+  if (remote.tree === local.tree && remote.moves === local.moves) return;
+  try {
+    const theirs = changedAt === was && remote.at > local.at; // else a move was made here meanwhile, or last
+    const [a, b] = theirs ? [remote, local] : [local, remote];
+    const tree = treeText(mergeTree(parseTree(a.tree), parseTree(b.tree)));
+    if (!theirs && tree === local.tree) return queueSync(); // nothing new there
+    endDrag();
+    press = sel = hint = null;
+    restore(suits, seed, {
+      tree, moves: a.moves, recorded: a.recorded || b.recorded,
+      base: [0, 1].map(i => Math.max(a.base?.[i] | 0, b.base?.[i] | 0)), at: Math.max(a.at || 0, b.at || 0),
+    });
+  } catch {
+    restore(suits, seed, local);
+  }
+  save();
+  queueSync();
+  render();
+  if (g.isWon()) onWin();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) sync(true);
+  else pull(); // it may have been played elsewhere meanwhile
+});
+window.addEventListener('pagehide', () => sync(true));
+
+function load(suits, seed, push = false) {
+  sync();
+  restore(suits, seed, store.get('spider:saves', {})[keyOf(suits, seed)]);
+  sel = null;
   setUrl(`/play/${suits}/${seed}`, push);
   setView('game');
   computeLayout();
   $('#dangler').hidden = true;
   save();
   render();
-  if (g.isWon()) startup.then(onWin); // once we know who is logged in
+  startup.then(() => { // once we know who is logged in
+    if (view !== 'game' || g.suits !== suits || g.seed !== seed) return;
+    if (g.isWon()) onWin();
+    pull();
+  });
 }
 
 const randomSeed = () => 1 + Math.floor(Math.random() * 999_999_999);
@@ -121,6 +208,7 @@ function setView(v) {
 function showPage(name, push = false) {
   setUrl(name === 'archive' ? '/archive' : '/', push);
   setView(name);
+  sync();
   sel = hint = null;
   $('#dangler').hidden = true;
   if (dialog.open) dialog.close();
@@ -138,7 +226,7 @@ function route() {
 
 function after() {
   hint = null;
-  save();
+  changed();
   render();
   if (g.isWon()) onWin();
 }
@@ -184,19 +272,13 @@ function autoMove(from, count) {
   play({ from, to, count });
 }
 
-function undoOne() {
-  if (g.undoRevealsInfo()) realUndos++;
-  undos++;
-  g.undo();
-}
-
 async function undo() {
   if (!g.canUndo()) return;
-  if (g.undoRevealsInfo()) {
+  if (g.undoCosts()) {
     const what = g.history.at(-1).mv.deal ? 'a deal' : 'a move that turned a card over';
     if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo', ['u'])) return;
   }
-  undoOne();
+  g.undo();
   sel = null;
   after();
 }
@@ -209,11 +291,11 @@ function redo() {
 
 async function restart() {
   if (!g.canUndo()) return;
-  const real = g.history.filter(r => r.mv.deal || r.flips.length).length;
+  const real = g.line.filter(n => n.real && !n.undone).length;
   const text = real ? `Going back to the start takes back cards you have seen: ${plural(real, 'undo')}.`
     : 'Your moves go onto the redo stack.';
   if (!await confirmDialog('Restart this deal?', text, 'Restart', ['R'])) return;
-  while (g.canUndo()) undoOne();
+  while (g.canUndo()) g.undo();
   sel = null;
   after();
 }
@@ -256,7 +338,7 @@ async function autoComplete() {
   try {
     for (const mv of line) {
       if (view !== 'game' || g.apply(mv)) break; // left the board, or (shouldn't happen) an illegal move
-      save();
+      changed();
       render();
       await sleep(140);
     }
@@ -291,7 +373,7 @@ async function submitPending() {
 }
 
 async function onWin() {
-  const win = { suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), real_undos: realUndos, undos };
+  const win = { suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), real_undos: realUndoCount(), undos: undoCount() };
   const d = $('#dangler');
   if (d.hidden) { d.hidden = false; d.style.animation = 'none'; void d.offsetWidth; d.style.animation = ''; }
   if (!me) {
@@ -306,6 +388,7 @@ async function onWin() {
     const data = win.moves === recorded ? await api('GET', `/results/${win.suits}/${win.seed}`) : await api('POST', '/wins', win);
     markRecorded(win);
     save();
+    queueSync();
     showWinDialog(win, resultsTable(data.results));
     fetchDailies();
   } catch (e) {
@@ -384,7 +467,7 @@ function dayLabel(date) {
 
 const longDate = date => new Date(`${date}T12:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 const isMe = name => !!me && name.toLowerCase() === me.username.toLowerCase();
-const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf(suits, seed)]; return !!(s && (s.moves || s.undos)); };
+const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf(suits, seed)]; return !!(s && (s.moves || s.tree || s.undos)); };
 
 // Green once you have won it; yellow if that took real undos.
 const wonClass = c => (c.mine ? (c.mine.real_undos ? ' won undos' : ' won') : '');
@@ -544,6 +627,7 @@ async function loggedIn() {
   else api('PUT', '/settings', settings).catch(() => {});
   await submitPending();
   fetchDailies();
+  pull();
 }
 
 function applySettings(s, upload = true) {
@@ -591,7 +675,8 @@ function helpDialog() {
     <p>Build runs from king down to ace in one suit; a finished run is cleared. Win by clearing all eight.
     Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
     <b>Hint</b> steps through useful moves, best first; tap the column outlined in green to play one.</p>
-    <p>An <b>undo</b> takes back a card turned over or a deal. Taking back anything else is a <b>free undo</b>.
+    <p>An <b>undo</b> takes back a card turned over or a deal. Taking back anything else is a <b>free undo</b>,
+    and so is taking the same move back again after a redo.
     A card you have seen and turned back over stays half shown.
     Wins record your moves and undos.</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
@@ -687,7 +772,7 @@ const colX = c => L.left0 + c * (L.cw + L.gap);
 // Card tops in a column, squeezed to fit the board's height when possible.
 function cardTops(c) {
   // Face-down cards that have been seen are spaced like face-up ones, to show what they are.
-  const n = g.columns[c].length, fd = Math.min(g.faceDown[c], seen[c]), ups = Math.max(0, n - fd - 1);
+  const n = g.columns[c].length, fd = Math.min(g.faceDown[c], g.seen[c]), ups = Math.max(0, n - fd - 1);
   const room = board.clientHeight - L.top0 - L.ch - 8;
   let down = L.down, up = L.up;
   if (fd * down + ups * up > room) {
@@ -714,7 +799,7 @@ function render() {
     html += `<div class="slot${hintTo === c ? ' hint' : ''}" style="left:${x}px;top:${L.top0}px"></div>`;
     col.forEach((card, i) => {
       const style = `left:${x}px;top:${tops[i]}px`, attrs = `data-c="${c}" data-i="${i}"`;
-      if (i < fd) html += i < seen[c] ? `<div class="card down" style="${style}" ${attrs}></div>` : faceHtml(card, style, 'seen', attrs);
+      if (i < fd) html += i < g.seen[c] ? `<div class="card down" style="${style}" ${attrs}></div>` : faceHtml(card, style, 'seen', attrs);
       else {
         const mark = sel && sel.col === c && i >= col.length - sel.count ? 'sel' : hintTo === c && i === col.length - 1 ? 'hint' : '';
         // A break: this card is not one rank lower than the face-up card under it.
@@ -740,7 +825,7 @@ function render() {
   const daily = dailyDate(g.suits, g.seed);
   $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
     : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
-    <b>${g.history.length}</b> moves · <b>${realUndos}</b> undos · <b>${undos - realUndos}</b> free undos`;
+    <b>${g.history.length}</b> moves · <b>${realUndoCount()}</b> undos · <b>${undoCount() - realUndoCount()}</b> free undos`;
   $('#b-undo').disabled = !g.canUndo() || finishing;
   $('#b-redo').disabled = !g.canRedo() || finishing;
   updateFinish();

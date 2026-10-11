@@ -25,6 +25,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// Seeds stay within JavaScript's exact integer range.
 const MAX_SEED: u64 = (1 << 53) - 1;
 const SESSION_COOKIE: &str = "session";
+/// The most a saved game may take (the request body limit is 2 MB).
+const MAX_GAME_STATE: usize = 1_000_000;
 
 /// Daily challenges `(date, suits, seed)` in date order, from challenges.txt
 /// (made by tools/dailies). Days start at midnight Pacific time.
@@ -72,6 +74,16 @@ CREATE TABLE IF NOT EXISTS wins (
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS wins_by_deal ON wins(suits, seed);
+-- A player's game of a deal, as the client saves it (JSON): the tree of every
+-- move played and the line of it on the board.
+CREATE TABLE IF NOT EXISTS games (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    suits INTEGER NOT NULL,
+    seed INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (user_id, suits, seed)
+);
 ";
 
 struct App {
@@ -304,6 +316,32 @@ async fn get_results(State(app): AppState, headers: HeaderMap, Path((suits, seed
     results(&app, &user, suits, seed).map(Json)
 }
 
+async fn put_game(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>, Json(state): Json<Value>) -> ApiResult<Json<Value>> {
+    let user = require_user(&app, &headers)?;
+    let text = state.to_string();
+    if !matches!(suits, 1..=4) || seed > MAX_SEED || !state.is_object() || text.len() > MAX_GAME_STATE {
+        return Err(bad("not a game"));
+    }
+    app.db.lock().unwrap().execute(
+        "INSERT INTO games (user_id, suits, seed, state) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (user_id, suits, seed) DO UPDATE SET state = excluded.state, updated_at = unixepoch()",
+        params![user.id, suits, seed as i64, text],
+    )?;
+    Ok(Json(json!({})))
+}
+
+async fn get_game(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>) -> ApiResult<Json<Value>> {
+    let user = require_user(&app, &headers)?;
+    let text: Option<String> = app
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT state FROM games WHERE user_id = ?1 AND suits = ?2 AND seed = ?3", params![user.id, suits, seed as i64], |r| r.get(0))
+        .optional()?;
+    let state = text.and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    Ok(Json(json!({ "state": state })))
+}
+
 /// Challenges up to today, newest day first, with how many players have won
 /// each and (when logged in) the player's own best win of it.
 async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Value>> {
@@ -375,6 +413,7 @@ async fn main() {
         .route("/settings", put(put_settings))
         .route("/wins", post(record_win))
         .route("/results/{suits}/{seed}", get(get_results))
+        .route("/games/{suits}/{seed}", get(get_game).put(put_game))
         .route("/dailies", get(dailies))
         .with_state(app);
     // Any other path (e.g. /play/2/1234) is the single-page client.
