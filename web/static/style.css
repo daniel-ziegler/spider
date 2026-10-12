@@ -94,6 +94,9 @@ button.primary:hover { background: #ffe27a; }
   border: 2px dashed #ffffff22;
   border-radius: calc(var(--cw) * 0.08);
 }
+.slot.cell, .slot.found { border: 2px solid #ffffff1f; background: #0002; }
+.slot.found { display: grid; place-items: center; font-size: calc(var(--cw) * 0.5); line-height: 1; color: #ffffff2b; }
+.card.up.home { cursor: default; }
 .col-num {
   position: absolute;
   top: 3px;
@@ -177,6 +180,10 @@ button.primary:hover { background: #ffe27a; }
 #msg { flex: 1; text-align: center; align-self: center; color: var(--ink-dim); min-height: 1.4em; transition: opacity 0.4s; }
 #msg.flash { color: var(--ink); }
 
+/* FreeCell has no stock or finished runs: the tray is the message, the mark and auto-complete. */
+body[data-game=freecell] :is(#done, #stock) { display: none; }
+body[data-game=freecell] #tray { min-height: 44px; align-items: center; }
+
 /* Dialogs */
 dialog {
   border: none;
@@ -251,6 +258,9 @@ body[data-view=game] #page { display: none; }
 .hero .hang { display: flex; flex-direction: column; align-items: center; transform-origin: top center; animation: sway 4s ease-in-out infinite; }
 .hero .thread { width: 1px; height: 34px; background: #fff8; }
 .hero svg { width: 56px; height: 56px; margin-top: -10px; color: #d9cdf0; --spider-eye: #2a1f3d; filter: drop-shadow(0 3px 5px #0007); }
+.games { display: flex; justify-content: center; gap: 10px; margin: 2px 0 6px; }
+.games button { min-width: 130px; padding: 10px 18px; border-radius: 12px; font-size: 17px; font-weight: 600; }
+.games button[aria-pressed=true] { background: var(--accent); color: #222; border-color: transparent; }
 .box { background: #1f2a27; border-radius: 14px; padding: 18px 20px; margin: 14px 0; box-shadow: 0 8px 30px #0005; }
 .box h2 { margin: 0 0 2px; font-size: 20px; }
 .box p { margin: 6px 0; }

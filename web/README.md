@@ -1,6 +1,6 @@
 # Spider on the web
 
-Spider Solitaire for a few friends: play in the browser (mouse, touch or
+Spider Solitaire (and [FreeCell](#freecell)) for a few friends: play in the browser (mouse, touch or
 keyboard), log in, and wins are recorded with their move count and real undos.
 
 * `static/` – the client: plain JavaScript modules, no build step.
@@ -37,6 +37,32 @@ repository root runs them on some 300 positions from play
 
 A deal once played to where it could no longer be won is marked so in its
 saved game (`lost`), and its daily challenge shows red until it is won.
+
+## FreeCell
+
+The home page switches between Spider and FreeCell. FreeCell has free play
+only (no daily challenges yet): a random deal or a deal number, numbered as
+in Microsoft FreeCell. Its address is `/freecell/DEAL`; everywhere else a
+deal is `(suits, seed)` (saves, the API, the database) FreeCell is 0 suits.
+
+* `static/freecell.js` has the rules, on the same tree of moves as Spider
+  (`Played` in `game.js`), and `src/freecell.rs` is the server's port of
+  them, which replays claimed wins; `cargo test` compares the two on random
+  games (`test/fcport.mjs`).
+* Cards that nothing could still want to lie on go to the foundations by
+  themselves after every move, as part of it. A run moves between columns in
+  one move if the empty cells and columns allow it a card at a time.
+* Nothing is hidden, so every undo counts (`real_undos` = `undos`), still
+  only the first time a move is taken back. Only the first undo of a game
+  asks before it is made.
+* The mark for a game that can no longer be won comes from a search in a
+  worker (`static/fcwinnable.js`, which describes it): up to 2,000,000
+  positions, after quick restarts that find nearly every win in a few
+  milliseconds. The positions of a winning line it finds are remembered as
+  winnable, so playing along one costs nothing. `cargo test` checks its
+  verdicts against an independent search (`test/fcwinnable.mjs`).
+* Auto-complete is offered once sending cards to the foundations is all
+  that is left.
 
 ## Daily challenges
 

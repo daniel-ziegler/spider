@@ -103,8 +103,105 @@ export function runLen(col, faceDown) {
   return k;
 }
 
-export class Game {
+// The tree of every move played from a deal, and the line of it that is on
+// the board: what the games share. A game adds its rules: check(mv),
+// applyRaw(mv) (returning a record), unapply(record), and isReal(record).
+export class Played {
+  constructor() {
+    this.history = []; // the records of the moves on the board
+    // Every move ever played from this deal, as a tree; undone lines stay in
+    // it. line is the nodes from the root to the current position. The last
+    // child of a node is the one most recently undone: the one redo plays.
+    this.root = { children: [] };
+    this.line = [this.root];
+    this.undos = 0; // moves in the tree that have been undone, however often
+    this.realUndos = 0; // those of them that count (see isReal)
+  }
+
+  canUndo() { return this.history.length > 0; }
+  canRedo() { return this.line.at(-1).children.length > 0; }
+  moves() { return this.history.map(r => r.mv); }
+  treeText() { return treeText(this.root); }
+
+  // Would the next undo be a real one, for the first time?
+  undoCosts() {
+    const node = this.line.at(-1);
+    return this.history.length > 0 && node.real && !node.undone;
+  }
+
+  // Apply a move; returns an error message, or null. A move already in the
+  // tree here goes down that branch, so what followed it can be redone.
+  apply(mv) {
+    const err = this.check(mv);
+    if (err) return err;
+    const here = this.line.at(-1), key = encodeMove(mv);
+    let node = here.children.find(n => n.key === key);
+    if (!node) here.children.push(node = newNode(mv));
+    this.enter(node);
+    return null;
+  }
+
+  enter(node) {
+    const rec = this.applyRaw(node.mv);
+    node.real = this.isReal(rec);
+    this.history.push(rec);
+    this.line.push(node);
+    this.entered();
+    return rec;
+  }
+
+  entered() {}
+
+  leave() {
+    this.unapply(this.history.pop());
+    return this.line.pop();
+  }
+
+  // Take on a tree of moves (from parseTree), dropping any that are not
+  // legal. The game must be at the start.
+  adopt(root) {
+    const walk = node => {
+      node.children = node.children.filter(n => {
+        if (this.check(n.mv)) return false;
+        this.enter(n);
+        walk(n);
+        this.leave();
+        if (n.undone) {
+          this.undos++;
+          if (n.real) this.realUndos++;
+        }
+        return true;
+      });
+    };
+    this.root = root;
+    this.line = [root];
+    this.undos = this.realUndos = 0;
+    walk(root);
+  }
+
+  // Undoing a move counts only the first time.
+  undo() {
+    const rec = this.history.at(-1);
+    if (!rec) return null;
+    const node = this.leave(), siblings = this.line.at(-1).children;
+    siblings.push(...siblings.splice(siblings.indexOf(node), 1));
+    if (!node.undone) {
+      node.undone = true;
+      this.undos++;
+      if (node.real) this.realUndos++;
+    }
+    return rec;
+  }
+
+  redo() {
+    const node = this.line.at(-1).children.at(-1);
+    return node ? this.enter(node) : null;
+  }
+}
+
+export class Game extends Played {
   constructor(suits, seed) {
+    super();
     const deck = [];
     for (let set = 0; set < 8; set++) {
       const suit = set % suits; // three suits: 3 sets of spades, 3 of hearts, 2 of diamonds
@@ -122,14 +219,6 @@ export class Game {
     this.completed = []; // suits of removed K..A runs
     this.suits = suits;
     this.seed = seed;
-    this.history = []; // records: {mv, flips: [col], completed: [[col, suit]]}
-    // Every move ever played from this deal, as a tree; undone lines stay in
-    // it. line is the nodes from the root to the current position. The last
-    // child of a node is the one most recently undone: the one redo plays.
-    this.root = { children: [] };
-    this.line = [this.root];
-    this.undos = 0; // moves in the tree that have been undone, however often
-    this.realUndos = 0; // those of them that took back a card flip or a deal
     // Per column, the fewest face-down cards anywhere in the tree: the cards
     // from there up have been seen.
     this.seen = [...this.faceDown];
@@ -137,17 +226,7 @@ export class Game {
 
   dealsRemaining() { return this.stock.length / NUM_COLS; }
   isWon() { return this.completed.length === 8; }
-  canUndo() { return this.history.length > 0; }
-  canRedo() { return this.line.at(-1).children.length > 0; }
-  moves() { return this.history.map(r => r.mv); }
-  treeText() { return treeText(this.root); }
   runLen(col) { return runLen(this.columns[col], this.faceDown[col]); }
-
-  // Would the next undo take back a card flip or a deal for the first time?
-  undoCosts() {
-    const node = this.line.at(-1);
-    return this.history.length > 0 && node.real && !node.undone;
-  }
 
   // Why moving count cards from -> to is illegal, or null if it is legal.
   checkMove(from, to, count) {
@@ -178,52 +257,12 @@ export class Game {
 
   check(mv) { return mv.deal ? this.checkDeal() : this.checkMove(mv.from, mv.to, mv.count); }
 
-  // Apply a move; returns an error message, or null. A move already in the
-  // tree here goes down that branch, so what followed it can be redone.
-  apply(mv) {
-    const err = this.check(mv);
-    if (err) return err;
-    const here = this.line.at(-1), key = encodeMove(mv);
-    let node = here.children.find(n => n.key === key);
-    if (!node) here.children.push(node = newNode(mv));
-    this.enter(node);
-    return null;
-  }
+  // A real undo takes back a card turned over or a deal. (Records are
+  // {mv, flips: [col], completed: [[col, suit]]}.)
+  isReal(rec) { return !!rec.mv.deal || rec.flips.length > 0; }
 
-  enter(node) {
-    const rec = this.applyRaw(node.mv);
-    node.real = !!node.mv.deal || rec.flips.length > 0;
-    this.history.push(rec);
-    this.line.push(node);
+  entered() {
     this.faceDown.forEach((n, c) => { if (n < this.seen[c]) this.seen[c] = n; });
-    return rec;
-  }
-
-  leave() {
-    this.unapply(this.history.pop());
-    return this.line.pop();
-  }
-
-  // Take on a tree of moves (from parseTree), dropping any that are not
-  // legal. The game must be at the start.
-  adopt(root) {
-    const walk = node => {
-      node.children = node.children.filter(n => {
-        if (this.check(n.mv)) return false;
-        this.enter(n);
-        walk(n);
-        this.leave();
-        if (n.undone) {
-          this.undos++;
-          if (n.real) this.realUndos++;
-        }
-        return true;
-      });
-    };
-    this.root = root;
-    this.line = [root];
-    this.undos = this.realUndos = 0;
-    walk(root);
   }
 
   applyRaw(mv) {
@@ -271,25 +310,6 @@ export class Game {
       const dst = this.columns[rec.mv.to];
       this.columns[rec.mv.from].push(...dst.splice(dst.length - rec.mv.count));
     }
-  }
-
-  // Undoing a move counts only the first time.
-  undo() {
-    const rec = this.history.at(-1);
-    if (!rec) return null;
-    const node = this.leave(), siblings = this.line.at(-1).children;
-    siblings.push(...siblings.splice(siblings.indexOf(node), 1));
-    if (!node.undone) {
-      node.undone = true;
-      this.undos++;
-      if (node.real) this.realUndos++;
-    }
-    return rec;
-  }
-
-  redo() {
-    const node = this.line.at(-1).children.at(-1);
-    return node ? this.enter(node) : null;
   }
 
   // Every legal move, best first, for hints: a port of Game::hint_moves.

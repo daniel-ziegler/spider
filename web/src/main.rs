@@ -2,10 +2,15 @@
 //! records wins. A win is checked by replaying its move list with the
 //! terminal game's rules (`src/game.rs`), so a seed deals the same cards here,
 //! in the browser and in the terminal.
+//!
+//! FreeCell is played here too (rules in `freecell.rs`). Everywhere a deal is
+//! `(suits, seed)`, in the database and in the API, `suits` 0 means FreeCell.
 
 #[allow(dead_code)]
 #[path = "../../src/game.rs"]
 mod game;
+#[allow(dead_code)]
+mod freecell;
 
 use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
@@ -60,8 +65,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id INTEGER NOT NULL REFERENCES users(id),
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+-- suits: 1-4 for Spider, 0 for FreeCell (here and in games).
 -- moves: length of the winning line. undos: every undo; real_undos: those
--- that took back a card flip or a deal.
+-- that took back a card flip or a deal (in FreeCell, all of them).
 CREATE TABLE IF NOT EXISTS wins (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -250,14 +256,35 @@ struct Win {
 
 /// Replay a claimed win; on success, the number of moves in it.
 fn check_win(w: &Win) -> Result<usize, String> {
-    if !matches!(w.suits, 1..=4) || w.seed > MAX_SEED {
-        return Err("no such deal".into());
-    }
     if w.real_undos > w.undos {
         return Err("more real undos than undos".into());
     }
+    if w.suits == 0 {
+        return check_freecell_win(w);
+    }
+    if !matches!(w.suits, 1..=4) || w.seed > MAX_SEED {
+        return Err("no such deal".into());
+    }
     let moves = game::parse_moves(&w.moves)?;
     let mut g = game::Game::new(w.suits, w.seed);
+    for (i, &mv) in moves.iter().enumerate() {
+        g.apply(mv).map_err(|e| format!("move {}: {e}", i + 1))?;
+    }
+    if !g.is_won() {
+        return Err("those moves do not win the deal".into());
+    }
+    Ok(moves.len())
+}
+
+fn check_freecell_win(w: &Win) -> Result<usize, String> {
+    if w.seed > freecell::MAX_DEAL {
+        return Err("no such deal".into());
+    }
+    if w.real_undos != w.undos {
+        return Err("every undo counts in FreeCell".into());
+    }
+    let moves = freecell::parse_moves(&w.moves)?;
+    let mut g = freecell::Game::new(w.seed as u32);
     for (i, &mv) in moves.iter().enumerate() {
         g.apply(mv).map_err(|e| format!("move {}: {e}", i + 1))?;
     }
@@ -319,7 +346,7 @@ async fn get_results(State(app): AppState, headers: HeaderMap, Path((suits, seed
 async fn put_game(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>, Json(state): Json<Value>) -> ApiResult<Json<Value>> {
     let user = require_user(&app, &headers)?;
     let text = state.to_string();
-    if !matches!(suits, 1..=4) || seed > MAX_SEED || !state.is_object() || text.len() > MAX_GAME_STATE {
+    if !matches!(suits, 0..=4) || seed > MAX_SEED || !state.is_object() || text.len() > MAX_GAME_STATE {
         return Err(bad("not a game"));
     }
     app.db.lock().unwrap().execute(
@@ -468,6 +495,56 @@ mod tests {
             games += 1;
         }
         assert!(games >= 30);
+    }
+
+    /// The same for FreeCell: test/fcport.mjs plays random games and the
+    /// solver's winning lines, and freecell.rs must agree on every position.
+    #[test]
+    fn javascript_freecell_matches() {
+        let out = std::process::Command::new("node").arg("test/fcport.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).unwrap();
+        let (mut games, mut wins) = (0, 0);
+        for line in text.lines() {
+            let f: Vec<&str> = line.split(' ').collect();
+            let seed: u32 = f[0].parse().unwrap();
+            let mut g = freecell::Game::new(seed);
+            assert_eq!(g.to_position_text(), f[1], "deal {seed}");
+            for mv in freecell::parse_moves(f[2]).unwrap() {
+                g.apply(mv).unwrap();
+            }
+            assert_eq!(g.to_position_text(), f[3], "after moves {seed}");
+            games += 1;
+            let win = |undos, real_undos| Win { suits: 0, seed: seed as u64, moves: f[2].into(), real_undos, undos };
+            if g.is_won() {
+                wins += 1;
+                assert_eq!(check_win(&win(2, 2)), Ok(f[2].split(',').count()));
+                assert!(check_win(&win(2, 1)).is_err(), "every undo counts");
+                assert!(check_win(&Win { seed: seed as u64 + 1, ..win(0, 0) }).is_err());
+            } else {
+                assert!(check_win(&win(0, 0)).is_err());
+            }
+        }
+        assert!(games >= 40 && wins >= 4);
+    }
+
+    /// Deal 1 is Microsoft's deal 1.
+    #[test]
+    fn freecell_deals_are_microsofts() {
+        let g = freecell::Game::new(1);
+        // J♦ K♦ 2♠ 4♣ 3♠ 6♦ 6♠ and 5♥ 3♥ 3♣ 7♠ 7♦ 10♣
+        assert_eq!(g.columns[0], [36, 38, 1, 42, 2, 31, 5]);
+        assert_eq!(g.columns[7], [17, 15, 41, 6, 32, 48]);
+    }
+
+    /// The FreeCell solver (static/fcwinnable.js) against a search that
+    /// shares nothing with it; see test/fcwinnable.mjs.
+    #[test]
+    fn freecell_solver_is_sound() {
+        let out = std::process::Command::new("node").arg("test/fcwinnable.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let n: Vec<u32> = String::from_utf8(out.stdout).unwrap().split_whitespace().map(|n| n.parse().unwrap()).collect();
+        assert!(n[0] >= 100 && n[1] >= 100, "too few positions judged: {n:?}");
     }
 
     #[test]

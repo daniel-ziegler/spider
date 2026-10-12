@@ -1,7 +1,14 @@
 // The Spider client: a home page with the daily challenges, an archive of past
 // ones, and the board, with mouse/touch and keyboard play. In-progress games
 // are saved in this browser; wins are recorded on the server.
+//
+// It plays FreeCell too (freecell.js). A FreeCell game is known everywhere a
+// Spider one is known by its suits (saves, the server) as 0 suits, and g is
+// then a FreeCell, whose columns are places 0-7, free cells 8-11, and
+// foundations the place HOME: sel.col, a move's from and to, and what
+// placeAt gives are places.
 import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves, parseTree, mergeTree, treeText } from './game.js';
+import { FreeCell, COLS, HOME, MAX_DEAL, follows } from './freecell.js';
 
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 // U+FE0E keeps phones from drawing the suits as emoji.
@@ -45,7 +52,8 @@ let settings = { colors: 'mine', breaks: true, lostMark: true, ...store.get('spi
 applySettings({}, false);
 
 let view = 'home'; // 'home', 'archive' or 'game'
-let g = null; // the Game, once one is loaded
+let homeGame = store.get('spider:game', 'spider'); // the game the home page is showing: 'spider' or 'freecell'
+let g = null; // the Game or FreeCell, once one is loaded
 let base = [0, 0]; // undos and real undos made before saves kept the whole tree of moves, which counts the rest
 let changedAt = 0; // when this game was last played in, here or (once synced) elsewhere
 let recorded = ''; // move list of the last win of this deal sent to the server
@@ -61,6 +69,17 @@ let L; // layout, see computeLayout
 // ---------------------------------------------------------------- saving and loading
 
 const keyOf = (suits, seed) => `${suits}/${seed}`;
+const newGame = (suits, seed) => (suits ? new Game(suits, seed) : new FreeCell(seed));
+const gameUrl = (suits, seed) => (suits ? `/play/${suits}/${seed}` : `/freecell/${seed}`);
+const lastKey = suits => (suits ? 'spider:last' : 'spider:last:freecell'); // where the last game played is kept
+const numCols = () => g.columns.length;
+const pileLen = place => (g.freecell ? g.pile(place).length : g.columns[place].length);
+
+function setHomeGame(name) {
+  homeGame = name;
+  store.set('spider:game', name);
+  document.body.dataset.game = name;
+}
 
 // Real undos take back a card flip or a deal; taking the same move back again does not count again.
 const undoCount = () => base[0] + g.undos;
@@ -74,7 +93,7 @@ function snapshot() {
 
 // Set up g from a snapshot (or nothing, for a new game).
 function restore(suits, seed, s) {
-  g = new Game(suits, seed);
+  g = newGame(suits, seed);
   base = [0, 0];
   recorded = '';
   changedAt = 0;
@@ -95,7 +114,7 @@ function restore(suits, seed, s) {
     recorded = s.recorded ?? '';
     changedAt = s.at ?? s.t ?? 0;
   } catch {
-    g = new Game(suits, seed);
+    g = newGame(suits, seed);
     base = [0, 0];
   }
 }
@@ -105,7 +124,7 @@ function save() {
   saves[keyOf(g.suits, g.seed)] = { ...snapshot(), t: Date.now() };
   for (const k of Object.keys(saves).sort((a, b) => saves[b].t - saves[a].t).slice(MAX_SAVES)) delete saves[k];
   store.set('spider:saves', saves);
-  store.set('spider:last', keyOf(g.suits, g.seed));
+  store.set(lastKey(g.suits), keyOf(g.suits, g.seed));
 }
 
 // The game changed: save it here and, before long, on the server.
@@ -182,7 +201,8 @@ function load(suits, seed, push = false) {
   sync();
   restore(suits, seed, store.get('spider:saves', {})[keyOf(suits, seed)]);
   sel = null;
-  setUrl(`/play/${suits}/${seed}`, push);
+  setHomeGame(suits ? 'spider' : 'freecell');
+  setUrl(gameUrl(suits, seed), push);
   setView('game');
   computeLayout();
   $('#dangler').hidden = true;
@@ -221,6 +241,9 @@ function showPage(name, push = false) {
 function route() {
   const m = /^\/play\/([1-4])\/(\d{1,16})\/?$/.exec(location.pathname);
   if (m && +m[2] <= MAX_SEED) return load(+m[1], +m[2]);
+  const f = /^\/freecell(?:\/(\d{1,10}))?\/?$/.exec(location.pathname);
+  if (f?.[1] && +f[1] <= MAX_DEAL) return load(0, +f[1]);
+  if (f) setHomeGame('freecell');
   showPage(location.pathname === '/archive' ? 'archive' : 'home');
 }
 
@@ -243,7 +266,10 @@ function play(mv) {
 
 // Move from -> to. Lenient (keyboard): onto a card, move however many cards fit.
 function moveTo(from, to, count, lenient) {
-  if (lenient && g.columns[to].length) count = g.requiredCount(from, to) ?? count;
+  if (g.freecell) {
+    // A free cell or a foundation takes the top card; an empty column as much of the run as can get there.
+    if (lenient) count = to >= COLS ? 1 : g.columns[to].length ? g.requiredCount(from, to) ?? count : Math.min(count, g.capacity(to));
+  } else if (lenient && g.columns[to].length) count = g.requiredCount(from, to) ?? count;
   const err = g.checkMove(from, to, count);
   if (err) return flash(err);
   play({ from, to, count });
@@ -252,6 +278,7 @@ function moveTo(from, to, count, lenient) {
 // Where a run would most usefully go: onto its own suit, then any card, then
 // an empty column (never just the whole column into another empty one).
 function bestDestination(from, count) {
+  if (g.freecell) return bestPlace(from, count);
   const src = g.columns[from], bottom = src[src.length - count];
   let best = null, bestScore = 0;
   for (let i = 1; i < NUM_COLS; i++) {
@@ -262,6 +289,20 @@ function bestDestination(from, count) {
     if (score > bestScore) [best, bestScore] = [to, score];
   }
   return best;
+}
+
+// In FreeCell: a foundation, then onto a card, then an empty column, then a free cell.
+function bestPlace(from, count) {
+  if (!g.checkMove(from, HOME, count)) return HOME;
+  let best = null;
+  for (let i = 1; i <= COLS; i++) {
+    const to = (from + i) % COLS;
+    if (to === from || g.checkMove(from, to, count)) continue;
+    if (g.columns[to].length) return to;
+    if (best === null && (from >= COLS || count < g.columns[from].length)) best = to;
+  }
+  const cell = g.cells.indexOf(null);
+  return best === null && from < COLS && count === 1 && cell >= 0 ? COLS + cell : best;
 }
 
 function autoMove(from, count) {
@@ -276,7 +317,10 @@ function autoMove(from, count) {
 
 async function undo() {
   if (!g.canUndo()) return;
-  if (g.undoCosts()) {
+  if (g.freecell) {
+    // Every undo counts; only the first is asked about.
+    if (!undoCount() && !await confirmDialog('Use an undo?', 'In FreeCell every undo counts, and you have not used one in this game.', 'Undo', ['u'])) return;
+  } else if (g.undoCosts()) {
     const what = g.history.at(-1).mv.deal ? 'a deal' : 'a move that turned a card over';
     if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo', ['u'])) return;
   }
@@ -294,7 +338,8 @@ function redo() {
 async function restart() {
   if (!g.canUndo()) return;
   const real = g.line.filter(n => n.real && !n.undone).length;
-  const text = real ? `Going back to the start takes back cards you have seen: ${plural(real, 'undo')}.`
+  const text = real ? g.freecell ? `Going back to the start counts as ${plural(real, 'undo')}.`
+    : `Going back to the start takes back cards you have seen: ${plural(real, 'undo')}.`
     : 'Your moves go onto the redo stack.';
   if (!await confirmDialog('Restart this deal?', text, 'Restart', ['R'])) return;
   while (g.canUndo()) g.undo();
@@ -309,6 +354,15 @@ async function restart() {
 let solver = null;
 
 function updateFinish() {
+  if (g.freecell) {
+    // In FreeCell: once sending cards to the foundations is all that is left.
+    solver?.terminate();
+    solver = null;
+    const key = `0/${g.seed}/${g.positionText()}`;
+    if (finish?.key !== key && !finishing) finish = { key, line: g.finishLine() };
+    $('#b-finish').hidden = !finish?.line || finishing;
+    return;
+  }
   const open = g.stock.length === 0 && g.faceDown.every(n => n === 0) && !g.isWon();
   const key = open ? `${g.suits}/${g.seed}/${g.positionText()}` : null;
   if (finish?.key !== key && !finishing) {
@@ -342,7 +396,7 @@ async function autoComplete() {
       if (view !== 'game' || g.apply(mv)) break; // left the board, or (shouldn't happen) an illegal move
       changed();
       render();
-      await sleep(140);
+      await sleep(g.freecell ? 90 : 140);
     }
   } finally {
     finishing = false;
@@ -359,7 +413,12 @@ async function autoComplete() {
 // stock if every deal has been made at some point. So it gives nothing away;
 // it proves nothing while cards in the stock are unseen. With nothing unseen
 // at all it may also search for a win (and still only says when there is none).
-const LOST_LIMIT = 200_000, LOST_BUDGET = 2_000_000;
+//
+// FreeCell hides nothing, so there the worker (fcwinnable.js) just searches:
+// the game is marked when no line at all wins. When it finds a winning line,
+// every position on it is noted as one that can be won, so playing along it
+// needs no more searching.
+const LOST_LIMIT = 200_000, LOST_BUDGET = 2_000_000, FREECELL_LIMIT = 2_000_000;
 const lostKnown = new Map(); // what has been seen, as a key -> whether the game is lost
 let lostWorker = null;
 let lostAt = null; // what was last looked at: {key, moves: how many moves led to it, slipped}
@@ -392,9 +451,14 @@ function updateLost() {
     el.hidden = true;
     return;
   }
-  const dealt = g.history.filter(r => r.mv.deal).length;
-  const stockSeen = dealsSeen() >= dealt + g.dealsRemaining();
-  const key = `${g.suits}/${g.seed}/${g.stock.length}/${g.positionText()}/${g.seen.join(',')}/${stockSeen}`, moves = g.history.length;
+  const moves = g.history.length;
+  let key, stockSeen = true;
+  if (g.freecell) key = `0/${g.key()}`;
+  else {
+    const dealt = g.history.filter(r => r.mv.deal).length;
+    stockSeen = dealsSeen() >= dealt + g.dealsRemaining();
+    key = `${g.suits}/${g.seed}/${g.stock.length}/${g.positionText()}/${g.seen.join(',')}/${stockSeen}`;
+  }
   if (lostAt?.key !== key) {
     const before = lostAt && lostKnown.get(lostAt.key), step = lostAt ? moves - lostAt.moves : 0;
     if (step === 1 && before === true) lostKnown.set(key, true); // a lost game stays lost
@@ -410,8 +474,19 @@ function updateLost() {
   }
   if (lostWaiting === key) return;
   stopLost();
-  if (g.stock.length && !stockSeen) return lostKnown.set(key, false); // nothing can be proved
+  if (!stockSeen && g.stock.length) return lostKnown.set(key, false); // nothing can be proved
   lostWaiting = key;
+  if (g.freecell) {
+    const worker = lostWorker = new Worker('/fcwinnable.js', { type: 'module' });
+    worker.onmessage = ({ data }) => {
+      if (lostWorker !== worker || data.key !== key) return;
+      if (data.line && view === 'game' && g.freecell && `0/${g.key()}` === key) noteLine(parseMoves(data.line));
+      lostAnswer(key, data.lost);
+    };
+    worker.onerror = () => { if (lostWorker === worker) stopLost(); };
+    worker.postMessage({ key, columns: g.columns, cells: g.cells, limit: FREECELL_LIMIT });
+    return;
+  }
   // What has been seen: the cards of each column from seen[c] up, and how
   // many of each rank the others are and which cards they may be.
   const unseen = { hidden: [...g.seen], cards: new Array(13).fill(0), values: new Uint8Array(52) };
@@ -424,17 +499,32 @@ function updateLost() {
   const open = unseen.hidden.every(n => n === 0) && { suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), budget: LOST_BUDGET };
   const worker = lostWorker = new Worker('/winnable.js', { type: 'module' });
   worker.onmessage = ({ data }) => {
-    if (lostWorker !== worker || data.key !== key) return;
-    stopLost();
-    if (lostKnown.size > 5000) lostKnown.clear();
-    lostKnown.set(key, data.lost);
-    if (lostAt?.key !== key || !data.lost) return;
-    el.hidden = false;
-    noteLost();
-    if (lostAt.slipped) warnLost();
+    if (lostWorker === worker && data.key === key) lostAnswer(key, data.lost);
   };
   worker.onerror = () => { if (lostWorker === worker) stopLost(); };
   worker.postMessage({ key, columns, faceDown: g.faceDown, stock: g.stock, unseen, limit: LOST_LIMIT, open });
+}
+
+// The worker's answer for the position with this key.
+function lostAnswer(key, lost) {
+  stopLost();
+  if (lostKnown.size > 20000) lostKnown.clear();
+  lostKnown.set(key, lost);
+  if (lostAt?.key !== key || !lost) return;
+  $('#fate').hidden = false;
+  noteLost();
+  if (lostAt.slipped) warnLost();
+}
+
+// A line wins the FreeCell game from here: every position on it can be won.
+function noteLine(line) {
+  const recs = [];
+  for (const mv of line) {
+    if (g.check(mv)) break;
+    recs.push(g.applyRaw(mv));
+    lostKnown.set(`0/${g.key()}`, false);
+  }
+  while (recs.length) g.unapply(recs.pop());
 }
 
 function noteLost() {
@@ -502,7 +592,7 @@ function showWinDialog(win, body) {
   openDialog(`<h2 data-win>Solved!</h2>
     <p>${date ? `Daily challenge · ${dayLabel(date)} · ${suitsLabel(win.suits)}` : `${suitsLabel(win.suits)} · deal ${win.seed}`}<br>
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
-      <b>${plural(win.real_undos, 'undo')}</b> <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span></p>
+      <b>${plural(win.real_undos, 'undo')}</b>${win.suits ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
     <div>${body}</div>
     <div class="row"><button data-close>Look at the board</button><button class="primary" data-home>More games</button></div>`,
   e => {
@@ -546,7 +636,7 @@ function confirmDialog(title, text, ok, keys = []) {
   });
 }
 
-const suitsLabel = n => plural(n, 'suit');
+const suitsLabel = n => (n ? plural(n, 'suit') : 'FreeCell');
 
 // ---------------------------------------------------------------- home page and daily challenges
 
@@ -602,22 +692,36 @@ function challengeCell(c) {
     <span>${first}</span>${rest.map(l => `<small>${l}</small>`).join('')}</button>`;
 }
 
-// The last game played in this browser, unless it is finished.
-function unfinishedGame() {
-  const key = store.get('spider:last', null), s = key && store.get('spider:saves', {})[key];
+// The last game (of Spider, or of FreeCell) played in this browser, unless it is finished.
+function unfinishedGame(freecell) {
+  const key = store.get(lastKey(!freecell), null), s = key && store.get('spider:saves', {})[key];
   if (!s || !s.moves || s.recorded) return null;
   const [suits, seed] = key.split('/').map(Number);
-  if (pending().some(p => p.suits === suits && p.seed === seed)) return null;
+  if (!suits !== freecell || pending().some(p => p.suits === suits && p.seed === seed)) return null;
   const daily = dailyDate(suits, seed);
   return { key, label: `${daily ? `daily ${dayLabel(daily)}, ${suitsLabel(suits)}` : `${suitsLabel(suits)}, deal ${seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
 }
 
 function homeHtml() {
-  const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
-  const last = unfinishedGame();
+  const freecell = homeGame === 'freecell';
+  const last = unfinishedGame(freecell);
+  const resume = last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : '';
+  const game = (name, label) => `<button type="button" data-game="${name}" aria-pressed="${homeGame === name}">${label}</button>`;
   return `<div class="pagewrap">
     <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider Friends</h1></div>
-    <section class="box">
+    <div class="games">${game('spider', 'Spider')}${game('freecell', 'FreeCell')}</div>
+    ${freecell ? freecellHtml(resume) : spiderHtml(resume)}
+    <section class="box account">
+      ${me ? `<p>Logged in as <b>${esc(me.username)}</b></p><div class="row start"><button type="button" data-logout>Log out</button></div>`
+        : `<p>Log in to record your wins and see how your friends did.</p>
+          <div class="row start"><button type="button" class="primary" data-login>Log in</button><button type="button" data-signup>Create account</button></div>`}
+    </section>
+  </div>`;
+}
+
+function spiderHtml(resume) {
+  const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
+  return `<section class="box">
       <h2>Today's challenges</h2>
       <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
       ${today ? `<div class="tiles">${today.challenges.map(challengeTile).join('')}</div>` : ''}
@@ -625,7 +729,7 @@ function homeHtml() {
     </section>
     <section class="box">
       <h2>Free play</h2>
-      ${last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : ''}
+      ${resume}
       <label>Random deal</label>
       <div class="choices">${SUIT_COUNTS.map(n => `<button type="button" data-random="${n}">${suitsLabel(n)}</button>`).join('')}</div>
       <form class="deal">
@@ -635,13 +739,22 @@ function homeHtml() {
           <button>Play</button></div>
         <p class="error"></p>
       </form>
-    </section>
-    <section class="box account">
-      ${me ? `<p>Logged in as <b>${esc(me.username)}</b></p><div class="row start"><button type="button" data-logout>Log out</button></div>`
-        : `<p>Log in to record your wins and see how your friends did.</p>
-          <div class="row start"><button type="button" class="primary" data-login>Log in</button><button type="button" data-signup>Create account</button></div>`}
-    </section>
-  </div>`;
+    </section>`;
+}
+
+function freecellHtml(resume) {
+  return `<section class="box">
+      <h2>FreeCell</h2>
+      <p class="dim">Every card is face up, so every undo counts. Deals are numbered as in Microsoft FreeCell.</p>
+      ${resume}
+      <div class="row start"><button type="button"${resume ? '' : ' class="primary"'} data-random="0">Random deal</button></div>
+      <form class="deal">
+        <label for="seed">Or a deal number</label>
+        <div class="choices"><input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 617">
+          <button>Play</button></div>
+        <p class="error"></p>
+      </form>
+    </section>`;
 }
 
 function archiveHtml() {
@@ -676,6 +789,7 @@ page.addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.go) showPage(b.dataset.go, true);
+  else if (b.dataset.game) { setHomeGame(b.dataset.game); render(); }
   else if (b.dataset.random) load(+b.dataset.random, randomSeed(), true);
   else if ('login' in b.dataset) accountDialog('login');
   else if ('signup' in b.dataset) accountDialog('signup');
@@ -686,11 +800,12 @@ page.addEventListener('click', e => {
 page.addEventListener('submit', e => {
   e.preventDefault();
   const form = e.target, text = form.seed.value.trim();
-  if (!/^\d+$/.test(text) || Number(text) > MAX_SEED) {
-    form.querySelector('.error').textContent = 'A deal number is a whole number.';
+  const suits = form.suits ? +form.suits.value : 0; // the FreeCell form has no suits to choose
+  if (!/^\d+$/.test(text) || Number(text) > (suits ? MAX_SEED : MAX_DEAL)) {
+    form.querySelector('.error').textContent = suits ? 'A deal number is a whole number.' : `A deal number is a whole number up to ${MAX_DEAL}.`;
     return;
   }
-  load(+form.suits.value, Number(text), true);
+  load(suits, Number(text), true);
 });
 
 function accountDialog(mode) {
@@ -747,7 +862,7 @@ function settingsDialog() {
     ${label} <span class="swatch ${cls}"><span>♠&#xFE0E;</span><span>♥&#xFE0E;</span><span>♦&#xFE0E;</span><span>♣&#xFE0E;</span></span></button>`;
   const html = () => `<h2>Settings</h2><label>Suit colours</label>
     <div class="choices">${choice('mine', 'Four colours', 'mine')}${choice('traditional', 'Traditional', 'trad')}</div>
-    <label>Mark where a stack breaks (a card on one that is not one rank higher)</label>
+    <label>Mark where a stack breaks (a card on one that is not one rank higher; in FreeCell, or not the other colour)</label>
     <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>
     <label>Say when the game can no longer be won (going only by the cards you have seen)</label>
     <div class="choices"><button type="button" data-fate="" aria-pressed="${!settings.lostMark}">Off</button><button type="button" data-fate="1" aria-pressed="${!!settings.lostMark}">On</button></div>
@@ -764,7 +879,38 @@ function settingsDialog() {
   });
 }
 
+function freecellHelp() {
+  const keys = [
+    ['<kbd>1</kbd> … <kbd>8</kbd>', 'pick a column, then the column to move to'],
+    ['<kbd>z</kbd> <kbd>x</kbd> <kbd>c</kbd> <kbd>v</kbd>', 'the free cells: pick the card in one, or put the picked card there'],
+    ['<kbd>f</kbd>', 'send the picked card (or the cursor column\'s) to its foundation'],
+    ['<kbd>←</kbd> <kbd>→</kbd>', 'move the cursor; <kbd>Enter</kbd> or <kbd>Space</kbd> picks the cursor column'],
+    ['<kbd>↑</kbd> <kbd>↓</kbd>', 'pick more or fewer cards (for empty columns)'],
+    ['same column twice', 'move the run wherever fits best'],
+    ['<kbd>Tab</kbd>', 'hint: step through useful moves, best first (<kbd>Shift</kbd> <kbd>Tab</kbd> back); <kbd>Enter</kbd> plays it'],
+    ['<kbd>Esc</kbd>', 'drop the selection'],
+    ['<kbd>a</kbd>', 'auto-complete, once only sending cards to the foundations is left'],
+    ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
+    ['<kbd>R</kbd>', 'restart this deal'],
+    ['<kbd>n</kbd>', 'home: new games'],
+    ['<kbd>?</kbd>', 'this help'],
+  ];
+  openDialog(`<h2>How to play FreeCell</h2>
+    <p>Build each suit up from the ace on the four foundations at the top right. In the columns, a card goes on one a rank higher
+    of the other colour, and anything goes in an empty column. Each of the four free cells at the top left holds one card.
+    A run moves in one go if there are free cells and empty columns enough to move it a card at a time.
+    Cards that are no more use in the columns go to the foundations by themselves.</p>
+    <p>Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
+    <b>Hint</b> steps through useful moves, best first; tap the place outlined in green to play one.</p>
+    <p>Nothing is hidden, so every <b>undo</b> counts (taking the same move back again after a redo does not count again).
+    Wins record your moves and undos.</p>
+    <p>In Settings you can have the game say when it <b>can no longer be won</b>.</p>
+    <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    <div class="row"><button class="primary" data-close>Got it</button></div>`);
+}
+
 function helpDialog() {
+  if (view === 'game' ? g.freecell : homeGame === 'freecell') return freecellHelp();
   const keys = [
     ['<kbd>1</kbd> … <kbd>9</kbd> <kbd>0</kbd>', 'pick a column, then the column to move to'],
     ['<kbd>←</kbd> <kbd>→</kbd>', 'move the cursor; <kbd>Enter</kbd> or <kbd>Space</kbd> picks the cursor column'],
@@ -862,12 +1008,15 @@ function cardBack() {
 function computeLayout() {
   const bw = board.clientWidth;
   const gap = Math.max(3, Math.min(14, bw * 0.012));
-  const cw = Math.min(110, Math.floor((bw - gap * (NUM_COLS - 1)) / NUM_COLS));
+  const n = numCols();
+  const cw = Math.min(110, Math.floor((bw - gap * (n - 1)) / n));
   const ch = Math.round(cw * 1.4);
   const font = Math.round(Math.max(11, Math.min(22, cw * 0.27)));
   L = {
-    gap, cw, ch, font, top0: 26, // room for the column numbers, shown or not
-    left0: (bw - cw * NUM_COLS - gap * (NUM_COLS - 1)) / 2,
+    // top0: the columns' top, with room for the column numbers, shown or not.
+    // In FreeCell the free cells and foundations are a row above them, at cellTop.
+    gap, cw, ch, font, cellTop: 22, top0: g.freecell ? 22 + ch + 28 : 26,
+    left0: (bw - cw * n - gap * (n - 1)) / 2,
     down: Math.max(4, Math.round(ch * 0.09)),
     up: Math.max(Math.round(ch * 0.24), Math.round(font * 1.35)),
   };
@@ -881,6 +1030,11 @@ const colX = c => L.left0 + c * (L.cw + L.gap);
 
 // Card tops in a column, squeezed to fit the board's height when possible.
 function cardTops(c) {
+  if (g.freecell) {
+    const n = g.columns[c].length, room = board.clientHeight - L.top0 - L.ch - 8;
+    const up = n > 1 ? Math.max(L.font * 1.1, Math.min(L.up, room / (n - 1))) : L.up;
+    return Array.from({ length: n }, (_, i) => L.top0 + i * up);
+  }
   // Face-down cards that have been seen show what they are, in two thirds of a face-up card's strip.
   const n = g.columns[c].length, fd = Math.min(g.faceDown[c], g.seen[c]), ghosts = g.faceDown[c] - fd;
   const ups = Math.max(0, n - g.faceDown[c] - 1) + ghosts * GHOST;
@@ -902,8 +1056,55 @@ function faceHtml(card, style, extra = '', attrs = '') {
   return `<div class="card up s${s} ${extra}" style="${style}" ${attrs}><div class="corner"><span>${RANKS[rankOf(card)]}</span><span>${SUITS[s]}</span></div><div class="pip">${SUITS[s]}</div></div>`;
 }
 
+// The FreeCell board: free cells and foundations in a row, the columns below.
+function renderFreecell() {
+  const hinted = hint?.moves[hint.i], hintTo = hinted ? hinted.to : null;
+  const hintSuit = hintTo === HOME ? suitOf(g.pile(hinted.from).at(-1)) : -1;
+  const mark = (place, i, n) => (sel && sel.col === place && i >= n - sel.count ? 'sel' : hintTo === place && i === n - 1 ? 'hint' : '');
+  let html = '';
+  for (let k = 0; k < 4; k++) {
+    const place = COLS + k, style = `left:${colX(k)}px;top:${L.cellTop}px`, card = g.cells[k];
+    html += `<div class="slot cell${hintTo === place ? ' hint' : ''}" style="${style}"></div>`;
+    if (card !== null) html += faceHtml(card, style, mark(place, 0, 1), `data-c="${place}" data-i="0"`);
+  }
+  for (let s = 0; s < 4; s++) {
+    const style = `left:${colX(4 + s)}px;top:${L.cellTop}px`, hinting = hintSuit === s ? ' hint' : '';
+    html += `<div class="slot found${hinting}" style="${style}">${SUITS[s]}</div>`;
+    if (g.found[s]) html += faceHtml(s * 13 + g.found[s] - 1, style, `home${hinting}`);
+  }
+  for (let c = 0; c < COLS; c++) {
+    const x = colX(c), col = g.columns[c], tops = cardTops(c);
+    html += `<div class="slot${hintTo === c ? ' hint' : ''}" style="left:${x}px;top:${L.top0}px"></div>`;
+    col.forEach((card, i) => {
+      const broken = i > 0 && !follows(col[i - 1], card) ? ' broken' : '';
+      html += faceHtml(card, `left:${x}px;top:${tops[i]}px`, mark(c, i, col.length) + broken, `data-c="${c}" data-i="${i}"`);
+    });
+  }
+  if (keyboardUsed) {
+    for (let c = 0; c < COLS; c++) {
+      html += `<div class="col-num${showCursor && c === cursor ? ' cursor' : ''}" style="left:${colX(c)}px;top:${L.top0 - 23}px">${c + 1}</div>`;
+      html += `<div class="col-num" style="left:${colX(c)}px;top:${L.cellTop - 20}px">${'zxcvffff'[c]}</div>`;
+    }
+  }
+  board.innerHTML = html;
+  renderStatus();
+}
+
+// The line about the game in the header, and the buttons.
+function renderStatus() {
+  const daily = dailyDate(g.suits, g.seed);
+  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
+    : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
+    <b>${g.history.length}</b> moves · <b>${realUndoCount()}</b> undos${g.freecell ? '' : ` · <b>${undoCount() - realUndoCount()}</b> free undos`}`;
+  $('#b-undo').disabled = !g.canUndo() || finishing;
+  $('#b-redo').disabled = !g.canRedo() || finishing;
+  updateFinish();
+  updateLost();
+}
+
 function render() {
   if (view !== 'game') return renderPage();
+  if (g.freecell) return renderFreecell();
   const hinted = hint?.moves[hint.i], hintTo = hinted && !hinted.deal ? hinted.to : null;
   let html = '';
   for (let c = 0; c < NUM_COLS; c++) {
@@ -934,14 +1135,7 @@ function render() {
   $('#stock').style.width = `${deals ? small + (deals - 1) * small * 0.18 : 0}px`;
   $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down${hinted?.deal && i === deals - 1 ? ' hint' : ''}" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
 
-  const daily = dailyDate(g.suits, g.seed);
-  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
-    : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
-    <b>${g.history.length}</b> moves · <b>${realUndoCount()}</b> undos · <b>${undoCount() - realUndoCount()}</b> free undos`;
-  $('#b-undo').disabled = !g.canUndo() || finishing;
-  $('#b-redo').disabled = !g.canRedo() || finishing;
-  updateFinish();
-  updateLost();
+  renderStatus();
 }
 
 let msgTimer;
@@ -964,29 +1158,39 @@ function clearFlash() {
 // The column under a page x coordinate, or null outside the columns.
 function colAt(x) {
   const rel = x - board.getBoundingClientRect().left - L.left0, step = L.cw + L.gap;
-  if (rel < -L.gap || rel > NUM_COLS * step) return null;
-  return Math.max(0, Math.min(NUM_COLS - 1, Math.floor((rel + L.gap / 2) / step)));
+  if (rel < -L.gap || rel > numCols() * step) return null;
+  return Math.max(0, Math.min(numCols() - 1, Math.floor((rel + L.gap / 2) / step)));
+}
+
+// In FreeCell, the place under a page point: above the columns it is a free cell or the foundations.
+function placeAt(x, y) {
+  const c = colAt(x);
+  if (c === null || y - board.getBoundingClientRect().top + board.scrollTop > L.top0 - 14) return c;
+  return c < 4 ? COLS + c : HOME;
 }
 
 let press = null; // pointer down: {col, i, x, y}
 let drag = null; // dragging: {col, count, ghost, dx, dy}
 
 function tap(col, i) {
-  const n = g.columns[col].length;
-  const movable = i >= 0 && i >= n - g.runLen(col);
   if (sel && col !== sel.col) return moveTo(sel.col, col, sel.count, false);
+  if (g.freecell && col === HOME) return;
+  const n = pileLen(col);
+  const movable = i >= 0 && i >= n - g.runLen(col);
   if (sel && (!movable || n - i === sel.count)) return autoMove(col, sel.count);
   if (movable) {
     sel = { col, count: n - i };
     render();
-  } else if (i >= g.faceDown[col]) {
-    flash('Only a same-suit run can move together');
+  } else if (g.freecell ? i >= 0 : i >= g.faceDown[col]) {
+    flash(g.freecell ? 'Only a run of alternating colours can move together' : 'Only a same-suit run can move together');
   }
 }
 
 function startDrag() {
-  const { col, i } = press, n = g.columns[col].length;
-  if (i < 0 || i < n - g.runLen(col)) return false;
+  const { col, i } = press;
+  if (g.freecell && col === HOME) return false;
+  const n = pileLen(col);
+  if (!(i >= 0) || i < n - g.runLen(col)) return false;
   const els = [...board.querySelectorAll(`.card[data-c="${col}"]`)].filter(el => +el.dataset.i >= i);
   const first = els[0].getBoundingClientRect();
   const ghost = document.createElement('div');
@@ -1011,7 +1215,7 @@ function endDrag() {
 
 board.addEventListener('pointerdown', e => {
   if (e.button !== 0 || finishing) return;
-  const col = colAt(e.clientX);
+  const col = g.freecell ? placeAt(e.clientX, e.clientY) : colAt(e.clientX);
   showCursor = false;
   if (hint) {
     // Tapping the hinted destination plays the hint; tapping anywhere else
@@ -1048,7 +1252,9 @@ window.addEventListener('pointerup', e => {
   press = null;
   if (!drag) return tap(p.col, p.i);
   const { col, count } = drag;
-  const to = colAt(e.clientX - drag.dx + L.cw / 2);
+  // By the middle of the dragged card; in FreeCell it is in the top row if that or the pointer is.
+  const x = e.clientX - drag.dx + L.cw / 2;
+  const to = g.freecell ? placeAt(x, Math.min(e.clientY, e.clientY - drag.dy + L.ch / 2)) : colAt(x);
   endDrag();
   sel = null;
   if (to === null || to === col) return render();
@@ -1064,8 +1270,10 @@ window.addEventListener('pointercancel', () => {
 // ---------------------------------------------------------------- keyboard
 
 function columnKey(c) {
-  cursor = c;
-  showCursor = true;
+  if (c < numCols()) { // (not a free cell)
+    cursor = c;
+    showCursor = true;
+  }
   if (!sel) {
     const run = g.runLen(c);
     if (run) sel = { col: c, count: run };
@@ -1093,7 +1301,13 @@ function cycleHint(d) {
   const mv = hint.moves[hint.i];
   let text = 'deal';
   sel = null;
-  if (!mv.deal) {
+  if (g.freecell) {
+    const src = g.pile(mv.from), top = g.columns[mv.to]?.at(-1);
+    sel = { col: mv.from, count: mv.count };
+    if (mv.to < COLS) cursor = mv.to;
+    text = cardName(src[src.length - mv.count]) + (mv.to === HOME ? ' to its foundation' : mv.to >= COLS ? ' to a free cell'
+      : ` onto ${top === undefined ? 'the empty column' : cardName(top)}`);
+  } else if (!mv.deal) {
     const src = g.columns[mv.from], top = g.columns[mv.to].at(-1);
     sel = { col: mv.from, count: mv.count };
     cursor = mv.to;
@@ -1122,14 +1336,17 @@ document.addEventListener('keydown', e => {
   if (k === 'Tab') return e.preventDefault(), markKeyboardUsed(), cycleHint(e.shiftKey ? -1 : 1);
   if (hint && (k === 'Enter' || k === ' ')) return e.preventDefault(), play(hint.moves[hint.i]);
   hint = null;
-  if (/^[0-9]$/.test(k)) columnKey(k === '0' ? 9 : +k - 1);
-  else if (k === 'ArrowLeft' || k === 'h') { cursor = (cursor + NUM_COLS - 1) % NUM_COLS; showCursor = true; render(); }
-  else if (k === 'ArrowRight' || k === 'l') { cursor = (cursor + 1) % NUM_COLS; showCursor = true; render(); }
+  const n = numCols();
+  if (/^[0-9]$/.test(k)) { if ((+k || 10) <= n) columnKey((+k || 10) - 1); }
+  else if (g.freecell && 'zxcv'.includes(k)) columnKey(COLS + 'zxcv'.indexOf(k));
+  else if (g.freecell && k === 'f') { moveTo(sel ? sel.col : cursor, HOME, 1, true); if (sel) { sel = null; render(); } }
+  else if (k === 'ArrowLeft' || k === 'h') { cursor = (cursor + n - 1) % n; showCursor = true; render(); }
+  else if (k === 'ArrowRight' || k === 'l') { cursor = (cursor + 1) % n; showCursor = true; render(); }
   else if (k === 'Enter' || k === ' ') columnKey(cursor);
   else if (k === 'ArrowUp' || k === '+' || k === '=') changeCount(1);
   else if (k === 'ArrowDown' || k === '-') changeCount(-1);
   else if (k === 'Escape') { sel = null; clearFlash(); render(); }
-  else if (k === 'd') play(DEAL);
+  else if (k === 'd' && !g.freecell) play(DEAL);
   else if (k === 'a') autoComplete();
   else if (k === 'u') undo();
   else if (k === 'r') redo();
@@ -1157,7 +1374,7 @@ $('#b-redo').onclick = redo;
 $('#b-hint').onclick = () => { if (!finishing) cycleHint(1); };
 $('#b-menu').onclick = menuDialog;
 $('#b-logo').onclick = () => showPage('home', true);
-$('#stock').onclick = () => { if (!finishing) play(DEAL); };
+$('#stock').onclick = () => { if (!finishing && !g.freecell) play(DEAL); };
 $('#b-finish').onclick = autoComplete;
 $('#tray').addEventListener('pointerdown', e => {
   if (hint && !e.target.closest('#stock')) { hint = sel = null; clearFlash(); render(); }
@@ -1166,6 +1383,7 @@ $('#info').onclick = e => { if (e.target.closest('.seed')) copyLink(); };
 window.addEventListener('resize', () => { if (view === 'game') { computeLayout(); render(); } });
 window.addEventListener('popstate', route);
 
+document.body.dataset.game = homeGame;
 document.documentElement.style.setProperty('--back', cardBack());
 applySettings({}, false);
 const startup = Promise.all([
