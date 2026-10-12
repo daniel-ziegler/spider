@@ -445,7 +445,7 @@ function noteLost() {
 }
 
 function warnLost() {
-  flash('Unwinnable. Undo to go back.', 8000);
+  flash('Undo to go back.', 8000);
 }
 
 // ---------------------------------------------------------------- winning
