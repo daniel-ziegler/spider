@@ -860,7 +860,7 @@ function applySettings(s, upload = true) {
 function settingsDialog() {
   const choice = (value, label, cls) => `<button type="button" data-colors="${value}" aria-pressed="${settings.colors === value}">
     ${label} <span class="swatch ${cls}"><span>♠&#xFE0E;</span><span>♥&#xFE0E;</span><span>♦&#xFE0E;</span><span>♣&#xFE0E;</span></span></button>`;
-  const html = () => `<h2>Settings</h2><label>Suit colours</label>
+  const html = () => `<h2>Settings</h2><label>Suit colours in Spider (FreeCell is always red and black)</label>
     <div class="choices">${choice('mine', 'Four colours', 'mine')}${choice('traditional', 'Traditional', 'trad')}</div>
     <label>Mark where a stack breaks (a card on one that is not one rank higher; in FreeCell, or not the other colour)</label>
     <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>

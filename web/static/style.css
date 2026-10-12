@@ -15,7 +15,8 @@
   --ch: 112px;
   --font: 18px;
 }
-body.traditional {
+/* FreeCell goes by red and black, so it is always in the traditional colours. */
+body.traditional, body[data-game=freecell] {
   --diamonds: var(--hearts);
   --clubs: var(--spades);
 }

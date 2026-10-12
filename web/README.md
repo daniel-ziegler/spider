@@ -63,6 +63,14 @@ deal is `(suits, seed)` (saves, the API, the database) FreeCell is 0 suits.
   verdicts against an independent search (`test/fcwinnable.mjs`).
 * Auto-complete is offered once sending cards to the foundations is all
   that is left.
+* Cards are red and black whatever the colour setting, since the colours
+  are what the game goes by.
+* For daily challenges to come, `tools/freecell/dumb.mjs` is a dumb player
+  that tells easy deals from hard ones: it plays the move whose position
+  scores best, with a little noise, and never takes one back. Of deals
+  1-200 it never wins 45% in 20 games and wins 17% of all its games.
+  `node tools/freecell/pick.mjs FROM TO [MAX] [GAMES]` lists the winnable
+  deals it wins at most MAX (0.2) of the time.
 
 ## Daily challenges
 
