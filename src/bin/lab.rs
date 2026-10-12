@@ -115,6 +115,54 @@ fn main() {
                     println!("{} {} won {} : moves {} last deal at {last_deal} applies {applies} fires {fires} first {}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
                     continue;
                 }
+                if mode == "blind" {
+                    // Every position of the game with the stock empty: whether a player who
+                    // has not seen the face-down cards can know it lost (lost_for_all), against
+                    // the certificate that sees them. With a third argument n: each position
+                    // called lost is also solved with the face-down cards shuffled, n times.
+                    let shuffles: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    let (mut applies, mut fires, mut peek, mut first, mut gave_up) = (0, 0, 0, None, 0);
+                    let mut x: u64 = 0x9E3779B97F4A7C15 ^ g.seed;
+                    for (i, mv) in moves.iter().chain(std::iter::once(&Move::Deal)).enumerate() {
+                        if g.stock.is_empty() && !g.is_won() {
+                            applies += 1;
+                            let (dead, n) = spider::certify::lost_for_all(&g, g.face_down, true, budget);
+                            gave_up += (n > budget) as u32;
+                            peek += spider::certify::lost_certificate(&g, budget).0 as u32;
+                            if dead {
+                                fires += 1;
+                                first.get_or_insert(i);
+                                if f[3] == "1" {
+                                    println!("UNSOUND {} {} after {i} moves: {}", f[0], f[1], g.to_position_text());
+                                }
+                                for _ in 0..shuffles {
+                                    let mut h = g.clone();
+                                    let mut slots: Vec<(usize, usize)> = (0..10).flat_map(|c| (0..h.face_down[c]).map(move |k| (c, k))).collect();
+                                    for k in (1..slots.len()).rev() {
+                                        x ^= x << 13;
+                                        x ^= x >> 7;
+                                        x ^= x << 17;
+                                        slots.swap(k, (x % (k as u64 + 1)) as usize);
+                                    }
+                                    let cards: Vec<_> = (0..10).flat_map(|c| h.columns[c][..h.face_down[c]].to_vec()).collect();
+                                    for (&(c, k), card) in slots.iter().zip(cards) {
+                                        h.columns[c][k] = card;
+                                    }
+                                    if Solver::new(&h, 300_000).solve(&h).verdict == Verdict::Solvable {
+                                        println!("UNSOUND {} {} after {i} moves, shuffled: {}", f[0], f[1], h.to_position_text());
+                                    }
+                                }
+                            }
+                        }
+                        if i < moves.len() {
+                            g.apply(*mv).unwrap();
+                        }
+                    }
+                    println!("{} {} won {} : moves {} applies {applies} fires {fires} peeking {peek} first {} gave_up {gave_up}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
+                    continue;
+                }
                 if mode == "sound3" {
                     // Every position of the game with the stock empty: how many, how many the
                     // certificate with empty columns calls lost and how many of those the one

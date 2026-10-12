@@ -106,65 +106,85 @@ empty column to change which column a dealt card lands on.
 Exhausting a lost position is often out of reach: a messy position just after
 the last deal, with twenty or thirty cards still face down, can stay
 `UNKNOWN` at 20M work, and one where nothing moves but runs split onto other
-suits took over a million. `src/certify.rs` has three sufficient conditions
-for a position being lost, none of which ever calls a winnable one lost.
+suits took over a million. `src/certify.rs` has sufficient conditions for a
+position being lost, none of which ever calls a winnable one lost.
 
-**The top-rank certificate** (stock empty, no empty column) is the one that
-works, and the search uses it: a stock-empty position it proves lost is not
-searched. While no column is empty, a run only ever moves onto a card one
-rank above its bottom card, so if the card it leaves is also one rank above,
-the ranks of the ten top cards are the same multiset afterwards. That
-multiset therefore changes only when a card leaves a card of the wrong rank,
-which nothing ever puts it back on: by the first move of a card `x` lying on
-such a card `a` in the position at hand, when it loses `rank(x) + 1` and
-gains `rank(a)`. And a card lying on anything but the next card up of its own
-suit can only leave as the bottom of a run, so only while some top card is
-one rank above it. So a far smaller game is searched: per column how many
-cards have never moved, counted in *units* (a card and the same-suit run on
-it), and the ranks of the tops; a step takes the top unit off a column if the
-tops have the rank above its bottom card. Every line of real play, splits
-included, is a line of this game, which forgets where the units went and that
-they get in each other's way. If it can neither take the last unit off a
-column nor bring a king's unit to the top with every lower card of its suit
-moved or in a top unit, the real game can neither empty a column nor complete
-a suit, and is lost. It looks at a handful to a few thousand positions.
+**The top-rank certificate** (`top_rank_certificate`: stock empty, no empty
+column) is the idea the working ones share. While no column is empty, a run
+only ever moves onto a card one rank above its bottom card, so if the card it
+leaves is also one rank above, the ranks of the ten top cards are the same
+multiset afterwards. That multiset therefore changes only when a card leaves
+a card of the wrong rank, which nothing ever puts it back on: by the first
+move of a card `x` lying on such a card `a` in the position at hand, when it
+loses `rank(x) + 1` and gains `rank(a)`. And a card lying on anything but the
+next card up of its own suit can only leave as the bottom of a run, so only
+while some top card is one rank above it. So a far smaller game is searched:
+per column how many cards have never moved, counted in *units* (a card and
+the same-suit run on it), and the ranks of the tops; a step takes the top
+unit off a column if the tops have the rank above its bottom card. Every line
+of real play, splits included, is a line of this game, which forgets where
+the units went and that they get in each other's way. If it can neither take
+the last unit off a column nor bring a king's unit to the top with every
+lower card of its suit moved, the real game can neither empty a column nor
+complete a suit, and is lost.
 
-On 640 games of the line player (160 per suit count, seeds 40001–40160), it
-never fired on any of the 4,964 positions of the 403 won games where it
-applies. It fired at some point in 228 of the 237 lost games, and in 35 of
-the 106 lost four-suit games on the position right after the last deal. Of 29
-lost four-suit games (seeds 30001–30048), the position where the line player
-gave up is now proved lost in all 29 with at most 41K work (before: 22 at
-400K work, 25 at 20M), and the position after the last deal in 12, with 8
-winnable and 9 unknown at 20M (before: 9, 8 and 12). Solving 640 games every
-fourth move at 500K work, no won game ever got `UNSOLVABLE`.
+**`lost_certificate`** carries that game past the emptying of columns and
+across deals, up to the first suit completed, for any position. A run put in
+an empty column uncovers the card it lay on, and its bottom card is the
+column's until the column is emptied again, which takes a top one rank above
+it; so the small game keeps the rank at the bottom of each refilled column,
+and may also put a unit, or any card that has moved, in an empty column. A
+deal covers the ten tops with known cards; which rank is under which is not
+known (the game forgot where things went), only that they are the ranks of
+the tops before, and which cards each column could have had on top; a dealt
+card comes off uncovering one of those, the small game choosing.
 
-With one deal left the search also uses it on the deal points it would
-otherwise drop (it keeps the best four per class, which made every search
-with stock left incomplete): if the position after each of them is proved
-lost, nothing was lost by dropping them. So a position can be proved lost
-before the last deal, when every way of making it is: at 2M work, the
-position where the line player is about to make the last deal in 18 of the
-106 lost four-suit games (13 of 70 with three suits, 7 of 44 with two, 2 of
-17 with one; 33 of the 106 could still be won there), and in none of the 403
-won games. Nothing proves a position with two or more deals left lost, which
-is where most games are lost: the last position the solver still finds a win
-from (at 500K work) has two or more deals left in half the lost four-suit
-games.
+On 640 games of the line player (160 per suit count, seeds 40001–40160) it
+never called lost any of the 88,725 positions of the 403 games that were won
+(looking at up to 100,000 positions of the small game each). In the 237 lost
+games it calls 1,783 positions lost, in 233 of the games; the first with a
+deal still to come in 44 games, never with two. The solver uses these: the
+long one on the position to be solved (a quick try before searching when a
+deal or none is left, 200,000 positions if no win is found), on positions
+right after the last deal, and on the deal points it would otherwise drop
+when one deal is left (it keeps the best four per class, which used to make
+every search with stock left incomplete); the plain one on every stock-empty
+position of the search. Of 29 lost four-suit games (seeds 30001–30048), the
+position where the line player gave up is proved lost in all 29 with at most
+41K work (before the certificates: 22 at 400K work, 25 at 20M), and the
+position after the last deal in 17, with 8 winnable and 4 unknown at 20M
+(before: 9, 8 and 12). At 2M work the position where the line player is about
+to make the last deal is proved lost in 20 of the 106 lost four-suit games
+(18 of 70 with three suits, 8 of 44 with two, 2 of 17 with one). Solving the
+640 games every fourth move at 500K work, no position of a won game got
+`UNSOLVABLE`. Nothing proves a position with two or more deals left lost,
+which is where most games are lost: the last position the solver still finds
+a win from (at 500K work) has two or more deals left in half the lost
+four-suit games.
 
-**The first-event certificate** is a counting argument for any number of
-deals left: before the first column is emptied or suit completed, every moved
-card lies on a card one rank higher, so the moved cards form at most one
-chain per column (and per card dealt and not moved), which bounds the moved
-cards of each rank by those and the anchors of the next. It is weak: it
-ignores suits, and fires only on positions that are stuck already.
+**`lost_for_all`** is the same game for a player who has not seen every
+card: it proves the position lost *whatever the unseen cards are*, so saying
+so gives nothing away. An unseen card is uncovered as a card of any rank the
+unseen ones have left, the small game choosing, and is then a unit of its
+own; when it comes to completing a suit it may be any unseen card of its
+rank. It proves nothing while cards in the stock are unseen. With every
+face-down card unseen and the stock empty, it calls 657 positions of the 237
+lost games lost (the certificate that sees them: 1,627), in 232 of the
+games, on average two moves before the line player gave up; none of the
+19,263 stock-empty positions of the won games; and with the face-down cards
+shuffled six times over, the solver won none of the 657. The web game uses
+this one.
 
-**The stuck-card certificate** (`stuck_certificate`) is the oldest: a
-greatest-fixpoint marking of cards that can never move (every remaining copy
-of the next rank up is buried, for every possible head of the chain the card
-could ride on) and never be removed in place; if every column holds such a
-card, no column can ever empty. It only recognises positions the search
-refutes in under a hundred work anyway.
+**The first-event certificate** is a counting argument: before the first
+column is emptied or suit completed, every moved card lies on a card one rank
+higher, so the moved cards form at most one chain per column (and per card
+dealt and not moved), which bounds the moved cards of each rank by those and
+the anchors of the next. It ignores suits and fires only on positions that
+are stuck already. **The stuck-card certificate** (`stuck_certificate`) is
+the oldest: a greatest-fixpoint marking of cards that can never move and
+never be removed in place; if every column holds one, no column can ever
+empty. It only recognises positions the search refutes in under a hundred
+work anyway. Neither is used.
 
 `--bin lab` has the experiments behind these numbers.
 

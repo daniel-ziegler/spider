@@ -1,10 +1,11 @@
 // Runs the browser's solver (static/winnable.js) on positions from play and
 // prints, one line per position:
 //   suits seed moves budget verdict work classes line
-// (- for no moves or no line). The repository root's `cargo test` solves
+// (- for no moves or no line), and a line for the proof that does not look at
+// the face-down cards (see report). The repository root's `cargo test` solves
 // the same positions with src/solver.rs and compares.
 import { Game, NUM_COLS, DEAL, encodeMoves } from '../static/game.js';
-import { solve } from '../static/winnable.js';
+import { solve, lostForAll } from '../static/winnable.js';
 
 let state = 2024;
 const rand = n => {
@@ -20,6 +21,10 @@ function report(g, budget) {
     if (!h.isWon()) throw new Error('a line does not win');
   }
   console.log([g.suits, g.seed, encodeMoves(g.moves()) || '-', budget, r.verdict, r.work, r.classes, encodeMoves(r.line) || '-'].join(' '));
+  // And whether it is lost whatever the face-down cards are (taking the
+  // stock as seen): a line "blind suits seed moves limit lost positions".
+  const b = lostForAll(g, g.faceDown, 20_000);
+  console.log(['blind', g.suits, g.seed, encodeMoves(g.moves()) || '-', 20_000, b.lost, b.nodes].join(' '));
 }
 
 for (let i = 0; i < 24; i++) {

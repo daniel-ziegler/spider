@@ -516,6 +516,50 @@ pub fn lost_certificate(g: &crate::game::Game, limit: u64) -> (bool, u64) {
 /// [`lost_certificate`] for these columns (bottom card first), `down[c]`
 /// cards of column `c` face down, and these deals to come.
 pub(crate) fn lost(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], deals: &[[u8; crate::game::DEAL_SIZE]], limit: u64) -> (bool, u64) {
+    lost_unseen(cols, down, deals, &Unseen::default(), limit)
+}
+
+/// The cards a player has not seen: the lowest `hidden[c]` cards of column
+/// `c` (what `cols[c]` has there is not looked at), which are some `cards[r]`
+/// cards of each rank r, with values among `values` (a bit set).
+#[derive(Default)]
+pub struct Unseen {
+    pub hidden: [usize; NUM_COLS],
+    pub cards: [u8; 13],
+    pub values: u64,
+}
+
+/// Whether a player who has seen only some of the cards can know the game
+/// lost: [`lost_certificate`] with the cards never seen (face down, and not
+/// turned up in any line since taken back) unknown, proving the position
+/// lost whatever they are. Nothing is proved with unseen cards in the stock.
+///
+/// In the small game an unseen card is uncovered as a card of any rank that
+/// the unseen cards have left, the small game choosing; it is then a unit of
+/// its own, on the next unseen card. It can be any card of that rank among
+/// the unseen ones when it comes to completing a suit.
+///
+/// `seen[c]` is how many of column `c`'s cards have never been seen;
+/// `stock_seen` whether every card of the stock has been.
+pub fn lost_for_all(g: &crate::game::Game, seen: [usize; NUM_COLS], stock_seen: bool, limit: u64) -> (bool, u64) {
+    if !g.stock.is_empty() && !stock_seen {
+        return (false, 0);
+    }
+    let mut cols: Vec<Vec<u8>> = g.columns.iter().map(|c| c.iter().map(|k| k.0).collect()).collect();
+    let deals = crate::solver::stock_deals(g);
+    let mut unseen = Unseen { hidden: seen, ..Default::default() };
+    for c in 0..NUM_COLS {
+        assert!(seen[c] <= g.face_down[c]);
+        for v in &mut cols[c][..seen[c]] {
+            unseen.cards[(*v % 13) as usize] += 1;
+            unseen.values |= 1 << *v;
+            *v = 255; // which card is where is not for the proof to know
+        }
+    }
+    lost_unseen(std::array::from_fn(|c| cols[c].as_slice()), g.face_down, &deals, &unseen, limit)
+}
+
+fn lost_unseen(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], deals: &[[u8; crate::game::DEAL_SIZE]], unseen: &Unseen, limit: u64) -> (bool, u64) {
     if deals.len() > MAX_DEALS {
         return (false, 0);
     }
@@ -528,6 +572,9 @@ pub(crate) fn lost(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], deals: &[[u
         in_place: [0; MAX_DEALS],
         pool: [[0; 13]; MAX_DEALS],
         under: None,
+        shown: [0; NUM_COLS],
+        unseen: unseen.cards,
+        unseen_moved: 0,
     };
     for c in 0..NUM_COLS {
         st.left[c] = cols[c].len() as u8;
@@ -539,7 +586,7 @@ pub(crate) fn lost(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], deals: &[[u
             None => st.ever = ANY_RANK,
         }
     }
-    let mut game = Dealing { cols, down, deals, seen: Default::default(), nodes: 0, limit };
+    let mut game = Dealing { cols, down, deals, hidden: unseen.hidden, values: unseen.values, seen: Default::default(), nodes: 0, limit };
     let event = game.event(st);
     (!event, game.nodes)
 }
@@ -569,12 +616,23 @@ struct Dealt {
     /// Per deal made and column, the cards (a bit set) its card may lie on
     /// (nothing before the first deal: this is most of a position).
     under: Option<std::rc::Rc<[[u64; NUM_COLS]; MAX_DEALS]>>,
+    /// Per column whose top card that has not moved was unseen, one more
+    /// than the rank it was uncovered as.
+    shown: [u8; NUM_COLS],
+    /// How many unseen cards of each rank are still to be uncovered.
+    unseen: [u8; 13],
+    /// The ranks of unseen cards that have been uncovered and have moved.
+    unseen_moved: u16,
 }
 
 struct Dealing<'a> {
     cols: [&'a [u8]; NUM_COLS],
     down: [usize; NUM_COLS],
     deals: &'a [[u8; crate::game::DEAL_SIZE]],
+    /// How many cards at the bottom of each column are unseen, and the
+    /// cards (a bit set) they may be.
+    hidden: [usize; NUM_COLS],
+    values: u64,
     seen: std::collections::HashSet<Dealt, std::hash::BuildHasherDefault<Mixer>>,
     nodes: u64,
     limit: u64,
@@ -603,6 +661,17 @@ fn of_rank(cards: u64, rank: usize) -> u64 {
     cards & (0x0000_0080_0400_2001u64 << rank)
 }
 
+/// What a unit lies on.
+#[derive(Clone, Copy, PartialEq)]
+enum Under {
+    /// Nothing: it is at the bottom of its column.
+    Nothing,
+    /// A card of this rank.
+    Rank(usize),
+    /// A card nobody has seen.
+    Unseen,
+}
+
 impl Dealing<'_> {
     fn unit(&self, c: usize, left: u8) -> usize {
         let col = self.cols[c];
@@ -611,6 +680,24 @@ impl Dealing<'_> {
             u -= 1;
         }
         u
+    }
+
+    /// The top unit of what has not moved of column `c` (which has some):
+    /// where it starts, the rank of its bottom card, and what it lies on.
+    fn top_unit(&self, st: &Dealt, c: usize) -> (usize, usize, Under) {
+        let left = st.left[c] as usize;
+        let (u, rank) = if left <= self.hidden[c] {
+            (left - 1, st.shown[c] as usize - 1) // an unseen card, uncovered
+        } else {
+            let u = self.unit(c, st.left[c]);
+            (u, (self.cols[c][u] % 13) as usize)
+        };
+        let under = match u {
+            0 => Under::Nothing,
+            _ if u <= self.hidden[c] => Under::Unseen,
+            _ => Under::Rank((self.cols[c][u - 1] % 13) as usize),
+        };
+        (u, rank, under)
     }
 
     /// The last deal whose card on column `c` is still in place.
@@ -623,20 +710,24 @@ impl Dealing<'_> {
     /// have been split.
     fn stem_tops(&self, st: &Dealt, c: usize) -> u64 {
         let (col, left) = (self.cols[c], st.left[c] as usize);
+        if left <= self.hidden[c] {
+            return of_rank(self.values, st.shown[c] as usize - 1);
+        }
         (self.unit(c, st.left[c])..left).filter(|&i| i == left - 1 || st.ever >> (col[i + 1] % 13 + 1) & 1 == 1).fold(0, |a, i| a | 1 << col[i])
     }
 
     /// The cards that may have moved: those of the columns above what has
     /// never moved, those of a top unit above a place where it could have
-    /// been split, and the dealt cards no longer in place.
+    /// been split, the dealt cards no longer in place, and whatever the
+    /// unseen cards that have moved may be.
     fn moved(&self, st: &Dealt) -> u64 {
         let mut cards = 0u64;
         for c in 0..NUM_COLS {
             let (col, left) = (self.cols[c], st.left[c] as usize);
-            for &v in &col[left..] {
+            for &v in &col[left.max(self.hidden[c])..] {
                 cards |= 1 << v;
             }
-            if left > 0 {
+            if left > self.hidden[c] {
                 let u = self.unit(c, st.left[c]);
                 if let Some(i) = (u + 1..left).find(|&i| st.ever >> (col[i] % 13 + 1) & 1 == 1) {
                     for &v in &col[i..left] {
@@ -650,6 +741,11 @@ impl Dealing<'_> {
                 if st.in_place[j] >> c & 1 == 0 {
                     cards |= 1 << self.deals[j][c];
                 }
+            }
+        }
+        for rank in 0..13 {
+            if st.unseen_moved >> rank & 1 == 1 {
+                cards |= of_rank(self.values, rank);
             }
         }
         cards
@@ -674,6 +770,37 @@ impl Dealing<'_> {
         false
     }
 
+    /// The positions after the top unit of column `c` has come off (`t`,
+    /// but for what it uncovers), onto `stack`: one if that is known, else
+    /// one for each rank an unseen card may have.
+    fn uncover(&self, mut t: Dealt, c: usize, u: usize, under: Under, stack: &mut Vec<Dealt>) {
+        if (t.left[c] as usize) <= self.hidden[c] {
+            t.unseen_moved |= 1 << (t.shown[c] - 1); // the unit was an unseen card
+        }
+        t.left[c] = u as u8;
+        t.shown[c] = 0;
+        match under {
+            Under::Nothing => stack.push(t),
+            Under::Rank(a) => {
+                t.tops[a] += 1;
+                t.ever |= 1 << a;
+                stack.push(t);
+            }
+            Under::Unseen => {
+                for rank in 0..13 {
+                    if t.unseen[rank] > 0 {
+                        let mut t = t.clone();
+                        t.unseen[rank] -= 1;
+                        t.shown[c] = rank as u8 + 1;
+                        t.tops[rank] += 1;
+                        t.ever |= 1 << rank;
+                        stack.push(t);
+                    }
+                }
+            }
+        }
+    }
+
     /// Look at one position: whether a suit might be completed in it, and
     /// if not and it is new, the positions one step on, onto `stack`.
     fn step(&mut self, st: &mut Dealt, stack: &mut Vec<Dealt>) -> bool {
@@ -684,9 +811,8 @@ impl Dealing<'_> {
                 if st.left[c] == 0 || self.dealt_on(st, c).is_some() {
                     continue;
                 }
-                let u = self.unit(c, st.left[c]);
-                let rank = (self.cols[c][u] % 13) as usize;
-                if u > 0 && st.tops[rank + 1] > 0 && (self.cols[c][u - 1] % 13) as usize == rank + 1 {
+                let (u, rank, under) = self.top_unit(st, c);
+                if st.tops[rank + 1] > 0 && under == Under::Rank(rank + 1) {
                     st.left[c] = u as u8;
                     free = true;
                 }
@@ -783,28 +909,19 @@ impl Dealing<'_> {
                 }
                 continue;
             }
-            let u = self.unit(c, st.left[c]);
-            let rank = (self.cols[c][u] % 13) as usize;
-            let under = if u > 0 { Some((self.cols[c][u - 1] % 13) as usize) } else { None };
+            let (u, rank, under) = self.top_unit(st, c);
             if st.tops[rank + 1] > 0 {
                 // The top unit goes onto a top.
                 let mut t = st.clone();
-                t.left[c] = u as u8;
                 t.tops[rank + 1] -= 1;
-                if let Some(a) = under {
-                    t.tops[a] += 1;
-                    t.ever |= 1 << a;
-                }
-                stack.push(t);
+                self.uncover(t, c, u, under, stack);
             }
-            if let Some(a) = under {
+            if under != Under::Nothing {
                 // The top unit goes into an empty column.
                 for &e in empty {
                     let mut t = st.clone();
-                    t.left[c] = u as u8;
-                    t.tops[a] += 1;
                     t.base[e] = rank as u8 + 1;
-                    stack.push(t);
+                    self.uncover(t, c, u, under, stack);
                 }
             }
         }
@@ -813,7 +930,7 @@ impl Dealing<'_> {
             // column, uncovering a card one rank higher.
             let mut loose = moved;
             for c in 0..NUM_COLS {
-                if st.left[c] > 0 && self.dealt_on(st, c).is_none() {
+                if st.left[c] as usize > self.hidden[c] && self.dealt_on(st, c).is_none() {
                     for &v in &self.cols[c][self.unit(c, st.left[c]) + 1..st.left[c] as usize] {
                         loose |= 1 << v;
                     }
@@ -898,7 +1015,15 @@ impl Dealing<'_> {
                     }
                     dealt |= 1 << v;
                 }
-                st.left[c] > 0 && self.cols[c][self.unit(c, st.left[c])] == king && all(self.cols[c][st.left[c] as usize - 1], moved | dealt)
+                let left = st.left[c] as usize;
+                if left == 0 {
+                    false
+                } else if left <= self.hidden[c] {
+                    // An unseen card uncovered as a king may be this one.
+                    st.shown[c] == 13 && self.values >> king & 1 == 1 && all(king, moved | dealt)
+                } else {
+                    self.cols[c][self.unit(c, st.left[c])] == king && all(self.cols[c][left - 1], moved | dealt)
+                }
             })
         })
     }
@@ -919,6 +1044,20 @@ mod top_rank_tests {
         // solver did not refute it in 20M work.
         let dealt = "0;5/34,8,43,5,9,10,48,21,7,19,18,17,42,41,40,13,25,11,10,0;1/42,7,32,31,4,3,2,1,0,30;5/5,18,39,50,34,51,29,28,27,26,37,45,47;1/43,40,41;0/12,29,28,15,14,13,36,35,49;0/49,48,45,6,1,39,25,8;0/16,15,14,26,12,24,6,16;2/24,9,36,22,21,33,19,47,33,32,31,27;1/46,38,11,23,22,4,3,2,17,30,20;3/35,44,44,51,46,50,38,37,23,20";
         assert!(top_rank_certificate(&Game::from_position_text(4, dealt).unwrap()));
+    }
+
+    #[test]
+    fn lost_whatever_is_face_down() {
+        // The first position above again: nothing that can still move ever
+        // turns a card up, so it is lost without looking at them. Not so a
+        // new deal.
+        let stuck = "0;3/36,42,36,45,8,33,32;5/15,20,22,50,21,51,26,47,18,43,3,2,1,0;5/46,38,7,48,18,27,26,37,41,40,30,29,28,27;0/25;4/10,0,44,7,14,44,24,23,45,5,4,3,2,1,39,40,39,17;3/32,35,11,9,34,31,30,29,28,14,13,19,5,4,12,46;0/23,48,8,51,50;2/34,22,20,19,31,17,16,41;3/13,21,37,33,6,47,43,12,49;4/42,15,35,6,9,38,24,10,25,11,49,16";
+        let g = Game::from_position_text(4, stuck).unwrap();
+        assert!(lost_for_all(&g, g.face_down, true, 100_000).0);
+        assert!(lost_certificate(&g, 100_000).0);
+        let g = Game::new(4, 1);
+        assert!(!lost_for_all(&g, g.face_down, false, 100_000).0);
+        assert!(!lost_for_all(&g, g.face_down, true, 100_000).0);
     }
 
     #[test]

@@ -21,19 +21,19 @@ a deal are shown only to players who have won it.
 
 ## Can it still be won?
 
-A setting (off by default) shows whether the game can still be won, and warns
-when a move has lost it. `static/winnable.js` is a port of the peeking solver
-(`../src/solver.rs`, default configuration, with the top-rank certificate of
-`../src/certify.rs`); it runs in a worker, with 200,000 work for a quick
-answer and then 2,000,000 (two or three seconds). It searches step for step
-as the Rust solver does: `cargo test` in the repository root solves some 290
-positions from play with both (`test/winnable.mjs`) and compares verdict,
-work and winning line. "Can't be won" is a proof. It comes late: before the
-last deal in about one lost game in six, on the last deal in about a third of
-lost four-suit games, and in most of the rest within a few moves of getting
-stuck. Before that a lost game shows "No win found", which a winnable
-position also gets now and then (one four-suit position in ten at 500,000
-work, one in fifty or more with fewer suits).
+A setting (off by default) marks the game, and says so when a move does it,
+once it can no longer be won *whatever the cards you have not seen are*. It
+goes only by what the player has seen (the cards face up, those turned up in
+some line since taken back, and the stock if every deal has been made in some
+line), so it gives nothing away; while cards in the stock are unseen it
+proves nothing. `static/winnable.js` has the proof, a port of `lost_for_all`
+in `../src/certify.rs` (see the main README), run in a worker; in play it
+mostly comes a move or two before one is stuck. The file is a port of the
+whole peeking solver (`../src/solver.rs`, default configuration), which is
+used only when nothing at all is unseen, and then only to say that there is
+no win. Both search step for step as the Rust does: `cargo test` in the
+repository root runs them on some 300 positions from play
+(`test/winnable.mjs`) and compares verdicts, work and winning lines.
 
 ## Daily challenges
 

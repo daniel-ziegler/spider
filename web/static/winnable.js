@@ -23,10 +23,9 @@
 //   the order of the columns and updates cheaply for a move. Keys are two
 //   32-bit halves.
 //
-// As a worker: gets {key, suits, seed, moves, budgets} and solves with each
-// budget in turn until one gives a verdict, replying {key, verdict, line,
-// last} after each.
-import { Game, DEAL, parseMoves, encodeMoves } from './game.js';
+// As a worker it answers one question: is the game lost whatever the cards
+// the player has not seen are (lost, with `unseen`; see the end)?
+import { Game, DEAL, parseMoves } from './game.js';
 
 const NC = 10, MAXC = 48;
 const MS = 512, LEN = 480, DOWN = 490, DONE = 500, DEALT = 501;
@@ -151,18 +150,43 @@ function heapPop(h, gt) {
 // cols: the columns, bottom card first; down: face-down cards per column;
 // deals: the deals to come. Returns whether the position is lost, with the
 // positions looked at (at most limit before giving up) in lostNodes.
-const C_LEFT = 0, C_BASE = 10, C_TOPS = 20, C_EVER = 34, C_DEALS = 36, C_PLACE = 37, C_POOL = 47, C_SIZE = 112;
+//
+// With `unseen` it proves the position lost whatever the cards a player has
+// not seen are (lost_for_all in certify.rs): {hidden, cards, values}, the
+// lowest hidden[c] cards of column c being unseen (what cols[c] has there is
+// not looked at), cards[r] of them of rank r in all, with values[v] set for
+// the cards v they may be. An unseen card is uncovered as a card of any rank
+// the unseen ones have left (SHOWN: its rank plus one, per column; UNSEEN:
+// how many of each rank are left), and is then a unit of its own; once it
+// has moved (UMOVED: such ranks) it may be any unseen card of its rank.
+const C_LEFT = 0, C_BASE = 10, C_TOPS = 20, C_EVER = 34, C_DEALS = 36, C_PLACE = 37, C_POOL = 47, C_SHOWN = 112, C_UNSEEN = 122, C_UMOVED = 135, C_SIZE = 137;
 const MAX_DEALS = 5, ANY_RANK = 0x3FFF;
 let lostNodes = 0;
 
-function lost(cols, down, deals, limit) {
+function lost(cols, down, deals, limit, unseen = null) {
   lostNodes = 0;
   if (deals.length > MAX_DEALS) return false;
+  const hidden = unseen ? unseen.hidden : new Array(NC).fill(0), values = unseen ? unseen.values : new Uint8Array(52);
   const unit = (c, left) => {
     const col = cols[c], d = down[c];
     let u = left - 1;
     while (u > d && col[u - 1] === col[u] + 1 && col[u] % 13 !== 12) u--;
     return u;
+  };
+  // The top unit of what has not moved of column c (which has some): where
+  // it starts (topU), the rank of its bottom card (topRank), and what it
+  // lies on (topUnder: a rank, -1 for nothing, -2 for an unseen card).
+  let topU = 0, topRank = 0, topUnder = 0;
+  const topUnit = (b, c) => {
+    const left = b[C_LEFT + c];
+    if (left <= hidden[c]) {
+      topU = left - 1;
+      topRank = b[C_SHOWN + c] - 1; // an unseen card, uncovered
+    } else {
+      topU = unit(c, left);
+      topRank = cols[c][topU] % 13;
+    }
+    topUnder = topU === 0 ? -1 : topU <= hidden[c] ? -2 : cols[c][topU - 1] % 13;
   };
   const ever = b => b[C_EVER] | b[C_EVER + 1] << 8;
   const setEver = (b, v) => { b[C_EVER] = v & 255; b[C_EVER + 1] = v >> 8; };
@@ -181,8 +205,8 @@ function lost(cols, down, deals, limit) {
     const set = new Uint8Array(52), ev = ever(b);
     for (let c = 0; c < NC; c++) {
       const col = cols[c], left = b[C_LEFT + c];
-      for (let i = left; i < col.length; i++) set[col[i]] = 1;
-      if (left > 0) {
+      for (let i = Math.max(left, hidden[c]); i < col.length; i++) set[col[i]] = 1;
+      if (left > hidden[c]) {
         for (let i = unit(c, left) + 1; i < left; i++) {
           if ((ev >> (col[i] % 13 + 1)) & 1) {
             for (let k = i; k < left; k++) set[col[k]] = 1;
@@ -192,6 +216,9 @@ function lost(cols, down, deals, limit) {
       }
     }
     for (let j = 0; j < b[C_DEALS]; j++) for (let c = 0; c < NC; c++) if (!inPlace(b, j, c)) set[deals[j][c]] = 1;
+    // And whatever the unseen cards that have moved may be.
+    const um = b[C_UMOVED] | b[C_UMOVED + 1] << 8;
+    if (um) for (let v = 0; v < 52; v++) if ((um >> (v % 13)) & 1) set[v] |= values[v];
     return set;
   };
   // Might some suit be completed: has one of its kings moved, or is it on
@@ -236,7 +263,11 @@ function lost(cols, down, deals, limit) {
           }
         }
         const left = b[C_LEFT + c];
-        if (clear && left > 0 && cols[c][unit(c, left)] === king && all(ace, cols[c][left - 1], have)) return true;
+        if (!clear || left === 0) continue;
+        if (left <= hidden[c]) {
+          // An unseen card uncovered as a king may be this one.
+          if (b[C_SHOWN + c] === 13 && values[king] && all(ace, king, have)) return true;
+        } else if (cols[c][unit(c, left)] === king && all(ace, cols[c][left - 1], have)) return true;
       }
     }
     return false;
@@ -252,9 +283,9 @@ function lost(cols, down, deals, limit) {
       free = false;
       for (let c = 0; c < NC; c++) {
         if (b[C_LEFT + c] === 0 || dealtOn(b, c) >= 0) continue;
-        const u = unit(c, b[C_LEFT + c]), rank = cols[c][u] % 13;
-        if (u > 0 && b[C_TOPS + rank + 1] > 0 && cols[c][u - 1] % 13 === rank + 1) {
-          b[C_LEFT + c] = u;
+        topUnit(b, c);
+        if (b[C_TOPS + topRank + 1] > 0 && topUnder === topRank + 1) {
+          b[C_LEFT + c] = topU;
           free = true;
         }
       }
@@ -284,6 +315,34 @@ function lost(cols, down, deals, limit) {
     const canDeal = !dealtAll && empty.length === 0;
     if (dealtAll) empty = empty.slice(0, 1); // empty columns are alike too
     const push = t => stack.push({ b: t, under: st.under, ukey: st.ukey });
+    // The positions after the top unit of column c has come off (t, but
+    // for what it uncovers): one if that is known, else one for each rank
+    // an unseen card may have.
+    const uncover = (t, c, u, under) => {
+      if (t[C_LEFT + c] <= hidden[c]) {
+        const um = t[C_UMOVED] | t[C_UMOVED + 1] << 8 | 1 << (t[C_SHOWN + c] - 1); // the unit was an unseen card
+        t[C_UMOVED] = um & 255;
+        t[C_UMOVED + 1] = um >> 8;
+      }
+      t[C_LEFT + c] = u;
+      t[C_SHOWN + c] = 0;
+      if (under === -1) push(t);
+      else if (under >= 0) {
+        t[C_TOPS + under]++;
+        setEver(t, ever(t) | 1 << under);
+        push(t);
+      } else {
+        for (let rank = 0; rank < 13; rank++) {
+          if (t[C_UNSEEN + rank] === 0) continue;
+          const t2 = t.slice();
+          t2[C_UNSEEN + rank]--;
+          t2[C_SHOWN + c] = rank + 1;
+          t2[C_TOPS + rank]++;
+          setEver(t2, ever(t2) | 1 << rank);
+          push(t2);
+        }
+      }
+    };
     for (let c = 0; c < NC; c++) {
       const j = dealtOn(b, c);
       if (j >= 0) {
@@ -329,26 +388,20 @@ function lost(cols, down, deals, limit) {
         }
         continue;
       }
-      const u = unit(c, left), rank = cols[c][u] % 13, under = u > 0 ? cols[c][u - 1] % 13 : -1;
+      topUnit(b, c);
+      const u = topU, rank = topRank, under = topUnder;
       if (b[C_TOPS + rank + 1] > 0) {
         // The top unit goes onto a top.
         const t = b.slice();
-        t[C_LEFT + c] = u;
         t[C_TOPS + rank + 1]--;
-        if (under >= 0) {
-          t[C_TOPS + under]++;
-          setEver(t, ever(t) | 1 << under);
-        }
-        push(t);
+        uncover(t, c, u, under);
       }
-      if (under >= 0) {
+      if (under !== -1) {
         // The top unit goes into an empty column.
         for (const e of empty) {
           const t = b.slice();
-          t[C_LEFT + c] = u;
-          t[C_TOPS + under]++;
           t[C_BASE + e] = rank + 1;
-          push(t);
+          uncover(t, c, u, under);
         }
       }
     }
@@ -358,7 +411,7 @@ function lost(cols, down, deals, limit) {
       const loose = moved.slice();
       for (let c = 0; c < NC; c++) {
         const left = b[C_LEFT + c];
-        if (left > 0 && dealtOn(b, c) < 0) for (let i = unit(c, left) + 1; i < left; i++) loose[cols[c][i]] = 1;
+        if (left > hidden[c] && dealtOn(b, c) < 0) for (let i = unit(c, left) + 1; i < left; i++) loose[cols[c][i]] = 1;
       }
       for (let rank = 0; rank < 12; rank++) {
         if (!ofRank(loose, rank)) continue;
@@ -376,7 +429,9 @@ function lost(cols, down, deals, limit) {
         // cards chained down from those.
         const top = new Uint8Array(52), k = dealtOn(b, c), col = cols[c], left = b[C_LEFT + c];
         if (k >= 0) top[deals[k][c]] = 1;
-        else if (left > 0) {
+        else if (left > 0 && left <= hidden[c]) {
+          for (let v = b[C_SHOWN + c] - 1; v < 52; v += 13) top[v] = values[v];
+        } else if (left > 0) {
           for (let i = unit(c, left); i < left; i++) if (i === left - 1 || (ev >> (col[i + 1] % 13 + 1)) & 1) top[col[i]] = 1;
         } else {
           const rank = b[C_BASE + c] - 1;
@@ -418,6 +473,7 @@ function lost(cols, down, deals, limit) {
     } else ev = ANY_RANK;
   }
   setEver(b, ev);
+  if (unseen) for (let r = 0; r < 13; r++) b[C_UNSEEN + r] = unseen.cards[r];
   stack.push({ b, under: [], ukey: '' });
   while (stack.length) {
     const st = stack.pop();
@@ -1209,8 +1265,7 @@ class Solver {
     this.free = [];
   }
 
-  // long: whether to give the certificate a long try if no win is found.
-  solve(long = true) {
+  solve() {
     if (this.root[0] === 8) return { verdict: SOLVABLE, work: 0, classes: 0, line: [] };
     // A certificate may prove the position lost outright: a quick try
     // first (not with two deals or more to come: it hardly ever does then),
@@ -1242,7 +1297,7 @@ class Solver {
         outcome = this.search();
       }
     }
-    if (long && (outcome === NOT_FOUND || outcome === UNKNOWN) && certify(ROOT_CERTIFY_LIMIT)) outcome = UNSOLVABLE;
+    if ((outcome === NOT_FOUND || outcome === UNKNOWN) && certify(ROOT_CERTIFY_LIMIT)) outcome = UNSOLVABLE;
     const verdict = outcome === NOT_FOUND ? UNKNOWN : outcome;
     return { verdict, work: this.work, classes: this.classes, line: verdict === SOLVABLE ? this.buildLine() : [] };
   }
@@ -1251,21 +1306,42 @@ class Solver {
 // Whether the game can be won from here: {verdict, work, classes, line}.
 // verdict is 'solvable' (line wins), 'unsolvable' (proven: no legal moves
 // win) or 'unknown' (the budget ran out).
-// Without `long` the certificate only gets a quick try (and the result may
-// differ from solver.rs's).
-export function solve(game, budget, long = true) {
-  return new Solver(game, budget).solve(long);
+// Whether the game is lost whatever the cards never seen are: `seen[c]` is
+// how many of column c's cards have never been seen (they are at its bottom),
+// and the stock must be empty or all seen. {lost, nodes}; see lost_for_all in
+// certify.rs, which this follows step for step.
+export function lostForAll(game, seen, limit) {
+  const unseen = { hidden: [...seen], cards: new Array(13).fill(0), values: new Uint8Array(52) };
+  const cols = game.columns.map((col, c) => col.map((v, i) => {
+    if (i >= seen[c]) return v;
+    unseen.cards[v % 13]++;
+    unseen.values[v] = 1;
+    return 255; // which card is where is not for the proof to know
+  }));
+  const deals = [];
+  for (let end = game.stock.length; end >= NC; end -= NC) deals.push(game.stock.slice(end - NC, end).reverse());
+  const dead = lost(cols, game.faceDown, deals, limit, unseen);
+  return { lost: dead, nodes: lostNodes };
+}
+
+export function solve(game, budget) {
+  return new Solver(game, budget).solve();
 }
 
 if (typeof WorkerGlobalScope !== 'undefined') {
-  onmessage = ({ data: { key, suits, seed, moves, budgets } }) => {
-    const game = new Game(suits, seed);
-    for (const mv of parseMoves(moves)) game.applyRaw(mv);
-    for (const [i, budget] of budgets.entries()) {
-      const last = i === budgets.length - 1;
-      const { verdict, line } = solve(game, budget, last);
-      postMessage({ key, verdict, line: encodeMoves(line), last });
-      if (verdict !== 'unknown') break;
+  // {key, columns, faceDown, stock, unseen, limit, open}: is the game lost
+  // whatever the unseen cards are (which the columns do not show)? With
+  // nothing unseen, `open` = {suits, seed, moves, budget} lets the solver
+  // look for a win too. Replies {key, lost}.
+  onmessage = ({ data: { key, columns, faceDown, stock, unseen, limit, open } }) => {
+    const deals = [];
+    for (let end = stock.length; end >= NC; end -= NC) deals.push(stock.slice(end - NC, end).reverse());
+    let dead = lost(columns, faceDown, deals, limit, unseen);
+    if (!dead && open) {
+      const game = new Game(open.suits, open.seed);
+      for (const mv of parseMoves(open.moves)) game.applyRaw(mv);
+      dead = solve(game, open.budget).verdict === UNSOLVABLE;
     }
+    postMessage({ key, lost: dead });
   };
 }

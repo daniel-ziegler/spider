@@ -173,10 +173,7 @@ button.primary:hover { background: #ffe27a; }
 #stock { cursor: pointer; }
 #fate { flex: none; align-self: center; padding: 3px 10px; border-radius: 999px; background: #0005; font-size: 13px; white-space: nowrap; cursor: default; }
 #fate::before { content: '●'; margin-right: 6px; }
-#fate.ok { color: #7bd88f; }
 #fate.lost { color: #ff7b72; font-weight: 600; }
-#fate.unsure { color: #ffc857; }
-#fate.checking { color: var(--ink-dim); }
 #msg { flex: 1; text-align: center; align-self: center; color: var(--ink-dim); min-height: 1.4em; transition: opacity 0.4s; }
 #msg.flash { color: var(--ink); }
 

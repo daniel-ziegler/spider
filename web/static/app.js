@@ -351,89 +351,90 @@ async function autoComplete() {
 
 // ---------------------------------------------------------------- can it still be won?
 
-// With the setting on, a worker (winnable.js) looks at the hidden cards and
-// the stock and says whether the position can still be won: first with a
-// small budget, for a quick answer, then with a large one. Verdicts are kept
-// per position, and carried over a move where that is certain: a lost
-// position stays lost, a move along a known winning line keeps it, and
-// taking back a move to a winnable position leaves one.
-const FATE_BUDGETS = [200_000, 2_000_000];
-const FATE_TEXT = {
-  solvable: ['ok', 'Can be won', 'There is a way to win from here'],
-  unsolvable: ['lost', 'Can\'t be won', 'No moves win from here: take some back, or start again'],
-  unknown: ['unsure', 'No win found', 'A long search found no way to win from here, but could not rule one out'],
-  checking: ['checking', 'Checking…', 'Working out whether this can still be won'],
-};
-const fates = new Map(); // position -> {verdict, line: the winning line if there is one}
-let fateWorker = null;
-let fateAt = null; // the position last looked at: {key, moves: how many moves led to it}
-let fateWaiting = null; // the position the worker is on
+// With the setting on, a worker (winnable.js) works out after every move
+// whether the game is lost whatever the cards you have not seen are, and a
+// mark and a message say so if it is. It is given only what you have seen:
+// the cards face up, those turned up in some line since taken back, and the
+// stock if every deal has been made at some point. So it gives nothing away;
+// it proves nothing while cards in the stock are unseen. With nothing unseen
+// at all it may also search for a win (and still only says when there is none).
+const LOST_LIMIT = 200_000, LOST_BUDGET = 2_000_000;
+const lostKnown = new Map(); // what has been seen, as a key -> whether the game is lost
+let lostWorker = null;
+let lostAt = null; // what was last looked at: {key, moves: how many moves led to it, slipped}
+let lostWaiting = null; // the key the worker is on
 
-const sameMove = (a, b) => !!a && !!b && (a.deal ? !!b.deal : !b.deal && a.from === b.from && a.to === b.to && a.count === b.count);
-
-function stopFate() {
-  fateWorker?.terminate();
-  fateWorker = fateWaiting = null;
+function stopLost() {
+  lostWorker?.terminate();
+  lostWorker = lostWaiting = null;
 }
 
-function showFate(verdict) {
-  const el = $('#fate'), [cls, text, title] = FATE_TEXT[verdict];
-  el.hidden = false;
-  el.className = cls;
-  el.textContent = text;
-  el.title = title;
+// The most deals made in any line played: that many deals' cards have been seen.
+function dealsSeen() {
+  let most = 0;
+  const stack = [[g.root, 0]];
+  while (stack.length) {
+    const [node, deals] = stack.pop();
+    if (deals > most) most = deals;
+    for (const n of node.children) stack.push([n, deals + (n.mv.deal ? 1 : 0)]);
+  }
+  return most;
 }
 
-function updateFate() {
+function updateLost() {
   if (finishing) return;
+  const el = $('#fate');
   if (!settings.fate || view !== 'game' || g.isWon()) {
-    stopFate();
-    fateAt = null;
-    $('#fate').hidden = true;
+    stopLost();
+    lostAt = null;
+    el.hidden = true;
     return;
   }
-  const key = `${g.suits}/${g.seed}/${g.stock.length}/${g.positionText()}`, moves = g.history.length;
-  if (fateAt?.key !== key) {
-    const before = fateAt && fates.get(fateAt.key), step = fateAt ? moves - fateAt.moves : 0;
-    if (!fates.has(key) && before) {
-      if (step === 1 && before.verdict === 'unsolvable') fates.set(key, before);
-      else if (step === 1 && before.line && sameMove(before.line[0], g.history.at(-1).mv)) fates.set(key, { verdict: 'solvable', line: before.line.slice(1) });
-      else if (step === -1 && before.line && g.canRedo()) fates.set(key, { verdict: 'solvable', line: [g.line.at(-1).children.at(-1).mv, ...before.line] }); // redo plays the move taken back
-    }
-    // Whether one move led here from a position that could be won: then finding this one lost gets a warning.
-    fateAt = { key, moves, slipped: step === 1 && before?.verdict === 'solvable' };
-    if (fateAt.slipped && fates.get(key)?.verdict === 'unsolvable') warnLost();
+  const dealt = g.history.filter(r => r.mv.deal).length;
+  const stockSeen = dealsSeen() >= dealt + g.dealsRemaining();
+  const key = `${g.suits}/${g.seed}/${g.stock.length}/${g.positionText()}/${g.seen.join(',')}/${stockSeen}`, moves = g.history.length;
+  if (lostAt?.key !== key) {
+    const before = lostAt && lostKnown.get(lostAt.key), step = lostAt ? moves - lostAt.moves : 0;
+    if (step === 1 && before === true) lostKnown.set(key, true); // a lost game stays lost
+    // Whether one move led here from a position not known to be lost: then finding this one lost gets a message.
+    lostAt = { key, moves, slipped: step === 1 && before !== true };
+    if (lostAt.slipped && lostKnown.get(key)) warnLost();
   }
-  const known = fates.get(key);
-  if (known) {
-    if (fateWaiting !== key) stopFate();
-    return showFate(known.verdict);
+  el.hidden = lostKnown.get(key) !== true;
+  if (lostKnown.has(key)) {
+    if (lostWaiting !== key) stopLost();
+    return;
   }
-  showFate('checking');
-  if (fateWaiting === key) return;
-  stopFate();
-  fateWaiting = key;
-  const worker = fateWorker = new Worker('/winnable.js', { type: 'module' });
+  if (lostWaiting === key) return;
+  stopLost();
+  if (g.stock.length && !stockSeen) return lostKnown.set(key, false); // nothing can be proved
+  lostWaiting = key;
+  // What has been seen: the cards of each column from seen[c] up, and how
+  // many of each rank the others are and which cards they may be.
+  const unseen = { hidden: [...g.seen], cards: new Array(13).fill(0), values: new Uint8Array(52) };
+  const columns = g.columns.map((col, c) => col.map((v, i) => {
+    if (i >= g.seen[c]) return v;
+    unseen.cards[rankOf(v)]++;
+    unseen.values[v] = 1;
+    return 255;
+  }));
+  const open = unseen.hidden.every(n => n === 0) && { suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), budget: LOST_BUDGET };
+  const worker = lostWorker = new Worker('/winnable.js', { type: 'module' });
   worker.onmessage = ({ data }) => {
-    if (fateWorker !== worker || data.key !== key) return;
-    if (data.verdict === 'unknown' && !data.last) return; // the larger budget is still to come
-    stopFate();
-    if (fates.size > 2000) fates.clear();
-    fates.set(key, { verdict: data.verdict, line: data.verdict === 'solvable' ? parseMoves(data.line) : null });
-    if (fateAt?.key !== key) return;
-    showFate(data.verdict);
-    if (data.verdict === 'unsolvable' && fateAt.slipped) warnLost();
+    if (lostWorker !== worker || data.key !== key) return;
+    stopLost();
+    if (lostKnown.size > 5000) lostKnown.clear();
+    lostKnown.set(key, data.lost);
+    if (lostAt?.key !== key || !data.lost) return;
+    el.hidden = false;
+    if (lostAt.slipped) warnLost();
   };
-  worker.onerror = () => {
-    if (fateWorker !== worker) return;
-    stopFate();
-    $('#fate').hidden = true;
-  };
-  worker.postMessage({ key, suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), budgets: FATE_BUDGETS });
+  worker.onerror = () => { if (lostWorker === worker) stopLost(); };
+  worker.postMessage({ key, columns, faceDown: g.faceDown, stock: g.stock, unseen, limit: LOST_LIMIT, open });
 }
 
 function warnLost() {
-  flash('This game can no longer be won. Undo to go back to where it could.', 7000);
+  flash('This game can no longer be won, whatever the cards you have not seen are. Undo to go back.', 8000);
 }
 
 // ---------------------------------------------------------------- winning
@@ -643,7 +644,7 @@ function archiveHtml() {
 }
 
 function renderPage() {
-  updateFate();
+  updateLost();
   $('#info').innerHTML = '';
   page.innerHTML = view === 'archive' ? archiveHtml() : homeHtml();
 }
@@ -734,7 +735,7 @@ function settingsDialog() {
     <div class="choices">${choice('mine', 'Four colours', 'mine')}${choice('traditional', 'Traditional', 'trad')}</div>
     <label>Mark where a stack breaks (a card on one that is not one rank higher)</label>
     <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>
-    <label>Show whether the game can still be won (this peeks at the hidden cards for you)</label>
+    <label>Say when the game can no longer be won (going only by the cards you have seen)</label>
     <div class="choices"><button type="button" data-fate="" aria-pressed="${!settings.fate}">Off</button><button type="button" data-fate="1" aria-pressed="${!!settings.fate}">On</button></div>
     <div class="row"><button class="primary" data-close>Done</button></div>`;
   openDialog(html(), e => {
@@ -772,8 +773,8 @@ function helpDialog() {
     and so is taking the same move back again after a redo.
     A card you have seen and turned back over stays half shown.
     Wins record your moves and undos.</p>
-    <p>In Settings you can have the game say whether it <b>can still be won</b>. It looks at the hidden cards to work that out,
-    and warns you when a move has lost the game. "No win found" means a long search found no way to win but could not rule one out.</p>
+    <p>In Settings you can have the game say when it <b>can no longer be won</b>. It goes only by the cards you have seen,
+    and says so only when the game is lost whatever the others are, so it gives nothing away (and often says nothing for a while after a game is lost).</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     <div class="row"><button class="primary" data-close>Got it</button></div>`);
 }
@@ -926,7 +927,7 @@ function render() {
   $('#b-undo').disabled = !g.canUndo() || finishing;
   $('#b-redo').disabled = !g.canRedo() || finishing;
   updateFinish();
-  updateFate();
+  updateLost();
 }
 
 let msgTimer;
