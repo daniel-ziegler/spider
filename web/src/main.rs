@@ -34,17 +34,15 @@ const SESSION_COOKIE: &str = "session";
 /// The most a saved game may take (the request body limit is 2 MB).
 const MAX_GAME_STATE: usize = 1_000_000;
 
-/// Daily challenges `(date, suits, seed)` in date order, from challenges.txt
-/// (made by tools/dailies). Days start at midnight Pacific time.
-static CHALLENGES: LazyLock<Vec<(String, u8, u64)>> = LazyLock::new(|| {
-    let mut v: Vec<(String, u8, u64)> = include_str!("../challenges.txt")
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .map(|l| {
-            let f: Vec<&str> = l.split_whitespace().collect();
-            (f[0].to_string(), f[1].parse().unwrap(), f[2].parse().unwrap())
-        })
-        .collect();
+/// Daily challenges `(date, game, suits, seed)` in date order. Spider's are in
+/// challenges.txt (`date suits seed`, made by tools/dailies), four a day;
+/// FreeCell's in freecell-challenges.txt (`date deal`, made by
+/// tools/freecell/dailies.mjs), one a day. Days start at midnight Pacific time.
+static CHALLENGES: LazyLock<Vec<(String, &'static str, u8, u64)>> = LazyLock::new(|| {
+    let lines = |text: &'static str| text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(|l| l.split_whitespace().collect::<Vec<_>>());
+    let spider = lines(include_str!("../challenges.txt")).map(|f| (f[0].to_string(), "spider", f[1].parse().unwrap(), f[2].parse().unwrap()));
+    let freecell = lines(include_str!("../freecell-challenges.txt")).map(|f| (f[0].to_string(), "freecell", 4, f[1].parse().unwrap()));
+    let mut v: Vec<_> = spider.chain(freecell).collect();
     v.sort();
     v
 });
@@ -431,7 +429,7 @@ async fn get_game(State(app): AppState, headers: HeaderMap, Path((game, suits, s
     Ok(Json(json!({ "state": state })))
 }
 
-/// Challenges (all Spider deals) up to today, newest day first, with how many players have won
+/// Challenges up to today, newest day first, with how many players have won
 /// each and (when logged in) the player's own best win of it.
 async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = current_user(&app, &headers)?;
@@ -439,21 +437,22 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     let db = app.db.lock().unwrap();
     // Who has won each deal, first winner first. Logged-in friends see the
     // names; everyone sees how many.
-    let mut solvers: HashMap<(u8, i64), Vec<String>> = HashMap::new();
+    type Deal = (String, u8, i64);
+    let mut solvers: HashMap<Deal, Vec<String>> = HashMap::new();
     let mut stmt = db.prepare(
-        "SELECT w.suits, w.seed, u.username FROM wins w JOIN users u ON u.id = w.user_id WHERE w.game = 'spider'
-         GROUP BY w.suits, w.seed, w.user_id ORDER BY MIN(w.created_at), MIN(w.id)",
+        "SELECT w.game, w.suits, w.seed, u.username FROM wins w JOIN users u ON u.id = w.user_id
+         GROUP BY w.game, w.suits, w.seed, w.user_id ORDER BY MIN(w.created_at), MIN(w.id)",
     )?;
-    for row in stmt.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))? {
+    for row in stmt.query_map([], |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?), r.get(3)?)))? {
         let (key, name) = row?;
         solvers.entry(key).or_default().push(name);
     }
     // Worst first, so the best win is inserted last.
-    let mut mine: HashMap<(u8, i64), Value> = HashMap::new();
+    let mut mine: HashMap<Deal, Value> = HashMap::new();
     if let Some(user) = &user {
-        let mut stmt = db.prepare("SELECT suits, seed, real_undos, moves FROM wins WHERE user_id = ?1 AND game = 'spider' ORDER BY real_undos DESC, moves DESC")?;
+        let mut stmt = db.prepare("SELECT game, suits, seed, real_undos, moves FROM wins WHERE user_id = ?1 ORDER BY real_undos DESC, moves DESC")?;
         for row in stmt.query_map([user.id], |r| {
-            Ok(((r.get(0)?, r.get(1)?), json!({ "real_undos": r.get::<_, i64>(2)?, "moves": r.get::<_, i64>(3)? })))
+            Ok(((r.get(0)?, r.get(1)?, r.get(2)?), json!({ "real_undos": r.get::<_, i64>(3)?, "moves": r.get::<_, i64>(4)? })))
         })? {
             let (key, best) = row?;
             mine.insert(key, best);
@@ -461,18 +460,18 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     }
     // The deals the player has played to where they could no longer be won
     // (the client says so in the game it saves).
-    let mut lost: HashSet<(u8, i64)> = HashSet::new();
+    let mut lost: HashSet<Deal> = HashSet::new();
     if let Some(user) = &user {
-        let mut stmt = db.prepare("SELECT suits, seed FROM games WHERE user_id = ?1 AND game = 'spider' AND json_extract(state, '$.lost')")?;
-        for row in stmt.query_map([user.id], |r| Ok((r.get(0)?, r.get(1)?)))? {
+        let mut stmt = db.prepare("SELECT game, suits, seed FROM games WHERE user_id = ?1 AND json_extract(state, '$.lost')")?;
+        for row in stmt.query_map([user.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
             lost.insert(row?);
         }
     }
     let mut days: Vec<Value> = Vec::new();
-    for (date, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
-        let key = (*suits, *seed as i64);
+    for (date, game, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
+        let key = (game.to_string(), *suits, *seed as i64);
         let names = solvers.get(&key).map(Vec::as_slice).unwrap_or_default();
-        let mut challenge = json!({ "game": "spider", "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
+        let mut challenge = json!({ "game": game, "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
         if user.is_some() {
             challenge["solvers"] = json!(names);
             challenge["lost"] = json!(lost.contains(&key));
@@ -642,11 +641,13 @@ mod tests {
     fn challenges_are_complete() {
         let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
         for day in &days {
-            let suits: Vec<u8> = CHALLENGES.iter().filter(|c| c.0 == *day).map(|c| c.1).collect();
-            assert_eq!(suits, [1, 2, 3, 4], "{day}");
+            let deals: Vec<(&str, u8)> = CHALLENGES.iter().filter(|c| c.0 == *day).map(|c| (c.1, c.2)).collect();
+            assert_eq!(deals, [("freecell", 4), ("spider", 1), ("spider", 2), ("spider", 3), ("spider", 4)], "{day}");
         }
-        assert!(CHALLENGES.iter().all(|c| c.2 <= MAX_SEED));
-        assert!(days.contains(today().as_str()), "challenges.txt has run out: run tools/dailies");
+        assert!(CHALLENGES.iter().all(|c| is_deal(c.1, c.2, c.3)));
+        assert!(days.contains(today().as_str()), "the challenges have run out: run tools/dailies and tools/freecell/dailies.mjs");
+        let freecell: HashSet<u64> = CHALLENGES.iter().filter(|c| c.1 == "freecell").map(|c| c.3).collect();
+        assert_eq!(freecell.len(), days.len(), "a FreeCell deal is a challenge twice");
     }
 
     #[test]

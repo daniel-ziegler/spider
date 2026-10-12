@@ -4,7 +4,7 @@ WORKDIR /app
 COPY src/game.rs src/game.rs
 COPY web/Cargo.toml web/Cargo.lock web/
 COPY web/src web/src
-COPY web/challenges.txt web/
+COPY web/challenges.txt web/freecell-challenges.txt web/
 COPY web/test web/test
 RUN cd web && cargo build --release
 

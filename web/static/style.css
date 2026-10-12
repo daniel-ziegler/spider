@@ -232,6 +232,7 @@ dialog .dim { color: var(--ink-dim); }
 dialog.wide { max-width: min(640px, calc(100vw - 32px)); }
 dialog hr { border: none; border-top: 1px solid #ffffff1c; margin: 18px 0 14px; }
 .archive { display: grid; grid-template-columns: auto repeat(4, 1fr); gap: 6px 8px; align-items: center; max-height: 60vh; overflow-y: auto; padding-right: 4px; }
+.archive.one { grid-template-columns: auto minmax(0, 240px); justify-content: start; gap: 6px 16px; }
 .archive .day { color: var(--ink-dim); font-size: 14px; }
 .archive .head { color: var(--ink-dim); font-size: 13px; position: sticky; top: 0; background: var(--panel); padding: 2px 0; z-index: 1; }
 button.challenge { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: 6px 10px; text-align: left; line-height: 1.3; }

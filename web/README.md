@@ -40,10 +40,10 @@ saved game (`lost`), and its daily challenge shows red until it is won.
 
 ## FreeCell
 
-The home page switches between Spider and FreeCell. FreeCell has free play
-only (no daily challenges yet): a random deal or a deal number, numbered as
-in Microsoft FreeCell. Its home page is `/freecell` and a deal
-`/freecell/DEAL`. A deal is
+The home page switches between Spider and FreeCell. FreeCell has a daily
+challenge and free play: a random deal or a deal number, numbered as
+in Microsoft FreeCell. Its home page is `/freecell`, its past challenges
+`/freecell/archive` and a deal `/freecell/DEAL`. A deal is
 `(game, suits, seed)` in the API and the database: `spider` with 1-4 suits,
 or `freecell`, always with 4. (A database from before FreeCell is migrated
 when the server starts.)
@@ -68,12 +68,20 @@ when the server starts.)
   that is left.
 * Cards are red and black whatever the colour setting, since the colours
   are what the game goes by.
-* For daily challenges to come, `tools/freecell/dumb.mjs` is a dumb player
+* `tools/freecell/dumb.mjs` is a dumb player
   that tells easy deals from hard ones: it plays the move whose position
   scores best, with a little noise, and never takes one back. Of deals
   1-200 it never wins 45% in 20 games and wins 17% of all its games.
   `node tools/freecell/pick.mjs FROM TO [MAX] [GAMES]` lists the winnable
   deals it wins at most MAX (0.2) of the time.
+* The daily challenges, one a day, are in `freecell-challenges.txt`
+  (`date deal`), built into the server. `tools/freecell/dailies.mjs` picks
+  them: for each date, the first candidate (deals 1-1,000,000, from a hash
+  of the date) that can be won and that the dumb player wins at most 10% of
+  40 games of, which drops about a third of the deals. Like Spider's they
+  were backfilled from 2026-09-03 and run through 2027-12-31; dates in the
+  file are kept, so to extend it:
+  `node tools/freecell/dailies.mjs 2028-01-01 2028-12-31`.
 
 ## Daily challenges
 

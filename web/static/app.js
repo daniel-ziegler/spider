@@ -240,10 +240,9 @@ function setView(v) {
   document.body.dataset.view = v;
 }
 
-// The home page or the archive.
+// The home page or the archive, of the game the site is dressed for.
 function showPage(name, push = false) {
-  if (name === 'archive') setHomeGame('spider'); // the challenges are Spider's
-  setUrl(name === 'archive' ? '/archive' : homeGame === 'freecell' ? '/freecell' : '/', push);
+  setUrl((homeGame === 'freecell' ? '/freecell' : '') + (name === 'archive' ? '/archive' : '') || '/', push);
   setView(name);
   sync();
   sel = hint = null;
@@ -256,10 +255,10 @@ function showPage(name, push = false) {
 function route() {
   const m = /^\/play\/([1-4])\/(\d{1,16})\/?$/.exec(location.pathname);
   if (m && +m[2] <= MAX_SEED) return load(spiderDeal(+m[1], +m[2]));
-  const f = /^\/freecell(?:\/(\d{1,10}))?\/?$/.exec(location.pathname);
-  if (f?.[1] && +f[1] <= MAX_DEAL) return load(freecellDeal(+f[1]));
+  const f = /^\/freecell(?:\/(\d{1,10}|archive))?\/?$/.exec(location.pathname);
+  if (f && +f[1] <= MAX_DEAL) return load(freecellDeal(+f[1]));
   setHomeGame(f ? 'freecell' : 'spider');
-  showPage(location.pathname === '/archive' ? 'archive' : 'home');
+  showPage(location.pathname === '/archive' || f?.[1] === 'archive' ? 'archive' : 'home');
 }
 
 // ---------------------------------------------------------------- actions
@@ -694,10 +693,14 @@ function challengeTile(c) {
     : wasLost(c) ? 'Lost' : started(c) ? 'In progress' : 'Play';
   const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
+  const name = c.game === 'freecell' ? `Deal ${c.seed}` : suitsLabel(c.suits);
   return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${keyOf(c)}">
-    <span class="pips">${pips}</span><span class="name">${suitsLabel(c.suits)}</span>
+    <span class="pips">${pips}</span><span class="name">${name}</span>
     <small class="status">${status}</small><small class="who">${solversText(c)}</small></button>`;
 }
+
+// The day's challenges of the game the site is dressed for.
+const challengesOf = day => day.challenges.filter(c => c.game === homeGame);
 
 // A challenge in the archive, whose columns are labelled with the suits.
 function challengeCell(c) {
@@ -741,7 +744,7 @@ function spiderHtml(resume) {
   return `<section class="box">
       <h2>Today's challenges</h2>
       <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
-      ${today ? `<div class="tiles">${today.challenges.map(challengeTile).join('')}</div>` : ''}
+      ${today ? `<div class="tiles">${challengesOf(today).map(challengeTile).join('')}</div>` : ''}
       <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
     </section>
     <section class="box">
@@ -760,11 +763,18 @@ function spiderHtml(resume) {
 }
 
 function freecellHtml(resume) {
+  const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
   return `<section class="box">
-      <h2>FreeCell</h2>
+      <h2>Today's challenge</h2>
+      <p class="dim">${today ? `${longDate(today.date)} · winnable, and not an easy one` : dailies ? 'No challenge today.' : 'Loading…'}</p>
+      ${today ? `<div class="tiles">${challengesOf(today).map(challengeTile).join('')}</div>` : ''}
+      <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
+    </section>
+    <section class="box">
+      <h2>Free play</h2>
       <p class="dim">Every card is face up, so every undo counts. Deals are numbered as in Microsoft FreeCell.</p>
       ${resume}
-      <div class="row start"><button type="button"${resume ? '' : ' class="primary"'} data-random="freecell">Random deal</button></div>
+      <div class="row start"><button type="button" data-random="freecell">Random deal</button></div>
       <form class="deal">
         <label for="seed">Or a deal number</label>
         <div class="choices"><input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 617">
@@ -775,13 +785,14 @@ function freecellHtml(resume) {
 }
 
 function archiveHtml() {
+  const freecell = homeGame === 'freecell';
   return `<div class="pagewrap">
     <div class="row start"><button type="button" data-go="home">← Home</button></div>
     <section class="box">
       <h2>Daily challenges</h2>
-      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, red that you played it to where it could no longer be won and have not won it since. Free undos don't count.</p>
-      ${dailies ? `<div class="archive"><span></span>${SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
-        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
+      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, red that you played it to where it could no longer be won and have not won it since.${freecell ? '' : ' Free undos don\'t count.'}</p>
+      ${dailies ? `<div class="archive${freecell ? ' one' : ''}"><span></span>${freecell ? '<div class="head">FreeCell</div>' : SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
+        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${challengesOf(d).map(challengeCell).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
     </section>
   </div>`;
@@ -909,7 +920,7 @@ function freecellHelp() {
     ['<kbd>a</kbd>', 'auto-complete, once only sending cards to the foundations is left'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
     ['<kbd>R</kbd>', 'restart this deal'],
-    ['<kbd>n</kbd>', 'home: new games'],
+    ['<kbd>n</kbd>', 'home: the daily challenge and new games'],
     ['<kbd>?</kbd>', 'this help'],
   ];
   openDialog(`<h2>How to play FreeCell</h2>
