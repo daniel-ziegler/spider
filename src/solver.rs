@@ -44,7 +44,7 @@
 //! of permuting columns through an empty column to change which column a
 //! dealt card lands on.
 
-use crate::certify::top_rank_dead;
+use crate::certify::{lost, top_rank_dead};
 use crate::game::{Card, Game, Move, DEAL_SIZE, NUM_COLS};
 use std::collections::{BinaryHeap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -935,6 +935,8 @@ struct Stage {
 /// Positions of its small game the top-rank certificate may look at for one
 /// position of the search.
 const CERTIFY_LIMIT: u64 = 10_000;
+/// And for the position to be solved.
+const ROOT_CERTIFY_LIMIT: u64 = 200_000;
 
 /// Pending entries kept when a stage is suspended (the rest are dropped,
 /// which makes the search incomplete).
@@ -1013,14 +1015,25 @@ impl Solver {
     pub fn solve(&mut self, g: &Game) -> SolveResult {
         let start = Instant::now();
         let root = State::from_game(g);
+        // A certificate may prove the position lost outright.
+        let mut certified = false;
+        // (Not with two deals or more to come: it hardly ever does then.)
+        if self.certify && root.completed < 8 && self.deals.len() <= 1 {
+            let limit = ROOT_CERTIFY_LIMIT;
+            let (dead, nodes) = lost(std::array::from_fn(|c| &root.cols[c][..root.len[c] as usize]), root.down.map(|d| d as usize), &self.deals, limit);
+            self.work += nodes.min(limit);
+            certified = dead;
+        }
         let mut outcome = if root.completed == 8 {
             Outcome::Solvable
+        } else if certified {
+            Outcome::Unsolvable
         } else {
             let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
             self.search(root_id)
         };
         let mut proof_pass = false;
-        if outcome == Outcome::Unsolvable && root.completed < 8 {
+        if outcome == Outcome::Unsolvable && root.completed < 8 && !certified {
             // No win without splitting same-suit runs. Pass 2 allows splits
             // as class exits, which finds a win that needs one quickly
             // (typically well under 100K work), but is capped because it
@@ -1179,8 +1192,11 @@ impl Solver {
             if end && self.certify {
                 // A position the top-rank certificate proves lost is not
                 // searched (its work is the certificate's).
-                let (dead, nodes) = top_rank_dead(std::array::from_fn(|c| &s.cols[c][..s.len[c] as usize]), s.down.map(|d| d as usize), CERTIFY_LIMIT);
-                self.work += nodes;
+                // (The position after the last deal gets the certificate
+                // that goes on past emptying a column, which costs more.)
+                let (cols, down) = (std::array::from_fn(|c| &s.cols[c][..s.len[c] as usize]), s.down.map(|d| d as usize));
+                let (dead, nodes) = if p.seq == 0 { lost(cols, down, &[], CERTIFY_LIMIT) } else { top_rank_dead(cols, down, CERTIFY_LIMIT) };
+                self.work += nodes.min(CERTIFY_LIMIT);
                 if dead {
                     self.found.insert(s.key());
                     continue;
@@ -1243,7 +1259,7 @@ impl Solver {
                     }
                     let mut t = cls.members[mi as usize].state.clone();
                     t.apply(Move::Deal, &self.deals);
-                    let (dead, nodes) = top_rank_dead(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), CERTIFY_LIMIT);
+                    let (dead, nodes) = lost(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), &[], CERTIFY_LIMIT);
                     self.work += 1 + nodes;
                     if !dead {
                         self.incomplete = true;
@@ -1459,40 +1475,6 @@ pub(crate) fn stock_deals(g: &Game) -> Vec<[u8; DEAL_SIZE]> {
         deals.push(d);
     }
     deals
-}
-
-/// An experiment, for a position with one deal left: the positions reachable
-/// without dealing and without splitting runs, up to `cap` of them, and for
-/// each that can deal, whether the top-rank certificate proves the position
-/// after the deal lost. Returns (deal points, those proved lost, whether the
-/// reachable positions were exhausted).
-pub fn deal_points_lost(g: &Game, cap: usize) -> (usize, usize, bool) {
-    let deals = stock_deals(g);
-    assert_eq!(deals.len(), 1, "one deal left");
-    let mut found = HashSet::default();
-    let mut cls = Class::default();
-    let mut queue = vec![State::from_game(g)];
-    let (mut points, mut lost, mut seen) = (0, 0, 0);
-    while let Some(s) = queue.pop() {
-        if found.contains(&s.key()) {
-            continue;
-        }
-        if seen > cap {
-            return (points, lost, false);
-        }
-        enumerate_class_into(&s, &deals, CLASS_CAP, false, false, None, &mut found, &mut cls);
-        seen += cls.members.len();
-        for ex in &cls.exits {
-            if ex.mv == Move::Deal {
-                points += 1;
-                let t = &ex.result;
-                lost += top_rank_dead(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), CERTIFY_LIMIT).0 as usize;
-            } else {
-                queue.push(ex.result.clone());
-            }
-        }
-    }
-    (points, lost, true)
 }
 
 /// Static evaluation of a game position with the given weights.
@@ -1733,6 +1715,5 @@ mod replay_tests {
         }
         let r = Solver::new(&g, 100_000).solve(&g);
         assert_eq!(r.verdict, Verdict::Unsolvable);
-        assert!(r.proof_pass);
     }
 }

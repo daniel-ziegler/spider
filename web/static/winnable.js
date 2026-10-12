@@ -7,9 +7,10 @@
 // reversible moves form a class, enumerated breadth-first; the search goes
 // depth-first over the irreversible moves out of classes, best evaluation
 // first, in resumable slices per stock stage. Runs that could split are only
-// split in later passes, which run when the first finds no win. Once the
-// stock is empty, a position that the top-rank certificate (certify.rs)
-// proves lost is not searched.
+// split in later passes, which run when the first finds no win. Certificates
+// (certify.rs) prove some positions lost without a search: the position to
+// be solved with a deal left or none, and positions of the search once the
+// stock is empty.
 //
 // Only the layout differs from solver.rs, to keep the work in typed arrays:
 // * A position being worked on is "expanded": MS bytes, each column in its
@@ -35,7 +36,7 @@ const PACKED = 128; // completed, deals done, 10 lengths, 10 face-down counts, u
 // The default configuration of solver.rs.
 const W_COMPLETED = 1000, W_HIDDEN = 12, W_SAME = 4, W_DIFF = 1, W_WRONG = 2, W_EMPTY = 30, W_KING = 3;
 const CLASS_CAP = 20000, SUSPEND_KEEP = 20000, STAGE_CAP_MIN = 20000;
-const CERTIFY_LIMIT = 10000;
+const CERTIFY_LIMIT = 10000, ROOT_CERTIFY_LIMIT = 200000;
 const DEALS_PER_CLASS = 4, DEALS_PER_STAGE = 8, RESUME_TAX = 30, SUB_ALLOC = 8, SUB_GROWTH = 2, DEPTH_W = 100000;
 
 const SOLVABLE = 'solvable', UNSOLVABLE = 'unsolvable', NOT_FOUND = 'not found', UNKNOWN = 'unknown';
@@ -133,6 +134,286 @@ function heapPop(h, gt) {
     h[i] = x;
   }
   return top;
+}
+
+// ---------------------------------------------------------------- the certificate with deals and empty columns
+
+// Is this position proved lost by the certificate of certify.rs
+// (lost_certificate, which explains it)? It is the top-rank certificate (see
+// topRankDead below) carried across deals and past the emptying of columns:
+// a search of a small game that every line of real play maps onto up to the
+// first suit completed. A position of it is, per column, how many cards have
+// never moved (LEFT) or, with none, the rank at its bottom plus one (BASE);
+// the ranks of the tops (TOPS) and those they have ever had (EVER); the
+// deals made, whose cards are still in place (PLACE) and which of the ranks
+// each deal covered are unaccounted for (POOL); and per deal made and column
+// the cards its card may lie on (`under`, 7 bytes of bits a column).
+// cols: the columns, bottom card first; down: face-down cards per column;
+// deals: the deals to come. Returns whether the position is lost, with the
+// positions looked at (at most limit before giving up) in lostNodes.
+const C_LEFT = 0, C_BASE = 10, C_TOPS = 20, C_EVER = 34, C_DEALS = 36, C_PLACE = 37, C_POOL = 47, C_SIZE = 112;
+const MAX_DEALS = 5, ANY_RANK = 0x3FFF;
+let lostNodes = 0;
+
+function lost(cols, down, deals, limit) {
+  lostNodes = 0;
+  if (deals.length > MAX_DEALS) return false;
+  const unit = (c, left) => {
+    const col = cols[c], d = down[c];
+    let u = left - 1;
+    while (u > d && col[u - 1] === col[u] + 1 && col[u] % 13 !== 12) u--;
+    return u;
+  };
+  const ever = b => b[C_EVER] | b[C_EVER + 1] << 8;
+  const setEver = (b, v) => { b[C_EVER] = v & 255; b[C_EVER + 1] = v >> 8; };
+  const inPlace = (b, j, c) => (b[C_PLACE + 2 * j + (c >> 3)] >> (c & 7)) & 1;
+  const take = (b, j, c) => { b[C_PLACE + 2 * j + (c >> 3)] &= ~(1 << (c & 7)); };
+  // The last deal whose card on column c is still in place, or -1.
+  const dealtOn = (b, c) => {
+    for (let j = b[C_DEALS] - 1; j >= 0; j--) if (inPlace(b, j, c)) return j;
+    return -1;
+  };
+  const ofRank = (set, rank) => set[rank] | set[rank + 13] | set[rank + 26] | set[rank + 39];
+  // The cards that may have moved: those above what has never moved, those
+  // of a top unit above a place where it could have been split, and the
+  // dealt cards no longer in place.
+  const movedSet = b => {
+    const set = new Uint8Array(52), ev = ever(b);
+    for (let c = 0; c < NC; c++) {
+      const col = cols[c], left = b[C_LEFT + c];
+      for (let i = left; i < col.length; i++) set[col[i]] = 1;
+      if (left > 0) {
+        for (let i = unit(c, left) + 1; i < left; i++) {
+          if ((ev >> (col[i] % 13 + 1)) & 1) {
+            for (let k = i; k < left; k++) set[col[k]] = 1;
+            break;
+          }
+        }
+      }
+    }
+    for (let j = 0; j < b[C_DEALS]; j++) for (let c = 0; c < NC; c++) if (!inPlace(b, j, c)) set[deals[j][c]] = 1;
+    return set;
+  };
+  // Might some suit be completed: has one of its kings moved, or is it on
+  // top of what has not moved of its column with only cards of its suit
+  // dealt onto it since, and has every lower card of the suit not in the
+  // king's unit moved, or is it in a top unit, or was it dealt?
+  const completable = (b, moved) => {
+    const have = moved.slice();
+    for (let c = 0; c < NC; c++) {
+      const left = b[C_LEFT + c];
+      if (left > 0) for (let i = unit(c, left); i < left; i++) have[cols[c][i]] = 1;
+    }
+    for (let j = 0; j < b[C_DEALS]; j++) for (const v of deals[j]) have[v] = 1;
+    for (let suit = 0; suit < 4; suit++) {
+      const king = suit * 13 + 12, ace = suit * 13;
+      let lowest = moved[king] ? king : -1;
+      for (let c = 0; c < NC; c++) {
+        let found = -1, clear = true;
+        for (let j = b[C_DEALS] - 1; j >= 0; j--) {
+          if (!inPlace(b, j, c)) continue;
+          const v = deals[j][c];
+          if (v === king && clear) found = king;
+          clear = clear && Math.floor(v / 13) === suit;
+        }
+        const left = b[C_LEFT + c];
+        if (clear && left > 0 && cols[c][unit(c, left)] === king) found = cols[c][left - 1];
+        if (found >= 0) lowest = lowest < 0 ? found : Math.min(lowest, found);
+      }
+      if (lowest < 0) continue;
+      let all = true;
+      for (let card = ace; card < lowest && all; card++) all = have[card] === 1;
+      if (all) return true;
+    }
+    return false;
+  };
+
+  const seen = new Set(), stack = [];
+  // Look at one position: whether a suit might be completed in it, and if
+  // not and it is new, the positions one step on, onto the stack.
+  const step = st => {
+    const b = st.b, L = deals.length;
+    // Units that come off onto a top without changing the tops cost nothing.
+    for (let free = true; free; ) {
+      free = false;
+      for (let c = 0; c < NC; c++) {
+        if (b[C_LEFT + c] === 0 || dealtOn(b, c) >= 0) continue;
+        const u = unit(c, b[C_LEFT + c]), rank = cols[c][u] % 13;
+        if (u > 0 && b[C_TOPS + rank + 1] > 0 && cols[c][u - 1] % 13 === rank + 1) {
+          b[C_LEFT + c] = u;
+          free = true;
+        }
+      }
+    }
+    const dealtAll = b[C_DEALS] === L;
+    // After the last deal, columns with nothing that never moved and
+    // nothing dealt in place are alike.
+    if (dealtAll) {
+      const which = [], bases = [];
+      for (let c = 0; c < NC; c++) {
+        if (b[C_LEFT + c] === 0 && dealtOn(b, c) < 0) {
+          which.push(c);
+          bases.push(b[C_BASE + c]);
+        }
+      }
+      bases.sort((x, y) => x - y);
+      which.forEach((c, i) => { b[C_BASE + c] = bases[i]; });
+    }
+    let empty = [];
+    for (let c = 0; c < NC; c++) if (b[C_LEFT + c] === 0 && b[C_BASE + c] === 0) empty.push(c);
+    if (empty.length) setEver(b, ANY_RANK);
+    const moved = movedSet(b);
+    if (completable(b, moved)) return true;
+    const key = String.fromCharCode.apply(null, b) + st.ukey;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const canDeal = !dealtAll && empty.length === 0;
+    if (dealtAll) empty = empty.slice(0, 1); // empty columns are alike too
+    const push = t => stack.push({ b: t, under: st.under, ukey: st.ukey });
+    for (let c = 0; c < NC; c++) {
+      const j = dealtOn(b, c);
+      if (j >= 0) {
+        // The card dealt onto the column.
+        const card = deals[j][c], rank = card % 13, u = st.under[j], o = c * 7;
+        const may = v => (u[o + (v >> 3)] >> (v & 7)) & 1;
+        // As part of the run of the next card of its suit, if it may lie on one.
+        if (rank < 12 && b[C_POOL + j * 13 + rank + 1] > 0 && may(card + 1)) {
+          const t = b.slice();
+          take(t, j, c);
+          t[C_POOL + j * 13 + rank + 1]--;
+          push(t);
+        }
+        for (let gives = 0; gives < 13; gives++) {
+          if (b[C_POOL + j * 13 + gives] === 0 || !(may(gives) | may(gives + 13) | may(gives + 26) | may(gives + 39))) continue;
+          const t = b.slice();
+          take(t, j, c);
+          t[C_POOL + j * 13 + gives]--;
+          t[C_TOPS + gives]++;
+          setEver(t, ever(t) | 1 << gives);
+          if (b[C_TOPS + rank + 1] > 0) {
+            const t2 = t.slice();
+            t2[C_TOPS + rank + 1]--;
+            push(t2);
+          }
+          for (const e of empty) {
+            const t2 = t.slice();
+            t2[C_BASE + e] = rank + 1;
+            push(t2);
+          }
+        }
+        continue;
+      }
+      const left = b[C_LEFT + c];
+      if (left === 0) {
+        // A refilled column is emptied.
+        const base = b[C_BASE + c];
+        if (base > 0 && b[C_TOPS + base] > 0) {
+          const t = b.slice();
+          t[C_BASE + c] = 0;
+          t[C_TOPS + base]--;
+          push(t);
+        }
+        continue;
+      }
+      const u = unit(c, left), rank = cols[c][u] % 13, under = u > 0 ? cols[c][u - 1] % 13 : -1;
+      if (b[C_TOPS + rank + 1] > 0) {
+        // The top unit goes onto a top.
+        const t = b.slice();
+        t[C_LEFT + c] = u;
+        t[C_TOPS + rank + 1]--;
+        if (under >= 0) {
+          t[C_TOPS + under]++;
+          setEver(t, ever(t) | 1 << under);
+        }
+        push(t);
+      }
+      if (under >= 0) {
+        // The top unit goes into an empty column.
+        for (const e of empty) {
+          const t = b.slice();
+          t[C_LEFT + c] = u;
+          t[C_TOPS + under]++;
+          t[C_BASE + e] = rank + 1;
+          push(t);
+        }
+      }
+    }
+    for (const e of empty) {
+      // A card that has moved, or of a top unit, goes into an empty column,
+      // uncovering a card one rank higher.
+      const loose = moved.slice();
+      for (let c = 0; c < NC; c++) {
+        const left = b[C_LEFT + c];
+        if (left > 0 && dealtOn(b, c) < 0) for (let i = unit(c, left) + 1; i < left; i++) loose[cols[c][i]] = 1;
+      }
+      for (let rank = 0; rank < 12; rank++) {
+        if (!ofRank(loose, rank)) continue;
+        const t = b.slice();
+        t[C_BASE + e] = rank + 1;
+        t[C_TOPS + rank + 1]++;
+        push(t);
+      }
+    }
+    if (canDeal) {
+      const j = b[C_DEALS], t = b.slice(), u = new Uint8Array(70), ev = ever(b);
+      for (let c = 0; c < NC; c++) {
+        // What may be on top of the column: its dealt card, a card of its
+        // top unit or the one at its bottom if it was refilled, or moved
+        // cards chained down from those.
+        const top = new Uint8Array(52), k = dealtOn(b, c), col = cols[c], left = b[C_LEFT + c];
+        if (k >= 0) top[deals[k][c]] = 1;
+        else if (left > 0) {
+          for (let i = unit(c, left); i < left; i++) if (i === left - 1 || (ev >> (col[i + 1] % 13 + 1)) & 1) top[col[i]] = 1;
+        } else {
+          const rank = b[C_BASE + c] - 1;
+          for (let v = rank; v < 52; v += 13) top[v] = moved[v];
+        }
+        for (let rank = 12; rank >= 1; rank--) {
+          if (ofRank(top, rank)) for (let v = rank - 1; v < 52; v += 13) top[v] |= moved[v];
+        }
+        for (let v = 0; v < 52; v++) if (top[v]) u[c * 7 + (v >> 3)] |= 1 << (v & 7);
+      }
+      let ev2 = ev;
+      for (let r = 0; r < 13; r++) {
+        t[C_POOL + j * 13 + r] = b[C_TOPS + r];
+        t[C_TOPS + r] = 0;
+      }
+      for (let c = 0; c < NC; c++) {
+        const rank = deals[j][c] % 13;
+        t[C_TOPS + rank]++;
+        ev2 |= 1 << rank;
+      }
+      setEver(t, ev2);
+      t[C_PLACE + 2 * j] = 0xFF;
+      t[C_PLACE + 2 * j + 1] = 0x03;
+      t[C_DEALS]++;
+      stack.push({ b: t, under: [...st.under, u], ukey: st.ukey + String.fromCharCode.apply(null, u) });
+    }
+    return false;
+  };
+
+  const b = new Uint8Array(C_SIZE);
+  let ev = 0;
+  for (let c = 0; c < NC; c++) {
+    const n = cols[c].length;
+    b[C_LEFT + c] = n;
+    if (n > 0) {
+      const rank = cols[c][n - 1] % 13;
+      b[C_TOPS + rank]++;
+      ev |= 1 << rank;
+    } else ev = ANY_RANK;
+  }
+  setEver(b, ev);
+  stack.push({ b, under: [], ukey: '' });
+  while (stack.length) {
+    const st = stack.pop();
+    if (++lostNodes > limit) return false;
+    // Depth first, the steps in the order `step` gives them.
+    const from = stack.length;
+    if (step(st)) return false;
+    for (let i = from, k = stack.length - 1; i < k; i++, k--) [stack[i], stack[k]] = [stack[k], stack[i]];
+  }
+  return true;
 }
 
 const candGt = (a, b) => a.key > b.key || (a.key === b.key && a.seq > b.seq);
@@ -478,6 +759,16 @@ class Solver {
     return false;
   }
 
+  // The columns at b as arrays, and their face-down counts.
+  columnsAt(b) {
+    const M = this.M, cols = [], down = [];
+    for (let c = 0; c < NC; c++) {
+      cols.push(Array.from(M.subarray(b + c * MAXC, b + c * MAXC + M[b + LEN + c])));
+      down.push(M[b + DOWN + c]);
+    }
+    return [cols, down];
+  }
+
   // Deal onto the position at b.
   dealAt(b) {
     const M = this.M, deal = this.deals[M[b + DEALT]];
@@ -720,8 +1011,16 @@ class Solver {
       if (stage.end) {
         // A position the top-rank certificate proves lost is not searched
         // (its work is the certificate's).
-        const dead = this.topRankDead(0);
-        this.work += this.certNodes;
+        // (The position after the last deal gets the certificate that
+        // goes on past emptying a column, which costs more.)
+        let dead;
+        if (isEntry) {
+          dead = lost(...this.columnsAt(0), [], CERTIFY_LIMIT);
+          this.work += Math.min(lostNodes, CERTIFY_LIMIT);
+        } else {
+          dead = this.topRankDead(0);
+          this.work += Math.min(this.certNodes, CERTIFY_LIMIT);
+        }
         if (dead) {
           found.add(kl, kh);
           continue;
@@ -781,8 +1080,8 @@ class Solver {
           const from = classDeals[i][1] * MS;
           M.copyWithin(scratch, from, from + MS);
           this.dealAt(scratch);
-          const dead = this.topRankDead(scratch);
-          this.work += 1 + this.certNodes;
+          const dead = lost(...this.columnsAt(scratch), [], CERTIFY_LIMIT);
+          this.work += 1 + lostNodes;
           if (!dead) {
             this.incomplete = true;
             break;
@@ -897,6 +1196,14 @@ class Solver {
 
   solve() {
     if (this.root[0] === 8) return { verdict: SOLVABLE, work: 0, classes: 0, line: [] };
+    // A certificate may prove the position lost outright (not with two
+    // deals or more to come: it hardly ever does then).
+    if (this.deals.length <= 1) {
+      this.unpackFrom(this.root, 0, 0);
+      const dead = lost(...this.columnsAt(0), this.deals, ROOT_CERTIFY_LIMIT);
+      this.work += Math.min(lostNodes, ROOT_CERTIFY_LIMIT);
+      if (dead) return { verdict: UNSOLVABLE, work: this.work, classes: 0, line: [] };
+    }
     let outcome = this.search();
     if (outcome === UNSOLVABLE) {
       // No win without splitting same-suit runs. The second pass allows

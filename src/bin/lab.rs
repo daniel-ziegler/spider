@@ -115,6 +115,39 @@ fn main() {
                     println!("{} {} won {} : moves {} last deal at {last_deal} applies {applies} fires {fires} first {}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
                     continue;
                 }
+                if mode == "sound3" {
+                    // Every position of the game with the stock empty: how many, how many the
+                    // certificate with empty columns calls lost and how many of those the one
+                    // without does, the first, and the moves from there to the end.
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    let (mut applies, mut fires, mut old, mut first, mut gave_up) = (0, 0, 0, None, 0);
+                    for (i, mv) in moves.iter().chain(std::iter::once(&Move::Deal)).enumerate() {
+                        if g.stock.is_empty() && !g.is_won() {
+                            applies += 1;
+                            let (dead, n) = spider::certify::lost_certificate(&g, budget);
+                            gave_up += (n > budget) as u32;
+                            let was = spider::certify::top_rank_certificate(&g);
+                            old += was as u32;
+                            if was && !dead {
+                                println!("WEAKER {} {} after {i} moves", f[0], f[1]);
+                            }
+                            if dead {
+                                fires += 1;
+                                first.get_or_insert(i);
+                                if f[3] == "1" {
+                                    println!("UNSOUND {} {} after {i} moves: {}", f[0], f[1], g.to_position_text());
+                                }
+                            }
+                        }
+                        if i < moves.len() {
+                            g.apply(*mv).unwrap();
+                        }
+                    }
+                    let last_deal = moves.iter().rposition(|m| *m == Move::Deal).map_or(0, |i| i + 1);
+                    println!("{} {} won {} : moves {} last_deal {last_deal} applies {applies} fires {fires} old {old} first {} gave_up {gave_up}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
+                    continue;
+                }
                 if mode == "sound2" {
                     // Every position of the game with no empty column: how many, how many the
                     // certificate with deals calls lost, the first, and the deals left then.
@@ -123,9 +156,9 @@ fn main() {
                     let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
                     let (mut applies, mut fires, mut first, mut gave_up, mut nodes) = (0, 0, None, 0, 0);
                     for (i, mv) in moves.iter().chain(std::iter::once(&Move::Deal)).enumerate() {
-                        if g.columns.iter().all(|c| !c.is_empty()) {
+                        if !g.is_won() {
                             applies += 1;
-                            let (dead, n) = spider::certify::stock_certificate(&g, budget);
+                            let (dead, n) = spider::certify::lost_certificate(&g, budget);
                             nodes += n;
                             gave_up += (n > budget) as u32;
                             if dead {
@@ -151,8 +184,8 @@ fn main() {
                     let moves = parse_moves(f[4]).unwrap();
                     let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
                     for (i, mv) in moves.iter().enumerate() {
-                        if i % step == 0 && !g.stock.is_empty() && g.columns.iter().all(|c| !c.is_empty()) {
-                            let (dead, n) = spider::certify::stock_certificate(&g, 200_000);
+                        if i % step == 0 && !g.stock.is_empty() {
+                            let (dead, n) = spider::certify::lost_certificate(&g, 200_000);
                             let r = Solver::new(&g, budget).solve(&g);
                             let v = match r.verdict {
                                 Verdict::Solvable => 'W',
@@ -197,17 +230,8 @@ fn main() {
                 for mv in parse_moves(f[4]).unwrap() {
                     g.apply(mv).unwrap();
                 }
-                if mode == "deals" {
-                    let (points, lost, all) = spider::solver::deal_points_lost(&g, budget as usize);
-                    let now = {
-                        let mut d = g.clone();
-                        d.apply(Move::Deal).is_ok() && spider::certify::top_rank_certificate(&d)
-                    };
-                    println!("{} {} won {} : deal points {points} proved lost {lost} exhausted {all} dealing now {now}", f[0], f[1], f[3]);
-                    continue;
-                }
                 if mode == "cert2" {
-                    println!("{} {} left {}: {:?}", f[0], f[1], f[2], spider::certify::stock_certificate(&g, budget));
+                    println!("{} {} left {}: {:?}", f[0], f[1], f[2], spider::certify::lost_certificate(&g, budget));
                     continue;
                 }
                 if mode == "cert1" {

@@ -461,59 +461,103 @@ impl Units<'_> {
     }
 }
 
-/// The top-rank certificate carried across deals: for a position with no
-/// empty column and any number of deals left, a search of a small game that
-/// every line of real play maps onto, up to the first column emptied or suit
-/// completed; if it can do neither, with all the deals, the position is lost.
+/// The top-rank certificate carried across deals and past the emptying of
+/// columns, for any position: a search of a small game that every line of
+/// real play maps onto up to the first suit completed. If it cannot
+/// complete one, with all the deals, the position is lost.
 ///
-/// Between deals it is the game of [`top_rank_certificate`]. A deal puts a
-/// card on every column, and what each lies on is not known here: the small
-/// game forgets where the cards that moved went. It is known that the ranks
-/// under the ten dealt cards are the ranks of the tops before the deal, and
-/// which cards could have been the top of each column: the top unit's top
-/// card, a card further down the unit if what is on it could have been split
-/// off, or a card that has moved, chained down from one of those. So the
-/// dealt cards become the tops, and a dealt card comes off its column, when
-/// some top is one rank above it, uncovering one of the ranks its column
-/// could have had and that are not yet accounted for: the small game may
-/// choose which. If the card under it could have been the next card of its
-/// suit it may also be taken as part of that card's run, with no step. The
-/// cards of a column come off from the top: those dealt onto it, last
-/// first, then the units it had. Cards that have moved are in nobody's way.
+/// Where no column is empty and the stock is, it is the game of
+/// [`top_rank_certificate`], which has the argument: per column how many
+/// cards have never moved, in units, and the ranks of the top cards.
+///
+/// *Empty columns.* A run put in an empty column uncovers the card it lay
+/// on, and its bottom card is the column's until the column is emptied
+/// again, which takes a top one rank above it. So the small game keeps the
+/// rank at the bottom of each column emptied and refilled. It may put a
+/// column's top unit in an empty column instead of on a top; put there any
+/// card that has moved, or that is in a top unit above its bottom card,
+/// uncovering a card one rank higher; and empty a refilled column when a
+/// top is one rank above its bottom card.
+///
+/// *Deals.* A deal (no column being empty) puts a card on every column, and
+/// what each lies on is not known here: the small game forgets where the
+/// cards that moved went. It is known that the ranks under the ten dealt
+/// cards are the ranks of the tops before the deal, and which cards could
+/// have been the top of each column: the top unit's top card, a card
+/// further down the unit if what is on it could have been split off, the
+/// card at the bottom of a refilled column, or a card that has moved,
+/// chained down from one of those. So the dealt cards become the tops, and a
+/// dealt card comes off its column, onto a top one rank above it or into an
+/// empty column, uncovering one of the ranks its column could have had and
+/// that are not yet accounted for: the small game may choose which. If the
+/// card under it could have been the next card of its suit it may also be
+/// taken as part of that card's run, with no step. The cards of a column
+/// come off from the top: those dealt onto it, last first, then its units.
+///
+/// *Completing a suit.* Possible, as far as the small game can tell, when
+/// one of the suit's kings has moved, or is on top of what has not moved of
+/// its column with only cards of its suit dealt onto it since, and every
+/// lower card of the suit not in the king's unit has moved, is in a top
+/// unit, or was dealt.
 ///
 /// Returns whether the position is proved lost and the positions of the
 /// small game looked at, `limit` at most before giving up.
-pub fn stock_certificate(g: &crate::game::Game, limit: u64) -> (bool, u64) {
+pub fn lost_certificate(g: &crate::game::Game, limit: u64) -> (bool, u64) {
     let cols: Vec<Vec<u8>> = g.columns.iter().map(|c| c.iter().map(|k| k.0).collect()).collect();
     let deals = crate::solver::stock_deals(g);
-    if cols.iter().any(|c| c.is_empty()) || deals.len() > MAX_DEALS {
+    let r = lost(std::array::from_fn(|c| cols[c].as_slice()), g.face_down, &deals, limit);
+    if std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
+        eprintln!("certificate with {} deals: {} ({} positions)", deals.len(), if r.0 { "no suit can be completed" } else { "a suit might be completed" }, r.1);
+    }
+    r
+}
+
+/// [`lost_certificate`] for these columns (bottom card first), `down[c]`
+/// cards of column `c` face down, and these deals to come.
+pub(crate) fn lost(cols: [&[u8]; NUM_COLS], down: [usize; NUM_COLS], deals: &[[u8; crate::game::DEAL_SIZE]], limit: u64) -> (bool, u64) {
+    if deals.len() > MAX_DEALS {
         return (false, 0);
     }
-    let mut st = Dealt { left: [0; NUM_COLS], tops: [0; 14], ever: 0, deals: 0, in_place: [0; MAX_DEALS], pool: [[0; 13]; MAX_DEALS], under: [[0; NUM_COLS]; MAX_DEALS] };
+    let mut st = Dealt {
+        left: [0; NUM_COLS],
+        base: [0; NUM_COLS],
+        tops: [0; 14],
+        ever: 0,
+        deals: 0,
+        in_place: [0; MAX_DEALS],
+        pool: [[0; 13]; MAX_DEALS],
+        under: None,
+    };
     for c in 0..NUM_COLS {
-        let rank = cols[c][cols[c].len() - 1] % 13;
-        st.tops[rank as usize] += 1;
-        st.ever |= 1 << rank;
         st.left[c] = cols[c].len() as u8;
+        match cols[c].last() {
+            Some(&v) => {
+                st.tops[(v % 13) as usize] += 1;
+                st.ever |= 1 << (v % 13);
+            }
+            None => st.ever = ANY_RANK,
+        }
     }
-    let mut game = Dealing { cols: std::array::from_fn(|c| cols[c].as_slice()), down: g.face_down, deals: &deals, seen: std::collections::HashSet::new(), nodes: 0, limit };
+    let mut game = Dealing { cols, down, deals, seen: Default::default(), nodes: 0, limit };
     let event = game.event(st);
-    if std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
-        eprintln!("top ranks with {} deals: {} ({} positions)", deals.len(), if event { "an event is possible" } else { "no event" }, game.nodes);
-    }
     (!event, game.nodes)
 }
 
 const MAX_DEALS: usize = 5;
+const ANY_RANK: u16 = 0x3FFF;
 
-/// A position of the small game with deals.
+/// A position of the small game.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Dealt {
     /// Per column, how many of its cards have never moved.
     left: [u8; NUM_COLS],
+    /// Per column with none of those, 0 if it is empty, else one more than
+    /// the rank of the card now at its bottom.
+    base: [u8; NUM_COLS],
     /// How many top cards have each rank.
     tops: [u8; 14],
-    /// The ranks the tops have ever had, as a bit set.
+    /// The ranks the tops have ever had, as a bit set (all of them once a
+    /// column has been empty: then any run could have been split).
     ever: u16,
     /// Deals made.
     deals: u8,
@@ -521,17 +565,36 @@ struct Dealt {
     in_place: [u16; MAX_DEALS],
     /// Per deal made, how many of the ranks it covered are not yet accounted for.
     pool: [[u8; 13]; MAX_DEALS],
-    /// Per deal made and column, the cards (a bit set) its card may lie on.
-    under: [[u64; NUM_COLS]; MAX_DEALS],
+    /// Per deal made and column, the cards (a bit set) its card may lie on
+    /// (nothing before the first deal: this is most of a position).
+    under: Option<std::rc::Rc<[[u64; NUM_COLS]; MAX_DEALS]>>,
 }
 
 struct Dealing<'a> {
     cols: [&'a [u8]; NUM_COLS],
     down: [usize; NUM_COLS],
     deals: &'a [[u8; crate::game::DEAL_SIZE]],
-    seen: std::collections::HashSet<Dealt>,
+    seen: std::collections::HashSet<Dealt, std::hash::BuildHasherDefault<Mixer>>,
     nodes: u64,
     limit: u64,
+}
+
+/// A quick hasher for the positions.
+#[derive(Default)]
+struct Mixer(u64);
+
+impl std::hash::Hasher for Mixer {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        self.0 ^= self.0 >> 29;
+    }
 }
 
 /// The cards of rank `rank` in a bit set of cards.
@@ -549,16 +612,17 @@ impl Dealing<'_> {
         u
     }
 
-    /// SPIDER_CERT_DEBUG: the steps to an event, last first.
-    fn say(&self, text: impl Fn() -> String) {
-        if self.nodes <= self.limit && std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
-            eprintln!("  {}", text());
-        }
-    }
-
     /// The last deal whose card on column `c` is still in place.
     fn dealt_on(&self, st: &Dealt, c: usize) -> Option<usize> {
         (0..st.deals as usize).rev().find(|&j| st.in_place[j] >> c & 1 == 1)
+    }
+
+    /// The cards of column `c` that may be the top of what has not moved of
+    /// it: the top unit's top card, and those under a place where it could
+    /// have been split.
+    fn stem_tops(&self, st: &Dealt, c: usize) -> u64 {
+        let (col, left) = (self.cols[c], st.left[c] as usize);
+        (self.unit(c, st.left[c])..left).filter(|&i| i == left - 1 || st.ever >> (col[i + 1] % 13 + 1) & 1 == 1).fold(0, |a, i| a | 1 << col[i])
     }
 
     /// The cards that may have moved: those of the columns above what has
@@ -571,10 +635,12 @@ impl Dealing<'_> {
             for &v in &col[left..] {
                 cards |= 1 << v;
             }
-            let u = self.unit(c, st.left[c]);
-            if let Some(i) = (u + 1..left).find(|&i| st.ever >> (col[i] % 13 + 1) & 1 == 1) {
-                for &v in &col[i..left] {
-                    cards |= 1 << v;
+            if left > 0 {
+                let u = self.unit(c, st.left[c]);
+                if let Some(i) = (u + 1..left).find(|&i| st.ever >> (col[i] % 13 + 1) & 1 == 1) {
+                    for &v in &col[i..left] {
+                        cards |= 1 << v;
+                    }
                 }
             }
         }
@@ -588,120 +654,197 @@ impl Dealing<'_> {
         cards
     }
 
-    /// Can a column be emptied or a suit completed? Says yes when it gives up.
-    fn event(&mut self, mut st: Dealt) -> bool {
-        self.nodes += 1;
-        if self.nodes > self.limit {
-            return true;
+    /// Might a suit be completed from `start`? Says yes when it gives up.
+    fn event(&mut self, start: Dealt) -> bool {
+        // (A stack of positions to look at: the search can go too deep to recurse.)
+        let mut stack = vec![start];
+        while let Some(mut st) = stack.pop() {
+            self.nodes += 1;
+            if self.nodes > self.limit {
+                return true;
+            }
+            // Depth first, the steps in the order `step` gives them.
+            let from = stack.len();
+            if self.step(&mut st, &mut stack) {
+                return true;
+            }
+            stack[from..].reverse();
         }
-        // Units that come off without changing the tops cost nothing.
-        let mut steps = [(0usize, 0u8, 0usize, 0usize); NUM_COLS];
-        let mut n;
+        false
+    }
+
+    /// Look at one position: whether a suit might be completed in it, and
+    /// if not and it is new, the positions one step on, onto `stack`.
+    fn step(&mut self, st: &mut Dealt, stack: &mut Vec<Dealt>) -> bool {
+        // Units that come off onto a top without changing the tops cost nothing.
         loop {
-            n = 0;
             let mut free = false;
             for c in 0..NUM_COLS {
-                if self.dealt_on(&st, c).is_some() {
+                if st.left[c] == 0 || self.dealt_on(st, c).is_some() {
                     continue;
                 }
                 let u = self.unit(c, st.left[c]);
                 let rank = (self.cols[c][u] % 13) as usize;
-                if st.tops[rank + 1] == 0 {
-                    continue;
-                }
-                if u == 0 {
-                    self.say(|| format!("column {c} is emptied"));
-                    return true; // the column is emptied
-                }
-                let under = (self.cols[c][u - 1] % 13) as usize;
-                if under == rank + 1 {
+                if u > 0 && st.tops[rank + 1] > 0 && (self.cols[c][u - 1] % 13) as usize == rank + 1 {
                     st.left[c] = u as u8;
                     free = true;
-                } else {
-                    steps[n] = (c, u as u8, rank + 1, under);
-                    n += 1;
                 }
             }
             if !free {
                 break;
             }
         }
-        let moved = self.moved(&st);
-        if self.completable(&st, moved) {
-            self.say(|| "a suit might be completed".to_string());
+        let dealt_all = st.deals as usize == self.deals.len();
+        // After the last deal, columns with nothing that never moved and
+        // nothing dealt in place are alike.
+        let alike = |st: &Dealt, c: usize| st.left[c] == 0 && self.dealt_on(st, c).is_none();
+        if dealt_all && st.left.contains(&0) {
+            let (mut which, mut bases, mut n) = ([0; NUM_COLS], [0u8; NUM_COLS], 0);
+            for c in 0..NUM_COLS {
+                if alike(st, c) {
+                    (which[n], bases[n]) = (c, st.base[c]);
+                    n += 1;
+                }
+            }
+            bases[..n].sort_unstable();
+            for i in 0..n {
+                st.base[which[i]] = bases[i];
+            }
+        }
+        let (mut empties, mut n) = ([0; NUM_COLS], 0);
+        for c in 0..NUM_COLS {
+            if st.left[c] == 0 && st.base[c] == 0 {
+                empties[n] = c;
+                n += 1;
+            }
+        }
+        let mut empty = &empties[..n];
+        if !empty.is_empty() {
+            st.ever = ANY_RANK;
+        }
+        let moved = self.moved(st);
+        if self.completable(st, moved) {
             return true;
         }
         if !self.seen.insert(st.clone()) {
             return false;
         }
-        for &(c, u, takes, gives) in &steps[..n] {
-            let mut t = st.clone();
-            t.left[c] = u;
-            t.tops[takes] -= 1;
-            t.tops[gives] += 1;
-            t.ever |= 1 << gives;
-            if self.event(t) {
-                self.say(|| format!("column {c}: the unit at {u} comes off, taking a {takes} and giving a {gives}; left {:?}", st.left));
-                return true;
-            }
+        let can_deal = !dealt_all && empty.is_empty();
+        if dealt_all {
+            empty = &empty[..empty.len().min(1)]; // empty columns are alike too
         }
         for c in 0..NUM_COLS {
-            let Some(j) = self.dealt_on(&st, c) else { continue };
-            let card = self.deals[j][c];
-            let rank = (card % 13) as usize;
-            if rank == 12 {
-                continue; // a king dealt stays
-            }
-            // As part of the run of the next card of its suit, if it may lie on one.
-            if st.pool[j][rank + 1] > 0 && st.under[j][c] >> (card + 1) & 1 == 1 {
-                let mut t = st.clone();
-                t.in_place[j] &= !(1 << c);
-                t.pool[j][rank + 1] -= 1;
-                if self.event(t) {
-                    self.say(|| format!("column {c}: the card of deal {j} (rank {rank}) joins what it lies on"));
-                    return true;
+            if let Some(j) = self.dealt_on(st, c) {
+                // The card dealt onto the column.
+                let card = self.deals[j][c];
+                let rank = (card % 13) as usize;
+                // As part of the run of the next card of its suit, if it may lie on one.
+                let under = st.under.as_ref().expect("dealt")[j][c];
+                if rank < 12 && st.pool[j][rank + 1] > 0 && under >> (card + 1) & 1 == 1 {
+                    let mut t = st.clone();
+                    t.in_place[j] &= !(1 << c);
+                    t.pool[j][rank + 1] -= 1;
+                    stack.push(t);
                 }
-            }
-            if st.tops[rank + 1] == 0 {
+                for gives in 0..13 {
+                    if st.pool[j][gives] == 0 || of_rank(under, gives) == 0 {
+                        continue;
+                    }
+                    let mut t = st.clone();
+                    t.in_place[j] &= !(1 << c);
+                    t.pool[j][gives] -= 1;
+                    t.tops[gives] += 1;
+                    t.ever |= 1 << gives;
+                    if st.tops[rank + 1] > 0 {
+                        let mut t = t.clone();
+                        t.tops[rank + 1] -= 1;
+                        stack.push(t);
+                    }
+                    for &e in empty {
+                        let mut t = t.clone();
+                        t.base[e] = rank as u8 + 1;
+                        stack.push(t);
+                    }
+                }
                 continue;
             }
-            for gives in 0..13 {
-                if st.pool[j][gives] == 0 || of_rank(st.under[j][c], gives) == 0 {
-                    continue;
+            if st.left[c] == 0 {
+                // A refilled column is emptied.
+                let b = st.base[c] as usize;
+                if b > 0 && st.tops[b] > 0 {
+                    let mut t = st.clone();
+                    t.base[c] = 0;
+                    t.tops[b] -= 1;
+                    stack.push(t);
                 }
+                continue;
+            }
+            let u = self.unit(c, st.left[c]);
+            let rank = (self.cols[c][u] % 13) as usize;
+            let under = if u > 0 { Some((self.cols[c][u - 1] % 13) as usize) } else { None };
+            if st.tops[rank + 1] > 0 {
+                // The top unit goes onto a top.
                 let mut t = st.clone();
-                t.in_place[j] &= !(1 << c);
-                t.pool[j][gives] -= 1;
+                t.left[c] = u as u8;
                 t.tops[rank + 1] -= 1;
-                t.tops[gives] += 1;
-                t.ever |= 1 << gives;
-                if self.event(t) {
-                    self.say(|| format!("column {c}: the card of deal {j} (rank {rank}) comes off, giving a {gives}"));
-                    return true;
+                if let Some(a) = under {
+                    t.tops[a] += 1;
+                    t.ever |= 1 << a;
+                }
+                stack.push(t);
+            }
+            if let Some(a) = under {
+                // The top unit goes into an empty column.
+                for &e in empty {
+                    let mut t = st.clone();
+                    t.left[c] = u as u8;
+                    t.tops[a] += 1;
+                    t.base[e] = rank as u8 + 1;
+                    stack.push(t);
                 }
             }
         }
-        if (st.deals as usize) < self.deals.len() {
+        for &e in empty {
+            // A card that has moved, or of a top unit, goes into an empty
+            // column, uncovering a card one rank higher.
+            let mut loose = moved;
+            for c in 0..NUM_COLS {
+                if st.left[c] > 0 && self.dealt_on(st, c).is_none() {
+                    for &v in &self.cols[c][self.unit(c, st.left[c]) + 1..st.left[c] as usize] {
+                        loose |= 1 << v;
+                    }
+                }
+            }
+            for rank in 0..12 {
+                if of_rank(loose, rank) != 0 {
+                    let mut t = st.clone();
+                    t.base[e] = rank as u8 + 1;
+                    t.tops[rank + 1] += 1;
+                    stack.push(t);
+                }
+            }
+        }
+        if can_deal {
             let j = st.deals as usize;
             let mut t = st.clone();
+            let mut under = st.under.as_deref().copied().unwrap_or([[0; NUM_COLS]; MAX_DEALS]);
             for c in 0..NUM_COLS {
-                // What may be on top of the column: its dealt card, or a
-                // card of its top unit, or moved cards chained down from those.
-                let mut top = match self.dealt_on(&st, c) {
+                // What may be on top of the column: its dealt card, a card
+                // of its top unit or the one at its bottom if it was
+                // refilled, or moved cards chained down from those.
+                let mut top = match self.dealt_on(st, c) {
                     Some(k) => 1u64 << self.deals[k][c],
-                    None => {
-                        let (col, left) = (self.cols[c], st.left[c] as usize);
-                        let u = self.unit(c, st.left[c]);
-                        (u..left).filter(|&i| i == left - 1 || st.ever >> (col[i + 1] % 13 + 1) & 1 == 1).fold(0, |a, i| a | 1 << col[i])
-                    }
+                    None if st.left[c] > 0 => self.stem_tops(st, c),
+                    None => of_rank(moved, st.base[c] as usize - 1),
                 };
                 for rank in (1..13).rev() {
                     if of_rank(top, rank) != 0 {
                         top |= of_rank(moved, rank - 1);
                     }
                 }
-                t.under[j][c] = top;
+                under[j][c] = top;
             }
+            t.under = Some(std::rc::Rc::new(under));
             t.pool[j].copy_from_slice(&st.tops[..13]);
             t.tops = [0; 14];
             for c in 0..NUM_COLS {
@@ -711,23 +854,19 @@ impl Dealing<'_> {
             }
             t.in_place[j] = (1 << NUM_COLS) - 1;
             t.deals += 1;
-            if self.event(t) {
-                self.say(|| format!("deal {j}; left {:?}", st.left));
-                return true;
-            }
+            stack.push(t);
         }
         false
     }
 
-    /// Might some suit be completed: is there a king, on top of what has
-    /// not moved of its column or dealt and in place, with only cards of its
-    /// suit dealt onto it since, and every lower card of the suit that is
-    /// not in its unit either moved, in a top unit, or dealt?
+    /// Might some suit be completed (see [`lost_certificate`])?
     fn completable(&self, st: &Dealt, moved: u64) -> bool {
         let mut have = moved;
         for c in 0..NUM_COLS {
-            for &v in &self.cols[c][self.unit(c, st.left[c])..st.left[c] as usize] {
-                have |= 1 << v;
+            if st.left[c] > 0 {
+                for &v in &self.cols[c][self.unit(c, st.left[c])..st.left[c] as usize] {
+                    have |= 1 << v;
+                }
             }
         }
         for deal in &self.deals[..st.deals as usize] {
@@ -735,19 +874,31 @@ impl Dealing<'_> {
                 have |= 1 << v;
             }
         }
-        (0..NUM_COLS).any(|c| {
-            // The king, the first deal after it, and the lowest card of its unit.
-            let in_place: Vec<usize> = (0..st.deals as usize).filter(|&j| st.in_place[j] >> c & 1 == 1).collect();
-            let (king, from, lowest) = match in_place.iter().rev().find(|&&j| self.deals[j][c] % 13 == 12) {
-                Some(&j) => (self.deals[j][c], j + 1, self.deals[j][c]),
-                None => {
-                    let king = self.cols[c][self.unit(c, st.left[c])];
-                    (king, 0, self.cols[c][st.left[c] as usize - 1])
+        (0..4u8).any(|suit| {
+            let (king, ace) = (suit * 13 + 12, suit * 13);
+            // The lowest card a king of the suit has on it without anything moving.
+            let mut lowest = if moved >> king & 1 == 1 { Some(king) } else { None };
+            for c in 0..NUM_COLS {
+                // The cards dealt onto the column and in place, last first:
+                // a king of the suit there, or under them all, will do if
+                // those above it are of the suit.
+                let mut found = None;
+                let mut clear = true;
+                for j in (0..st.deals as usize).rev().filter(|&j| st.in_place[j] >> c & 1 == 1) {
+                    let v = self.deals[j][c];
+                    if v == king && clear {
+                        found = Some(king);
+                    }
+                    clear &= v / 13 == suit;
                 }
-            };
-            king % 13 == 12
-                && in_place.iter().filter(|&&j| j >= from).all(|&j| self.deals[j][c] / 13 == king / 13)
-                && (king - 12..lowest).all(|card| have >> card & 1 == 1)
+                if clear && st.left[c] > 0 && self.cols[c][self.unit(c, st.left[c])] == king {
+                    found = Some(self.cols[c][st.left[c] as usize - 1]);
+                }
+                if let Some(top) = found {
+                    lowest = Some(lowest.map_or(top, |l| l.min(top)));
+                }
+            }
+            lowest.is_some_and(|lowest| (ace..lowest).all(|card| have >> card & 1 == 1))
         })
     }
 }
