@@ -196,34 +196,38 @@ function lost(cols, down, deals, limit) {
   };
   // Might some suit be completed: has one of its kings moved, or is it on
   // top of what has not moved of its column with only cards of its suit
-  // dealt onto it since, and has every lower card of the suit not in the
-  // king's unit moved, or is it in a top unit, or was it dealt?
+  // dealt onto it since, and has every card of the suit not in place on
+  // the king moved (it has to, onto the run) or been dealt there?
   const completable = (b, moved) => {
-    const have = moved.slice();
-    for (let c = 0; c < NC; c++) {
-      const left = b[C_LEFT + c];
-      if (left > 0) for (let i = unit(c, left); i < left; i++) have[cols[c][i]] = 1;
+    // The cards dealt and in place on columns emptied and refilled, where a
+    // king that moved may be.
+    const refilled = moved.slice();
+    for (let j = 0; j < b[C_DEALS]; j++) {
+      for (let c = 0; c < NC; c++) if (b[C_LEFT + c] === 0 && inPlace(b, j, c)) refilled[deals[j][c]] = 1;
     }
-    for (let j = 0; j < b[C_DEALS]; j++) for (const v of deals[j]) have[v] = 1;
+    const all = (ace, lowest, have) => {
+      for (let card = ace; card < lowest; card++) if (!have[card]) return false;
+      return true;
+    };
     for (let suit = 0; suit < 4; suit++) {
       const king = suit * 13 + 12, ace = suit * 13;
-      let lowest = moved[king] ? king : -1;
+      if (moved[king] && all(ace, king, refilled)) return true;
       for (let c = 0; c < NC; c++) {
-        let found = -1, clear = true;
-        for (let j = b[C_DEALS] - 1; j >= 0; j--) {
+        // The cards dealt onto the column and in place, last first: a king
+        // of the suit there, or under them all, will do if those above it
+        // are of the suit.
+        const have = moved.slice();
+        let clear = true;
+        for (let j = b[C_DEALS] - 1; j >= 0 && clear; j--) {
           if (!inPlace(b, j, c)) continue;
           const v = deals[j][c];
-          if (v === king && clear) found = king;
-          clear = clear && Math.floor(v / 13) === suit;
+          if (v === king && all(ace, king, have)) return true;
+          if (Math.floor(v / 13) !== suit) clear = false;
+          have[v] = 1;
         }
         const left = b[C_LEFT + c];
-        if (clear && left > 0 && cols[c][unit(c, left)] === king) found = cols[c][left - 1];
-        if (found >= 0) lowest = lowest < 0 ? found : Math.min(lowest, found);
+        if (clear && left > 0 && cols[c][unit(c, left)] === king && all(ace, cols[c][left - 1], have)) return true;
       }
-      if (lowest < 0) continue;
-      let all = true;
-      for (let card = ace; card < lowest && all; card++) all = have[card] === 1;
-      if (all) return true;
     }
     return false;
   };
@@ -739,7 +743,8 @@ class Solver {
   }
 
   // Might some suit be completed: is a king's unit on top of its column,
-  // with a copy of every lower card of the suit moved or in a top unit?
+  // with a copy of every lower card of the suit moved, or in a top unit
+  // above its bottom card (which may have been split off)?
   certCompletable(b, left) {
     const M = this.M, starts = [];
     for (let c = 0; c < NC; c++) starts.push(this.certUnit(b, c, left[c]));
@@ -751,7 +756,7 @@ class Solver {
       for (let card = king - 12; card < lowest && all; card++) {
         all = false;
         for (let j = 0; j < NC && !all; j++) {
-          for (let i = starts[j], n = M[b + LEN + j]; i < n && !all; i++) all = M[b + j * MAXC + i] === card;
+          for (let i = starts[j] + 1, n = M[b + LEN + j]; i < n && !all; i++) all = M[b + j * MAXC + i] === card;
         }
       }
       if (all) return true;
@@ -1196,14 +1201,17 @@ class Solver {
 
   solve() {
     if (this.root[0] === 8) return { verdict: SOLVABLE, work: 0, classes: 0, line: [] };
-    // A certificate may prove the position lost outright (not with two
-    // deals or more to come: it hardly ever does then).
-    if (this.deals.length <= 1) {
-      this.unpackFrom(this.root, 0, 0);
-      const dead = lost(...this.columnsAt(0), this.deals, ROOT_CERTIFY_LIMIT);
-      this.work += Math.min(lostNodes, ROOT_CERTIFY_LIMIT);
-      if (dead) return { verdict: UNSOLVABLE, work: this.work, classes: 0, line: [] };
-    }
+    // A certificate may prove the position lost outright: a quick try
+    // first (not with two deals or more to come: it hardly ever does then),
+    // a long one if no win is found.
+    this.unpackFrom(this.root, 0, 0);
+    const [cols, down] = this.columnsAt(0);
+    const certify = limit => {
+      const dead = lost(cols, down, this.deals, limit);
+      this.work += Math.min(lostNodes, limit);
+      return dead;
+    };
+    if (this.deals.length <= 1 && certify(CERTIFY_LIMIT)) return { verdict: UNSOLVABLE, work: this.work, classes: 0, line: [] };
     let outcome = this.search();
     if (outcome === UNSOLVABLE) {
       // No win without splitting same-suit runs. The second pass allows
@@ -1223,6 +1231,7 @@ class Solver {
         outcome = this.search();
       }
     }
+    if ((outcome === NOT_FOUND || outcome === UNKNOWN) && certify(ROOT_CERTIFY_LIMIT)) outcome = UNSOLVABLE;
     const verdict = outcome === NOT_FOUND ? UNKNOWN : outcome;
     return { verdict, work: this.work, classes: this.classes, line: verdict === SOLVABLE ? this.buildLine() : [] };
   }

@@ -935,7 +935,7 @@ struct Stage {
 /// Positions of its small game the top-rank certificate may look at for one
 /// position of the search.
 const CERTIFY_LIMIT: u64 = 10_000;
-/// And for the position to be solved.
+/// And for the position to be solved, when no win was found.
 const ROOT_CERTIFY_LIMIT: u64 = 200_000;
 
 /// Pending entries kept when a stage is suspended (the rest are dropped,
@@ -1017,12 +1017,15 @@ impl Solver {
         let root = State::from_game(g);
         // A certificate may prove the position lost outright.
         let mut certified = false;
-        // (Not with two deals or more to come: it hardly ever does then.)
+        // A quick try first (not with two deals or more to come: it hardly
+        // ever does then), a long one if no win is found.
+        let certify = |solver: &mut Solver, limit: u64| {
+            let (dead, nodes) = lost(std::array::from_fn(|c| &root.cols[c][..root.len[c] as usize]), root.down.map(|d| d as usize), &solver.deals, limit);
+            solver.work += nodes.min(limit);
+            dead
+        };
         if self.certify && root.completed < 8 && self.deals.len() <= 1 {
-            let limit = ROOT_CERTIFY_LIMIT;
-            let (dead, nodes) = lost(std::array::from_fn(|c| &root.cols[c][..root.len[c] as usize]), root.down.map(|d| d as usize), &self.deals, limit);
-            self.work += nodes.min(limit);
-            certified = dead;
+            certified = certify(self, CERTIFY_LIMIT);
         }
         let mut outcome = if root.completed == 8 {
             Outcome::Solvable
@@ -1056,6 +1059,9 @@ impl Solver {
                 let root_id = self.push_node(NO_PARENT, Box::new([]), &root);
                 outcome = self.search(root_id);
             }
+        }
+        if self.certify && matches!(outcome, Outcome::NotFound | Outcome::Unknown) && certify(self, ROOT_CERTIFY_LIMIT) {
+            outcome = Outcome::Unsolvable;
         }
         let verdict = match outcome {
             Outcome::Solvable => Verdict::Solvable,

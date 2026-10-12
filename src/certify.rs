@@ -447,7 +447,8 @@ impl Units<'_> {
     }
 
     /// Might some suit be completed: is a king's unit on top of its column,
-    /// with a copy of every lower card of the suit moved or in a top unit?
+    /// with a copy of every lower card of the suit moved, or in a top unit
+    /// above its bottom card (which may have been split off)?
     fn completable(&self, left: &[u8; NUM_COLS]) -> bool {
         let starts: [usize; NUM_COLS] = std::array::from_fn(|c| self.unit(c, left[c]));
         (0..NUM_COLS).any(|c| {
@@ -456,7 +457,7 @@ impl Units<'_> {
                 return false;
             }
             let lowest = self.cols[c][left[c] as usize - 1];
-            (king - 12..lowest).all(|card| (0..NUM_COLS).any(|j| self.cols[j][starts[j]..].contains(&card)))
+            (king - 12..lowest).all(|card| (0..NUM_COLS).any(|j| self.cols[j][starts[j] + 1..].contains(&card)))
         })
     }
 }
@@ -724,6 +725,9 @@ impl Dealing<'_> {
         }
         let moved = self.moved(st);
         if self.completable(st, moved) {
+            if std::env::var_os("SPIDER_CERT_DEBUG").is_some() {
+                eprintln!("  a suit might be completed with left {:?} bottoms {:?} tops {:?} after {} deals", st.left, st.base, &st.tops[..13], st.deals);
+            }
             return true;
         }
         if !self.seen.insert(st.clone()) {
@@ -859,46 +863,43 @@ impl Dealing<'_> {
         false
     }
 
-    /// Might some suit be completed (see [`lost_certificate`])?
+    /// Might some suit be completed (see [`lost_certificate`])? Every card
+    /// of it that is not in place on its king has to have moved onto the
+    /// run by then, unless it was dealt there.
     fn completable(&self, st: &Dealt, moved: u64) -> bool {
-        let mut have = moved;
-        for c in 0..NUM_COLS {
-            if st.left[c] > 0 {
-                for &v in &self.cols[c][self.unit(c, st.left[c])..st.left[c] as usize] {
-                    have |= 1 << v;
+        // The cards dealt and in place on columns emptied and refilled,
+        // where a king that moved may be.
+        let mut refilled = 0u64;
+        for j in 0..st.deals as usize {
+            for c in 0..NUM_COLS {
+                if st.left[c] == 0 && st.in_place[j] >> c & 1 == 1 {
+                    refilled |= 1 << self.deals[j][c];
                 }
-            }
-        }
-        for deal in &self.deals[..st.deals as usize] {
-            for &v in deal {
-                have |= 1 << v;
             }
         }
         (0..4u8).any(|suit| {
             let (king, ace) = (suit * 13 + 12, suit * 13);
-            // The lowest card a king of the suit has on it without anything moving.
-            let mut lowest = if moved >> king & 1 == 1 { Some(king) } else { None };
-            for c in 0..NUM_COLS {
+            let all = |lowest: u8, have: u64| (ace..lowest).all(|card| have >> card & 1 == 1);
+            if moved >> king & 1 == 1 && all(king, moved | refilled) {
+                return true;
+            }
+            (0..NUM_COLS).any(|c| {
                 // The cards dealt onto the column and in place, last first:
                 // a king of the suit there, or under them all, will do if
                 // those above it are of the suit.
-                let mut found = None;
-                let mut clear = true;
+                let mut dealt = 0u64;
                 for j in (0..st.deals as usize).rev().filter(|&j| st.in_place[j] >> c & 1 == 1) {
                     let v = self.deals[j][c];
-                    if v == king && clear {
-                        found = Some(king);
+                    if v == king && all(king, moved | dealt) {
+                        return true;
                     }
-                    clear &= v / 13 == suit;
+                    if v / 13 != suit {
+                        return false;
+                    }
+                    dealt |= 1 << v;
                 }
-                if clear && st.left[c] > 0 && self.cols[c][self.unit(c, st.left[c])] == king {
-                    found = Some(self.cols[c][st.left[c] as usize - 1]);
-                }
-                if let Some(top) = found {
-                    lowest = Some(lowest.map_or(top, |l| l.min(top)));
-                }
-            }
-            lowest.is_some_and(|lowest| (ace..lowest).all(|card| have >> card & 1 == 1))
+                st.left[c] > 0 && self.cols[c][self.unit(c, st.left[c])] == king && all(self.cols[c][st.left[c] as usize - 1], moved | dealt)
+            })
         })
     }
 }
