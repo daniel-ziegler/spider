@@ -55,9 +55,10 @@ when the server starts.)
 * Cards that nothing could still want to lie on go to the foundations by
   themselves after every move, as part of it. A run moves between columns in
   one move if the empty cells and columns allow it a card at a time.
-* Nothing is hidden, so every undo counts (`real_undos` = `undos`), still
-  only the first time a move is taken back. Only the first undo of a game
-  asks before it is made.
+* Nothing is hidden, so an undo counts (a real undo), unless a move could
+  do the same: the cards can go straight back and none went to the
+  foundations meanwhile. Still only the first time a move is taken back.
+  Only the first undo of a game that counts asks before it is made.
 * The mark for a game that can no longer be won comes from a search in a
   worker (`static/fcwinnable.js`, which describes it): up to 2,000,000
   positions, after quick restarts that find nearly every win in a few

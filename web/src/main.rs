@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 -- game: 'spider' (suits 1-4) or 'freecell' (suits 4), here and in games.
 -- moves: length of the winning line. undos: every undo; real_undos: those
--- that took back a card flip or a deal (in FreeCell, all of them).
+-- that took back a card flip or a deal (in FreeCell, a move that could not
+-- just be played back).
 CREATE TABLE IF NOT EXISTS wins (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -331,9 +332,6 @@ fn check_win(w: &Win) -> Result<usize, String> {
 }
 
 fn check_freecell_win(w: &Win) -> Result<usize, String> {
-    if w.real_undos != w.undos {
-        return Err("every undo counts in FreeCell".into());
-    }
     let moves = freecell::parse_moves(&w.moves)?;
     let mut g = freecell::Game::new(w.seed as u32);
     for (i, &mv) in moves.iter().enumerate() {
@@ -581,7 +579,7 @@ mod tests {
             if g.is_won() {
                 wins += 1;
                 assert_eq!(check_win(&win(2, 2)), Ok(f[2].split(',').count()));
-                assert!(check_win(&win(2, 1)).is_err(), "every undo counts");
+                assert!(check_win(&win(1, 2)).is_err());
                 assert!(check_win(&Win { seed: seed as u64 + 1, ..win(0, 0) }).is_err());
             } else {
                 assert!(check_win(&win(0, 0)).is_err());

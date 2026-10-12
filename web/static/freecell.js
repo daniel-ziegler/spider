@@ -107,8 +107,13 @@ export class FreeCell extends Played {
 
   check(mv) { return this.checkMove(mv.from, mv.to, mv.count); }
 
-  // Nothing is hidden, so every undo counts.
-  isReal() { return true; }
+  // Nothing is hidden, so an undo counts, unless it only does what a move
+  // could: the cards can go straight back, and none went to the foundations
+  // meanwhile. (Asked just after the move is made.)
+  isReal(rec) {
+    const { from, to, count } = rec.mv;
+    return to === HOME || rec.auto.length > 0 || this.checkMove(to, from, count) !== null;
+  }
 
   take(place, count) {
     if (place < COLS) return this.columns[place].splice(this.columns[place].length - count);

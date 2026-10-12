@@ -332,8 +332,8 @@ function autoMove(from, count) {
 async function undo() {
   if (!g.canUndo()) return;
   if (g.freecell) {
-    // Every undo counts; only the first is asked about.
-    if (!undoCount() && !await confirmDialog('Use an undo?', 'In FreeCell every undo counts, and you have not used one in this game.', 'Undo', ['u'])) return;
+    // Only the first undo that counts is asked about.
+    if (g.undoCosts() && !realUndoCount() && !await confirmDialog('Use an undo?', 'This move cannot just be played back, so taking it back counts as an undo, and you have not used one in this game.', 'Undo', ['u'])) return;
   } else if (g.undoCosts()) {
     const what = g.history.at(-1).mv.deal ? 'a deal' : 'a move that turned a card over';
     if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo', ['u'])) return;
@@ -772,7 +772,7 @@ function freecellHtml(resume) {
     </section>
     <section class="box">
       <h2>Free play</h2>
-      <p class="dim">Every card is face up, so every undo counts. Deals are numbered as in Microsoft FreeCell.</p>
+      <p class="dim">Every card is face up, so undos count, except of a move you could just play back. Deals are numbered as in Microsoft FreeCell.</p>
       ${resume}
       <div class="row start"><button type="button" data-random="freecell">Random deal</button></div>
       <form class="deal">
@@ -930,7 +930,8 @@ function freecellHelp() {
     Cards that are no more use in the columns go to the foundations by themselves.</p>
     <p>Drag cards, or tap a run and then where it should go. Tap a picked run again to move it wherever it fits best.
     <b>Hint</b> steps through useful moves, best first; tap the place outlined in green to play one.</p>
-    <p>Nothing is hidden, so every <b>undo</b> counts (taking the same move back again after a redo does not count again).
+    <p>Nothing is hidden, so an <b>undo</b> counts, unless the move could just be played back (a card put in a free cell, say,
+    with nothing gone to the foundations since). Taking the same move back again after a redo does not count again.
     Wins record your moves and undos.</p>
     <p>In Settings you can have the game say when it <b>can no longer be won</b>.</p>
     <dl>${keys.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
