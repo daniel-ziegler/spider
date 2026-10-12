@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -370,6 +370,15 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
             mine.insert(key, best);
         }
     }
+    // The deals the player has played to where they could no longer be won
+    // (the client says so in the game it saves).
+    let mut lost: HashSet<(u8, i64)> = HashSet::new();
+    if let Some(user) = &user {
+        let mut stmt = db.prepare("SELECT suits, seed FROM games WHERE user_id = ?1 AND json_extract(state, '$.lost')")?;
+        for row in stmt.query_map([user.id], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            lost.insert(row?);
+        }
+    }
     let mut days: Vec<Value> = Vec::new();
     for (date, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
         let key = (*suits, *seed as i64);
@@ -377,6 +386,7 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
         let mut challenge = json!({ "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
         if user.is_some() {
             challenge["solvers"] = json!(names);
+            challenge["lost"] = json!(lost.contains(&key));
         }
         match days.last_mut() {
             Some(day) if day["date"] == *date => day["challenges"].as_array_mut().unwrap().insert(0, challenge),

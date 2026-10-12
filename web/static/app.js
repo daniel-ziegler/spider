@@ -41,7 +41,7 @@ async function api(method, path, body) {
 // ---------------------------------------------------------------- state
 
 let me = null; // {username, settings} when logged in
-let settings = { colors: 'mine', breaks: true, fate: false, ...store.get('spider:settings', {}) };
+let settings = { colors: 'mine', breaks: true, lostMark: true, ...store.get('spider:settings', {}) }; // (lostMark: say when the game can no longer be won)
 applySettings({}, false);
 
 let view = 'home'; // 'home', 'archive' or 'game'
@@ -69,7 +69,7 @@ const realUndoCount = () => base[1] + g.realUndos;
 // The game as saved here and on the server: the tree of every move played,
 // and the line of it that is on the board.
 function snapshot() {
-  return { tree: g.treeText(), moves: encodeMoves(g.moves()), base, recorded, at: changedAt };
+  return { tree: g.treeText(), moves: encodeMoves(g.moves()), base, recorded, at: changedAt, ...(lostOnce && { lost: true }) };
 }
 
 // Set up g from a snapshot (or nothing, for a new game).
@@ -78,6 +78,7 @@ function restore(suits, seed, s) {
   base = [0, 0];
   recorded = '';
   changedAt = 0;
+  lostOnce = !!s?.lost;
   if (!s) return;
   try {
     if (typeof s.tree === 'string') {
@@ -159,7 +160,7 @@ async function pull() {
     endDrag();
     press = sel = hint = null;
     restore(suits, seed, {
-      tree, moves: a.moves, recorded: a.recorded || b.recorded,
+      tree, moves: a.moves, recorded: a.recorded || b.recorded, lost: a.lost || b.lost,
       base: [0, 1].map(i => Math.max(a.base?.[i] | 0, b.base?.[i] | 0)), at: Math.max(a.at || 0, b.at || 0),
     });
   } catch {
@@ -363,6 +364,7 @@ const lostKnown = new Map(); // what has been seen, as a key -> whether the game
 let lostWorker = null;
 let lostAt = null; // what was last looked at: {key, moves: how many moves led to it, slipped}
 let lostWaiting = null; // the key the worker is on
+let lostOnce = false; // whether this deal has ever been played to where it was lost: kept with the game, and its challenge shows red
 
 function stopLost() {
   lostWorker?.terminate();
@@ -384,7 +386,7 @@ function dealsSeen() {
 function updateLost() {
   if (finishing) return;
   const el = $('#fate');
-  if (!settings.fate || view !== 'game' || g.isWon()) {
+  if (!settings.lostMark || view !== 'game' || g.isWon()) {
     stopLost();
     lostAt = null;
     el.hidden = true;
@@ -401,6 +403,7 @@ function updateLost() {
     if (lostAt.slipped && lostKnown.get(key)) warnLost();
   }
   el.hidden = lostKnown.get(key) !== true;
+  if (!el.hidden) noteLost();
   if (lostKnown.has(key)) {
     if (lostWaiting !== key) stopLost();
     return;
@@ -427,10 +430,18 @@ function updateLost() {
     lostKnown.set(key, data.lost);
     if (lostAt?.key !== key || !data.lost) return;
     el.hidden = false;
+    noteLost();
     if (lostAt.slipped) warnLost();
   };
   worker.onerror = () => { if (lostWorker === worker) stopLost(); };
   worker.postMessage({ key, columns, faceDown: g.faceDown, stock: g.stock, unseen, limit: LOST_LIMIT, open });
+}
+
+function noteLost() {
+  if (lostOnce) return;
+  lostOnce = true;
+  save();
+  queueSync();
 }
 
 function warnLost() {
@@ -558,8 +569,11 @@ const longDate = date => new Date(`${date}T12:00`).toLocaleDateString(undefined,
 const isMe = name => !!me && name.toLowerCase() === me.username.toLowerCase();
 const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf(suits, seed)]; return !!(s && (s.moves || s.tree || s.undos)); };
 
-// Green once you have won it; yellow if that took real undos.
-const wonClass = c => (c.mine ? (c.mine.real_undos ? ' won undos' : ' won') : '');
+// Whether the deal was ever played to where it could no longer be won.
+const wasLost = c => !!(c.lost || store.get('spider:saves', {})[keyOf(c.suits, c.seed)]?.lost);
+// Green once you have won it; yellow if that took real undos, or came after
+// playing it to where it was lost; red if it was lost and has not been won.
+const wonClass = c => (c.mine ? (c.mine.real_undos || wasLost(c) ? ' won undos' : ' won') : wasLost(c) ? ' lost' : '');
 
 function solversText(c) {
   if (!c.solved) return 'No one has won it yet';
@@ -570,7 +584,7 @@ function solversText(c) {
 // A challenge on the home page.
 function challengeTile(c) {
   const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${plural(c.mine.real_undos, 'undo')}`
-    : started(c.suits, c.seed) ? 'In progress' : 'Play';
+    : wasLost(c) ? 'Lost: take moves back' : started(c.suits, c.seed) ? 'In progress' : 'Play';
   const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
   return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${c.suits}/${c.seed}">
@@ -581,7 +595,7 @@ function challengeTile(c) {
 // A challenge in the archive, whose columns are labelled with the suits.
 function challengeCell(c) {
   const lines = c.mine ? [`✓ ${c.mine.moves}`, plural(c.mine.real_undos, 'undo')]
-    : [started(c.suits, c.seed) ? 'started' : 'play', '&nbsp;'];
+    : [wasLost(c) ? 'lost' : started(c.suits, c.seed) ? 'started' : 'play', '&nbsp;'];
   lines.push(c.solvers?.length ? c.solvers.map(n => (isMe(n) ? 'you' : esc(n))).join(', ') : c.solved ? `${c.solved} won` : '&nbsp;');
   const [first, ...rest] = lines;
   return `<button type="button" class="challenge${wonClass(c)}" data-play="${c.suits}/${c.seed}" title="${solversText(c)}">
@@ -635,7 +649,7 @@ function archiveHtml() {
     <div class="row start"><button type="button" data-go="home">← Home</button></div>
     <section class="box">
       <h2>Daily challenges</h2>
-      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some. Free undos don't count.</p>
+      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, or first played it to where it could no longer be won; red that you did that and have not won it since. Free undos don't count.</p>
       ${dailies ? `<div class="archive"><span></span>${SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
         ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
@@ -736,7 +750,7 @@ function settingsDialog() {
     <label>Mark where a stack breaks (a card on one that is not one rank higher)</label>
     <div class="choices"><button type="button" data-breaks="" aria-pressed="${!settings.breaks}">Off</button><button type="button" data-breaks="1" aria-pressed="${!!settings.breaks}">On</button></div>
     <label>Say when the game can no longer be won (going only by the cards you have seen)</label>
-    <div class="choices"><button type="button" data-fate="" aria-pressed="${!settings.fate}">Off</button><button type="button" data-fate="1" aria-pressed="${!!settings.fate}">On</button></div>
+    <div class="choices"><button type="button" data-fate="" aria-pressed="${!settings.lostMark}">Off</button><button type="button" data-fate="1" aria-pressed="${!!settings.lostMark}">On</button></div>
     <div class="row"><button class="primary" data-close>Done</button></div>`;
   openDialog(html(), e => {
     const b = e.target.closest('[data-colors]');
@@ -744,7 +758,7 @@ function settingsDialog() {
     const f = e.target.closest('[data-fate]');
     if (b) applySettings({ colors: b.dataset.colors });
     else if (k) applySettings({ breaks: !!k.dataset.breaks });
-    else if (f) { applySettings({ fate: !!f.dataset.fate }); render(); }
+    else if (f) { applySettings({ lostMark: !!f.dataset.fate }); render(); }
     else return;
     dialog.querySelector('.panel').innerHTML = html();
   });

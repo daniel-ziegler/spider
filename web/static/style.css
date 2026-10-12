@@ -219,7 +219,9 @@ button.challenge small { font-size: 12px; white-space: nowrap; overflow: hidden;
 button.challenge small:last-child { color: var(--ink-dim); }
 button.challenge.won { --won: #6ee7a8; border-color: var(--won); background: color-mix(in srgb, var(--won) 12%, transparent); }
 button.challenge.won.undos { --won: #ffd54a; }
-button.challenge.won > span:not(.pips), button.challenge.won small:first-of-type { color: var(--won); }
+button.challenge.lost { --won: #ff7b72; border-color: var(--won); background: color-mix(in srgb, var(--won) 12%, transparent); }
+button.challenge.won > span:not(.pips), button.challenge.won small:first-of-type,
+button.challenge.lost > span:not(.pips), button.challenge.lost small:first-of-type { color: var(--won); }
 dialog .error { color: #ff8a80; min-height: 1.4em; }
 dialog .menu { display: grid; gap: 8px; }
 dialog .menu button { text-align: left; }

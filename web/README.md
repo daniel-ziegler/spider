@@ -21,7 +21,7 @@ a deal are shown only to players who have won it.
 
 ## Can it still be won?
 
-A setting (off by default) marks the game, and says so when a move does it,
+A setting (on by default) marks the game, and says so when a move does it,
 once it can no longer be won *whatever the cards you have not seen are*. It
 goes only by what the player has seen (the cards face up, those turned up in
 some line since taken back, and the stock if every deal has been made in some
@@ -34,6 +34,10 @@ used only when nothing at all is unseen, and then only to say that there is
 no win. Both search step for step as the Rust does: `cargo test` in the
 repository root runs them on some 300 positions from play
 (`test/winnable.mjs`) and compares verdicts, work and winning lines.
+
+A deal once played to where it could no longer be won is marked so in its
+saved game (`lost`), and its daily challenge shows red until it is won, and
+yellow then, whatever undos that took.
 
 ## Daily challenges
 
