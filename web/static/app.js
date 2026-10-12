@@ -445,7 +445,7 @@ function noteLost() {
 }
 
 function warnLost() {
-  flash('This game can no longer be won, whatever the cards you have not seen are. Undo to go back.', 8000);
+  flash('Unwinnable. Undo to go back.', 8000);
 }
 
 // ---------------------------------------------------------------- winning
