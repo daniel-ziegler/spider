@@ -10,7 +10,7 @@ const SUITS = ['♠', '♥', '♦', '♣'].map(s => s + '︎');
 const SUIT_COUNTS = [1, 2, 3, 4];
 const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
-const GHOST = 2 / 3; // how much of a face-up card's strip (and type size) a seen face-down card gets
+const GHOST = 2 / 3; // how much of a face-up card's strip a seen face-down card gets, if its rank still fits
 const SYNC_MS = 5000; // a game in progress goes to the server at most this often
 
 const $ = s => document.querySelector(s);
@@ -875,9 +875,10 @@ function cardTops(c) {
     down = Math.max(3, Math.min(down, (room - ups * up) / Math.max(fd, 1)));
     if (ups) up = Math.max(L.font * 1.1, Math.min(up, (room - fd * down) / ups));
   }
+  const ghost = Math.min(up, Math.max(up * GHOST, L.font * 1.1));
   const tops = [];
   let y = L.top0;
-  for (let i = 0; i < n; i++) { tops.push(y); y += i < fd ? down : i < g.faceDown[c] ? up * GHOST : up; }
+  for (let i = 0; i < n; i++) { tops.push(y); y += i < fd ? down : i < g.faceDown[c] ? ghost : up; }
   return tops;
 }
 
