@@ -42,7 +42,8 @@ saved game (`lost`), and its daily challenge shows red until it is won.
 
 The home page switches between Spider and FreeCell. FreeCell has free play
 only (no daily challenges yet): a random deal or a deal number, numbered as
-in Microsoft FreeCell. Its address is `/freecell/DEAL`. A deal is
+in Microsoft FreeCell. Its home page is `/freecell` and a deal
+`/freecell/DEAL`. A deal is
 `(game, suits, seed)` in the API and the database: `spider` with 1-4 suits,
 or `freecell`, always with 4. (A database from before FreeCell is migrated
 when the server starts.)

@@ -53,7 +53,7 @@ let settings = { colors: 'mine', breaks: true, lostMark: true, ...store.get('spi
 applySettings({}, false);
 
 let view = 'home'; // 'home', 'archive' or 'game'
-let homeGame = store.get('spider:game', 'spider'); // the game the home page is showing: 'spider' or 'freecell'
+let homeGame = 'spider'; // the game the home page is showing, 'spider' (at /) or 'freecell' (at /freecell), and the site is dressed for
 let g = null; // the Game or FreeCell, once one is loaded
 let base = [0, 0]; // undos and real undos made before saves kept the whole tree of moves, which counts the rest
 let changedAt = 0; // when this game was last played in, here or (once synced) elsewhere
@@ -88,7 +88,6 @@ const mascot = () => (homeGame === 'freecell' ? '#crown' : '#spider');
 
 function setHomeGame(name) {
   homeGame = name;
-  store.set('spider:game', name);
   document.body.dataset.game = name;
   document.title = $('.logo .word').textContent = siteName();
   for (const use of document.querySelectorAll('use.mascot')) use.setAttribute('href', mascot());
@@ -243,7 +242,8 @@ function setView(v) {
 
 // The home page or the archive.
 function showPage(name, push = false) {
-  setUrl(name === 'archive' ? '/archive' : '/', push);
+  if (name === 'archive') setHomeGame('spider'); // the challenges are Spider's
+  setUrl(name === 'archive' ? '/archive' : homeGame === 'freecell' ? '/freecell' : '/', push);
   setView(name);
   sync();
   sel = hint = null;
@@ -258,7 +258,7 @@ function route() {
   if (m && +m[2] <= MAX_SEED) return load(spiderDeal(+m[1], +m[2]));
   const f = /^\/freecell(?:\/(\d{1,10}))?\/?$/.exec(location.pathname);
   if (f?.[1] && +f[1] <= MAX_DEAL) return load(freecellDeal(+f[1]));
-  if (f) setHomeGame('freecell');
+  setHomeGame(f ? 'freecell' : 'spider');
   showPage(location.pathname === '/archive' ? 'archive' : 'home');
 }
 
@@ -806,7 +806,7 @@ page.addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.go) showPage(b.dataset.go, true);
-  else if (b.dataset.game) { setHomeGame(b.dataset.game); render(); }
+  else if (b.dataset.game) { setHomeGame(b.dataset.game); showPage('home', true); }
   else if (b.dataset.random) load(b.dataset.random === 'freecell' ? freecellDeal(randomSeed()) : spiderDeal(+b.dataset.random, randomSeed()), true);
   else if ('login' in b.dataset) accountDialog('login');
   else if ('signup' in b.dataset) accountDialog('signup');
