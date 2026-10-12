@@ -42,8 +42,10 @@ saved game (`lost`), and its daily challenge shows red until it is won.
 
 The home page switches between Spider and FreeCell. FreeCell has free play
 only (no daily challenges yet): a random deal or a deal number, numbered as
-in Microsoft FreeCell. Its address is `/freecell/DEAL`; everywhere else a
-deal is `(suits, seed)` (saves, the API, the database) FreeCell is 0 suits.
+in Microsoft FreeCell. Its address is `/freecell/DEAL`. A deal is
+`(game, suits, seed)` in the API and the database: `spider` with 1-4 suits,
+or `freecell`, always with 4. (A database from before FreeCell is migrated
+when the server starts.)
 
 * `static/freecell.js` has the rules, on the same tree of moves as Spider
   (`Played` in `game.js`), and `src/freecell.rs` is the server's port of

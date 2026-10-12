@@ -41,8 +41,9 @@ export function deal(seed) {
 export class FreeCell extends Played {
   constructor(seed) {
     super();
+    this.game = 'freecell';
     this.freecell = true;
-    this.suits = 0; // what saves and the server know FreeCell by
+    this.suits = 4;
     this.seed = seed;
     this.columns = deal(seed);
     this.cells = new Array(CELLS).fill(null); // a card or null

@@ -2,11 +2,12 @@
 // ones, and the board, with mouse/touch and keyboard play. In-progress games
 // are saved in this browser; wins are recorded on the server.
 //
-// It plays FreeCell too (freecell.js). A FreeCell game is known everywhere a
-// Spider one is known by its suits (saves, the server) as 0 suits, and g is
-// then a FreeCell, whose columns are places 0-7, free cells 8-11, and
-// foundations the place HOME: sel.col, a move's from and to, and what
-// placeAt gives are places.
+// It plays FreeCell too (freecell.js): g is then a FreeCell, whose columns
+// are places 0-7, free cells 8-11, and foundations the place HOME: sel.col, a
+// move's from and to, and what placeAt gives are places.
+//
+// A deal is {game: 'spider' or 'freecell', suits, seed} (FreeCell always has
+// 4 suits): g is one, and so are a win and a daily challenge.
 import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves, parseTree, mergeTree, treeText } from './game.js';
 import { FreeCell, COLS, HOME, MAX_DEAL, follows } from './freecell.js';
 
@@ -68,10 +69,16 @@ let L; // layout, see computeLayout
 
 // ---------------------------------------------------------------- saving and loading
 
-const keyOf = (suits, seed) => `${suits}/${seed}`;
-const newGame = (suits, seed) => (suits ? new Game(suits, seed) : new FreeCell(seed));
-const gameUrl = (suits, seed) => (suits ? `/play/${suits}/${seed}` : `/freecell/${seed}`);
-const lastKey = suits => (suits ? 'spider:last' : 'spider:last:freecell'); // where the last game played is kept
+const spiderDeal = (suits, seed) => ({ game: 'spider', suits, seed });
+const freecellDeal = seed => ({ game: 'freecell', suits: 4, seed });
+const sameDeal = (a, b) => a.game === b.game && a.suits === b.suits && a.seed === b.seed;
+// What a deal's save is kept under (a Spider deal's key is older than FreeCell here, so it does not name the game).
+const keyOf = d => (d.game === 'freecell' ? `freecell/${d.seed}` : `${d.suits}/${d.seed}`);
+const dealOf = key => { const [a, b] = key.split('/'); return a === 'freecell' ? freecellDeal(+b) : spiderDeal(+a, +b); };
+const apiPath = d => `${d.game}/${d.suits}/${d.seed}`;
+const newGame = d => (d.game === 'freecell' ? new FreeCell(d.seed) : new Game(d.suits, d.seed));
+const gameUrl = d => (d.game === 'freecell' ? `/freecell/${d.seed}` : `/play/${d.suits}/${d.seed}`);
+const lastKey = game => (game === 'freecell' ? 'spider:last:freecell' : 'spider:last'); // where the last game played is kept
 const numCols = () => g.columns.length;
 const pileLen = place => (g.freecell ? g.pile(place).length : g.columns[place].length);
 
@@ -92,8 +99,8 @@ function snapshot() {
 }
 
 // Set up g from a snapshot (or nothing, for a new game).
-function restore(suits, seed, s) {
-  g = newGame(suits, seed);
+function restore(deal, s) {
+  g = newGame(deal);
   base = [0, 0];
   recorded = '';
   changedAt = 0;
@@ -114,17 +121,17 @@ function restore(suits, seed, s) {
     recorded = s.recorded ?? '';
     changedAt = s.at ?? s.t ?? 0;
   } catch {
-    g = newGame(suits, seed);
+    g = newGame(deal);
     base = [0, 0];
   }
 }
 
 function save() {
   const saves = store.get('spider:saves', {});
-  saves[keyOf(g.suits, g.seed)] = { ...snapshot(), t: Date.now() };
+  saves[keyOf(g)] = { ...snapshot(), t: Date.now() };
   for (const k of Object.keys(saves).sort((a, b) => saves[b].t - saves[a].t).slice(MAX_SAVES)) delete saves[k];
   store.set('spider:saves', saves);
-  store.set(lastKey(g.suits), keyOf(g.suits, g.seed));
+  store.set(lastKey(g.game), keyOf(g));
 }
 
 // The game changed: save it here and, before long, on the server.
@@ -151,7 +158,7 @@ function sync(leaving = false) {
   unsynced = false;
   syncedAt = Date.now();
   const body = JSON.stringify(snapshot());
-  fetch(`/api/games/${g.suits}/${g.seed}`, {
+  fetch(`/api/games/${apiPath(g)}`, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body,
     keepalive: leaving && body.length < 60000, // browsers refuse to keep bigger requests alive
   }).then(res => { if (!res.ok && res.status !== 401) unsynced = true; }, () => { unsynced = true; }); // the next change tries again
@@ -161,10 +168,10 @@ function sync(leaving = false) {
 // and the board shows whichever copy was played in last.
 async function pull() {
   if (!me || view !== 'game') return;
-  const { suits, seed } = g, was = changedAt;
+  const deal = { game: g.game, suits: g.suits, seed: g.seed }, was = changedAt;
   let remote;
-  try { remote = (await api('GET', `/games/${suits}/${seed}`)).state; } catch { return; }
-  if (view !== 'game' || g.suits !== suits || g.seed !== seed || finishing) return;
+  try { remote = (await api('GET', `/games/${apiPath(deal)}`)).state; } catch { return; }
+  if (view !== 'game' || !sameDeal(g, deal) || finishing) return;
   const local = snapshot();
   if (typeof remote?.tree !== 'string') {
     if (local.tree) queueSync();
@@ -178,12 +185,12 @@ async function pull() {
     if (!theirs && tree === local.tree) return queueSync(); // nothing new there
     endDrag();
     press = sel = hint = null;
-    restore(suits, seed, {
+    restore(deal, {
       tree, moves: a.moves, recorded: a.recorded || b.recorded, lost: a.lost || b.lost,
       base: [0, 1].map(i => Math.max(a.base?.[i] | 0, b.base?.[i] | 0)), at: Math.max(a.at || 0, b.at || 0),
     });
   } catch {
-    restore(suits, seed, local);
+    restore(deal, local);
   }
   save();
   queueSync();
@@ -197,19 +204,19 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => sync(true));
 
-function load(suits, seed, push = false) {
+function load(deal, push = false) {
   sync();
-  restore(suits, seed, store.get('spider:saves', {})[keyOf(suits, seed)]);
+  restore(deal, store.get('spider:saves', {})[keyOf(deal)]);
   sel = null;
-  setHomeGame(suits ? 'spider' : 'freecell');
-  setUrl(gameUrl(suits, seed), push);
+  setHomeGame(deal.game);
+  setUrl(gameUrl(deal), push);
   setView('game');
   computeLayout();
   $('#dangler').hidden = true;
   save();
   render();
   startup.then(() => { // once we know who is logged in
-    if (view !== 'game' || g.suits !== suits || g.seed !== seed) return;
+    if (view !== 'game' || !sameDeal(g, deal)) return;
     if (g.isWon()) onWin();
     pull();
   });
@@ -240,9 +247,9 @@ function showPage(name, push = false) {
 
 function route() {
   const m = /^\/play\/([1-4])\/(\d{1,16})\/?$/.exec(location.pathname);
-  if (m && +m[2] <= MAX_SEED) return load(+m[1], +m[2]);
+  if (m && +m[2] <= MAX_SEED) return load(spiderDeal(+m[1], +m[2]));
   const f = /^\/freecell(?:\/(\d{1,10}))?\/?$/.exec(location.pathname);
-  if (f?.[1] && +f[1] <= MAX_DEAL) return load(0, +f[1]);
+  if (f?.[1] && +f[1] <= MAX_DEAL) return load(freecellDeal(+f[1]));
   if (f) setHomeGame('freecell');
   showPage(location.pathname === '/archive' ? 'archive' : 'home');
 }
@@ -358,13 +365,13 @@ function updateFinish() {
     // In FreeCell: once sending cards to the foundations is all that is left.
     solver?.terminate();
     solver = null;
-    const key = `0/${g.seed}/${g.positionText()}`;
+    const key = `${keyOf(g)}/${g.positionText()}`;
     if (finish?.key !== key && !finishing) finish = { key, line: g.finishLine() };
     $('#b-finish').hidden = !finish?.line || finishing;
     return;
   }
   const open = g.stock.length === 0 && g.faceDown.every(n => n === 0) && !g.isWon();
-  const key = open ? `${g.suits}/${g.seed}/${g.positionText()}` : null;
+  const key = open ? `${keyOf(g)}/${g.positionText()}` : null;
   if (finish?.key !== key && !finishing) {
     solver?.terminate();
     solver = null;
@@ -453,7 +460,7 @@ function updateLost() {
   }
   const moves = g.history.length;
   let key, stockSeen = true;
-  if (g.freecell) key = `0/${g.key()}`;
+  if (g.freecell) key = `freecell/${g.key()}`;
   else {
     const dealt = g.history.filter(r => r.mv.deal).length;
     stockSeen = dealsSeen() >= dealt + g.dealsRemaining();
@@ -480,7 +487,7 @@ function updateLost() {
     const worker = lostWorker = new Worker('/fcwinnable.js', { type: 'module' });
     worker.onmessage = ({ data }) => {
       if (lostWorker !== worker || data.key !== key) return;
-      if (data.line && view === 'game' && g.freecell && `0/${g.key()}` === key) noteLine(parseMoves(data.line));
+      if (data.line && view === 'game' && g.freecell && `freecell/${g.key()}` === key) noteLine(parseMoves(data.line));
       lostAnswer(key, data.lost);
     };
     worker.onerror = () => { if (lostWorker === worker) stopLost(); };
@@ -522,7 +529,7 @@ function noteLine(line) {
   for (const mv of line) {
     if (g.check(mv)) break;
     recs.push(g.applyRaw(mv));
-    lostKnown.set(`0/${g.key()}`, false);
+    lostKnown.set(`freecell/${g.key()}`, false);
   }
   while (recs.length) g.unapply(recs.pop());
 }
@@ -540,14 +547,15 @@ function warnLost() {
 
 // ---------------------------------------------------------------- winning
 
-function pending() { return store.get('spider:pending', []); }
+// Wins made while logged out (those from before FreeCell do not name their game).
+function pending() { return store.get('spider:pending', []).map(p => ({ game: 'spider', ...p })); }
 
 function markRecorded(win) {
   const saves = store.get('spider:saves', {});
-  const s = saves[keyOf(win.suits, win.seed)];
+  const s = saves[keyOf(win)];
   if (s) { s.recorded = win.moves; store.set('spider:saves', saves); }
-  if (g.suits === win.suits && g.seed === win.seed) recorded = win.moves;
-  store.set('spider:pending', pending().filter(p => !(p.suits === win.suits && p.seed === win.seed && p.moves === win.moves)));
+  if (sameDeal(g, win)) recorded = win.moves;
+  store.set('spider:pending', pending().filter(p => !(sameDeal(p, win) && p.moves === win.moves)));
 }
 
 // Send wins made while logged out.
@@ -563,11 +571,11 @@ async function submitPending() {
 }
 
 async function onWin() {
-  const win = { suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), real_undos: realUndoCount(), undos: undoCount() };
+  const win = { game: g.game, suits: g.suits, seed: g.seed, moves: encodeMoves(g.moves()), real_undos: realUndoCount(), undos: undoCount() };
   const d = $('#dangler');
   if (d.hidden) { d.hidden = false; d.style.animation = 'none'; void d.offsetWidth; d.style.animation = ''; }
   if (!me) {
-    if (win.moves !== recorded && !pending().some(p => p.suits === win.suits && p.seed === win.seed && p.moves === win.moves)) {
+    if (win.moves !== recorded && !pending().some(p => sameDeal(p, win) && p.moves === win.moves)) {
       store.set('spider:pending', [...pending(), win]);
     }
     return showWinDialog(win, `<p>Log in to record this win and see how your friends did.</p>
@@ -575,7 +583,7 @@ async function onWin() {
   }
   showWinDialog(win, '<p>Saving…</p>');
   try {
-    const data = win.moves === recorded ? await api('GET', `/results/${win.suits}/${win.seed}`) : await api('POST', '/wins', win);
+    const data = win.moves === recorded ? await api('GET', `/results/${apiPath(win)}`) : await api('POST', '/wins', win);
     markRecorded(win);
     save();
     queueSync();
@@ -588,11 +596,11 @@ async function onWin() {
 
 function showWinDialog(win, body) {
   if (dialog.open && !dialog.querySelector('[data-win]')) return; // don't replace another dialog
-  const date = dailyDate(win.suits, win.seed);
+  const date = dailyDate(win);
   openDialog(`<h2 data-win>Solved!</h2>
-    <p>${date ? `Daily challenge · ${dayLabel(date)} · ${suitsLabel(win.suits)}` : `${suitsLabel(win.suits)} · deal ${win.seed}`}<br>
+    <p>${date ? `Daily challenge · ${dayLabel(date)} · ${dealLabel(win)}` : `${dealLabel(win)} · deal ${win.seed}`}<br>
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
-      <b>${plural(win.real_undos, 'undo')}</b>${win.suits ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
+      <b>${plural(win.real_undos, 'undo')}</b>${win.game === 'spider' ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
     <div>${body}</div>
     <div class="row"><button data-close>Look at the board</button><button class="primary" data-home>More games</button></div>`,
   e => {
@@ -636,7 +644,8 @@ function confirmDialog(title, text, ok, keys = []) {
   });
 }
 
-const suitsLabel = n => (n ? plural(n, 'suit') : 'FreeCell');
+const suitsLabel = n => plural(n, 'suit');
+const dealLabel = d => (d.game === 'freecell' ? 'FreeCell' : suitsLabel(d.suits));
 
 // ---------------------------------------------------------------- home page and daily challenges
 
@@ -646,8 +655,8 @@ async function fetchDailies() {
 }
 
 // The date of the daily challenge with this deal, if it is one.
-function dailyDate(suits, seed) {
-  return dailies?.days.find(d => d.challenges.some(c => c.suits === suits && c.seed === seed))?.date ?? null;
+function dailyDate(deal) {
+  return dailies?.days.find(d => d.challenges.some(c => sameDeal(c, deal)))?.date ?? null;
 }
 
 function dayLabel(date) {
@@ -657,10 +666,10 @@ function dayLabel(date) {
 
 const longDate = date => new Date(`${date}T12:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 const isMe = name => !!me && name.toLowerCase() === me.username.toLowerCase();
-const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf(suits, seed)]; return !!(s && (s.moves || s.tree || s.undos)); };
+const started = c => { const s = store.get('spider:saves', {})[keyOf(c)]; return !!(s && (s.moves || s.tree || s.undos)); };
 
 // Whether the deal was ever played to where it could no longer be won.
-const wasLost = c => !!(c.lost || store.get('spider:saves', {})[keyOf(c.suits, c.seed)]?.lost);
+const wasLost = c => !!(c.lost || store.get('spider:saves', {})[keyOf(c)]?.lost);
 // Green once you have won it; yellow if that took real undos; red if it was
 // lost and has not been won.
 const wonClass = c => (c.mine ? (c.mine.real_undos ? ' won undos' : ' won') : wasLost(c) ? ' lost' : '');
@@ -674,10 +683,10 @@ function solversText(c) {
 // A challenge on the home page.
 function challengeTile(c) {
   const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${plural(c.mine.real_undos, 'undo')}`
-    : wasLost(c) ? 'Lost' : started(c.suits, c.seed) ? 'In progress' : 'Play';
+    : wasLost(c) ? 'Lost' : started(c) ? 'In progress' : 'Play';
   const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
-  return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${c.suits}/${c.seed}">
+  return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${keyOf(c)}">
     <span class="pips">${pips}</span><span class="name">${suitsLabel(c.suits)}</span>
     <small class="status">${status}</small><small class="who">${solversText(c)}</small></button>`;
 }
@@ -685,26 +694,26 @@ function challengeTile(c) {
 // A challenge in the archive, whose columns are labelled with the suits.
 function challengeCell(c) {
   const lines = c.mine ? [`✓ ${c.mine.moves}`, plural(c.mine.real_undos, 'undo')]
-    : [wasLost(c) ? 'lost' : started(c.suits, c.seed) ? 'started' : 'play', '&nbsp;'];
+    : [wasLost(c) ? 'lost' : started(c) ? 'started' : 'play', '&nbsp;'];
   lines.push(c.solvers?.length ? c.solvers.map(n => (isMe(n) ? 'you' : esc(n))).join(', ') : c.solved ? `${c.solved} won` : '&nbsp;');
   const [first, ...rest] = lines;
-  return `<button type="button" class="challenge${wonClass(c)}" data-play="${c.suits}/${c.seed}" title="${solversText(c)}">
+  return `<button type="button" class="challenge${wonClass(c)}" data-play="${keyOf(c)}" title="${solversText(c)}">
     <span>${first}</span>${rest.map(l => `<small>${l}</small>`).join('')}</button>`;
 }
 
 // The last game (of Spider, or of FreeCell) played in this browser, unless it is finished.
-function unfinishedGame(freecell) {
-  const key = store.get(lastKey(!freecell), null), s = key && store.get('spider:saves', {})[key];
+function unfinishedGame(game) {
+  const key = store.get(lastKey(game), null), s = key && store.get('spider:saves', {})[key];
   if (!s || !s.moves || s.recorded) return null;
-  const [suits, seed] = key.split('/').map(Number);
-  if (!suits !== freecell || pending().some(p => p.suits === suits && p.seed === seed)) return null;
-  const daily = dailyDate(suits, seed);
-  return { key, label: `${daily ? `daily ${dayLabel(daily)}, ${suitsLabel(suits)}` : `${suitsLabel(suits)}, deal ${seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
+  const deal = dealOf(key);
+  if (deal.game !== game || pending().some(p => sameDeal(p, deal))) return null;
+  const daily = dailyDate(deal);
+  return { key, label: `${daily ? `daily ${dayLabel(daily)}, ${dealLabel(deal)}` : `${dealLabel(deal)}, deal ${deal.seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
 }
 
 function homeHtml() {
   const freecell = homeGame === 'freecell';
-  const last = unfinishedGame(freecell);
+  const last = unfinishedGame(homeGame);
   const resume = last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : '';
   const game = (name, label) => `<button type="button" data-game="${name}" aria-pressed="${homeGame === name}">${label}</button>`;
   return `<div class="pagewrap">
@@ -747,7 +756,7 @@ function freecellHtml(resume) {
       <h2>FreeCell</h2>
       <p class="dim">Every card is face up, so every undo counts. Deals are numbered as in Microsoft FreeCell.</p>
       ${resume}
-      <div class="row start"><button type="button"${resume ? '' : ' class="primary"'} data-random="0">Random deal</button></div>
+      <div class="row start"><button type="button"${resume ? '' : ' class="primary"'} data-random="freecell">Random deal</button></div>
       <form class="deal">
         <label for="seed">Or a deal number</label>
         <div class="choices"><input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 617">
@@ -780,9 +789,9 @@ function renderPage() {
 function playChallenge(e) {
   const b = e.target.closest('[data-play]');
   if (!b) return;
-  const [suits, seed] = b.dataset.play.split('/').map(Number);
+  const deal = dealOf(b.dataset.play);
   if (dialog.open) dialog.close();
-  if (view !== 'game' || suits !== g.suits || seed !== g.seed) load(suits, seed, true);
+  if (view !== 'game' || !sameDeal(g, deal)) load(deal, true);
 }
 
 page.addEventListener('click', e => {
@@ -790,7 +799,7 @@ page.addEventListener('click', e => {
   if (!b) return;
   if (b.dataset.go) showPage(b.dataset.go, true);
   else if (b.dataset.game) { setHomeGame(b.dataset.game); render(); }
-  else if (b.dataset.random) load(+b.dataset.random, randomSeed(), true);
+  else if (b.dataset.random) load(b.dataset.random === 'freecell' ? freecellDeal(randomSeed()) : spiderDeal(+b.dataset.random, randomSeed()), true);
   else if ('login' in b.dataset) accountDialog('login');
   else if ('signup' in b.dataset) accountDialog('signup');
   else if ('logout' in b.dataset) logout();
@@ -800,12 +809,12 @@ page.addEventListener('click', e => {
 page.addEventListener('submit', e => {
   e.preventDefault();
   const form = e.target, text = form.seed.value.trim();
-  const suits = form.suits ? +form.suits.value : 0; // the FreeCell form has no suits to choose
+  const suits = form.suits && +form.suits.value; // the FreeCell form has no suits to choose
   if (!/^\d+$/.test(text) || Number(text) > (suits ? MAX_SEED : MAX_DEAL)) {
     form.querySelector('.error').textContent = suits ? 'A deal number is a whole number.' : `A deal number is a whole number up to ${MAX_DEAL}.`;
     return;
   }
-  load(suits, Number(text), true);
+  load(suits ? spiderDeal(suits, Number(text)) : freecellDeal(Number(text)), true);
 });
 
 function accountDialog(mode) {
@@ -1092,9 +1101,9 @@ function renderFreecell() {
 
 // The line about the game in the header, and the buttons.
 function renderStatus() {
-  const daily = dailyDate(g.suits, g.seed);
-  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${suitsLabel(g.suits)}`
-    : `${suitsLabel(g.suits)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
+  const daily = dailyDate(g);
+  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${dealLabel(g)}`
+    : `${dealLabel(g)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
     <b>${g.history.length}</b> moves · <b>${realUndoCount()}</b> undos${g.freecell ? '' : ` · <b>${undoCount() - realUndoCount()}</b> free undos`}`;
   $('#b-undo').disabled = !g.canUndo() || finishing;
   $('#b-redo').disabled = !g.canRedo() || finishing;

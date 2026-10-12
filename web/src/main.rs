@@ -3,8 +3,9 @@
 //! terminal game's rules (`src/game.rs`), so a seed deals the same cards here,
 //! in the browser and in the terminal.
 //!
-//! FreeCell is played here too (rules in `freecell.rs`). Everywhere a deal is
-//! `(suits, seed)`, in the database and in the API, `suits` 0 means FreeCell.
+//! FreeCell is played here too (rules in `freecell.rs`). A deal is
+//! `(game, suits, seed)`, in the database and in the API: game `spider` with
+//! 1-4 suits, or `freecell`, which always has 4.
 
 #[allow(dead_code)]
 #[path = "../../src/game.rs"]
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id INTEGER NOT NULL REFERENCES users(id),
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
--- suits: 1-4 for Spider, 0 for FreeCell (here and in games).
+-- game: 'spider' (suits 1-4) or 'freecell' (suits 4), here and in games.
 -- moves: length of the winning line. undos: every undo; real_undos: those
 -- that took back a card flip or a deal (in FreeCell, all of them).
 CREATE TABLE IF NOT EXISTS wins (
@@ -77,20 +78,72 @@ CREATE TABLE IF NOT EXISTS wins (
     real_undos INTEGER NOT NULL,
     undos INTEGER NOT NULL,
     move_list TEXT NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    game TEXT NOT NULL DEFAULT 'spider'
 );
-CREATE INDEX IF NOT EXISTS wins_by_deal ON wins(suits, seed);
+CREATE INDEX IF NOT EXISTS wins_by_game_deal ON wins(game, suits, seed);
 -- A player's game of a deal, as the client saves it (JSON): the tree of every
 -- move played and the line of it on the board.
 CREATE TABLE IF NOT EXISTS games (
     user_id INTEGER NOT NULL REFERENCES users(id),
+    game TEXT NOT NULL,
     suits INTEGER NOT NULL,
     seed INTEGER NOT NULL,
     state TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    PRIMARY KEY (user_id, suits, seed)
+    PRIMARY KEY (user_id, game, suits, seed)
 );
 ";
+
+/// Bring a database from before deals had a game up to SCHEMA (run before
+/// it). Then every deal was Spider's, but for a day when FreeCell's were kept
+/// as deals of 0 suits.
+fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
+    let lacks_game = |table: &str| -> rusqlite::Result<bool> {
+        let columns: Vec<String> = db.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        Ok(!columns.is_empty() && !columns.iter().any(|c| c == "game"))
+    };
+    let (wins, games) = (lacks_game("wins")?, lacks_game("games")?);
+    let tx = db.transaction()?;
+    if wins {
+        tx.execute_batch(
+            "ALTER TABLE wins ADD COLUMN game TEXT NOT NULL DEFAULT 'spider';
+             UPDATE wins SET game = 'freecell', suits = 4 WHERE suits = 0;
+             DROP INDEX IF EXISTS wins_by_deal;",
+        )?;
+    }
+    if games {
+        tx.execute_batch(
+            "ALTER TABLE games RENAME TO games_old;
+             CREATE TABLE games (
+                 user_id INTEGER NOT NULL REFERENCES users(id),
+                 game TEXT NOT NULL,
+                 suits INTEGER NOT NULL,
+                 seed INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                 PRIMARY KEY (user_id, game, suits, seed)
+             );
+             INSERT INTO games (user_id, game, suits, seed, state, updated_at)
+                 SELECT user_id, iif(suits = 0, 'freecell', 'spider'), iif(suits = 0, 4, suits), seed, state, updated_at FROM games_old;
+             DROP TABLE games_old;",
+        )?;
+    }
+    tx.commit()
+}
+
+/// Whether there is such a deal.
+fn is_deal(game: &str, suits: u8, seed: u64) -> bool {
+    match game {
+        "spider" => matches!(suits, 1..=4) && seed <= MAX_SEED,
+        "freecell" => suits == 4 && seed <= freecell::MAX_DEAL,
+        _ => false,
+    }
+}
+
+fn spider() -> String {
+    "spider".into()
+}
 
 struct App {
     db: Mutex<Connection>,
@@ -247,6 +300,9 @@ async fn put_settings(State(app): AppState, headers: HeaderMap, Json(settings): 
 
 #[derive(Deserialize)]
 struct Win {
+    /// (Left out by pages loaded before FreeCell.)
+    #[serde(default = "spider")]
+    game: String,
     suits: u8,
     seed: u64,
     moves: String,
@@ -256,14 +312,14 @@ struct Win {
 
 /// Replay a claimed win; on success, the number of moves in it.
 fn check_win(w: &Win) -> Result<usize, String> {
+    if !is_deal(&w.game, w.suits, w.seed) {
+        return Err("no such deal".into());
+    }
     if w.real_undos > w.undos {
         return Err("more real undos than undos".into());
     }
-    if w.suits == 0 {
+    if w.game == "freecell" {
         return check_freecell_win(w);
-    }
-    if !matches!(w.suits, 1..=4) || w.seed > MAX_SEED {
-        return Err("no such deal".into());
     }
     let moves = game::parse_moves(&w.moves)?;
     let mut g = game::Game::new(w.suits, w.seed);
@@ -277,9 +333,6 @@ fn check_win(w: &Win) -> Result<usize, String> {
 }
 
 fn check_freecell_win(w: &Win) -> Result<usize, String> {
-    if w.seed > freecell::MAX_DEAL {
-        return Err("no such deal".into());
-    }
     if w.real_undos != w.undos {
         return Err("every undo counts in FreeCell".into());
     }
@@ -298,20 +351,20 @@ async fn record_win(State(app): AppState, headers: HeaderMap, Json(w): Json<Win>
     let user = require_user(&app, &headers)?;
     let moves = check_win(&w).map_err(|e| bad(&e))?;
     app.db.lock().unwrap().execute(
-        "INSERT INTO wins (user_id, suits, seed, moves, real_undos, undos, move_list) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![user.id, w.suits, w.seed as i64, moves as i64, w.real_undos, w.undos, w.moves],
+        "INSERT INTO wins (user_id, game, suits, seed, moves, real_undos, undos, move_list) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![user.id, w.game, w.suits, w.seed as i64, moves as i64, w.real_undos, w.undos, w.moves],
     )?;
-    results(&app, &user, w.suits, w.seed).map(Json)
+    results(&app, &user, &w.game, w.suits, w.seed).map(Json)
 }
 
 /// Everyone's best win of a deal (fewest real undos, then fewest moves).
 /// Only shown to players who have won it themselves.
-fn results(app: &App, user: &User, suits: u8, seed: u64) -> ApiResult<Value> {
+fn results(app: &App, user: &User, game: &str, suits: u8, seed: u64) -> ApiResult<Value> {
     let db = app.db.lock().unwrap();
     let seed = seed as i64;
     let won: bool = db.query_row(
-        "SELECT EXISTS (SELECT 1 FROM wins WHERE user_id = ?1 AND suits = ?2 AND seed = ?3)",
-        params![user.id, suits, seed],
+        "SELECT EXISTS (SELECT 1 FROM wins WHERE user_id = ?1 AND suits = ?2 AND seed = ?3 AND game = ?4)",
+        params![user.id, suits, seed, game],
         |r| r.get(0),
     )?;
     if !won {
@@ -320,13 +373,13 @@ fn results(app: &App, user: &User, suits: u8, seed: u64) -> ApiResult<Value> {
     let mut stmt = db.prepare(
         "SELECT u.username, w.moves, w.real_undos, w.created_at
          FROM wins w JOIN users u ON u.id = w.user_id
-         WHERE w.suits = ?1 AND w.seed = ?2
-           AND w.id = (SELECT b.id FROM wins b WHERE b.user_id = w.user_id AND b.suits = ?1 AND b.seed = ?2
+         WHERE w.game = ?3 AND w.suits = ?1 AND w.seed = ?2
+           AND w.id = (SELECT b.id FROM wins b WHERE b.user_id = w.user_id AND b.game = ?3 AND b.suits = ?1 AND b.seed = ?2
                        ORDER BY b.real_undos, b.moves, b.id LIMIT 1)
          ORDER BY w.real_undos, w.moves, w.created_at",
     )?;
     let rows = stmt
-        .query_map(params![suits, seed], |r| {
+        .query_map(params![suits, seed, game], |r| {
             Ok(json!({
                 "username": r.get::<_, String>(0)?,
                 "moves": r.get::<_, i64>(1)?,
@@ -338,38 +391,47 @@ fn results(app: &App, user: &User, suits: u8, seed: u64) -> ApiResult<Value> {
     Ok(json!({ "results": rows }))
 }
 
-async fn get_results(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>) -> ApiResult<Json<Value>> {
+async fn get_results(State(app): AppState, headers: HeaderMap, Path((game, suits, seed)): Path<(String, u8, u64)>) -> ApiResult<Json<Value>> {
     let user = require_user(&app, &headers)?;
-    results(&app, &user, suits, seed).map(Json)
+    results(&app, &user, &game, suits, seed).map(Json)
 }
 
-async fn put_game(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>, Json(state): Json<Value>) -> ApiResult<Json<Value>> {
+async fn put_game(
+    State(app): AppState,
+    headers: HeaderMap,
+    Path((game, suits, seed)): Path<(String, u8, u64)>,
+    Json(state): Json<Value>,
+) -> ApiResult<Json<Value>> {
     let user = require_user(&app, &headers)?;
     let text = state.to_string();
-    if !matches!(suits, 0..=4) || seed > MAX_SEED || !state.is_object() || text.len() > MAX_GAME_STATE {
+    if !is_deal(&game, suits, seed) || !state.is_object() || text.len() > MAX_GAME_STATE {
         return Err(bad("not a game"));
     }
     app.db.lock().unwrap().execute(
-        "INSERT INTO games (user_id, suits, seed, state) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (user_id, suits, seed) DO UPDATE SET state = excluded.state, updated_at = unixepoch()",
-        params![user.id, suits, seed as i64, text],
+        "INSERT INTO games (user_id, game, suits, seed, state) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (user_id, game, suits, seed) DO UPDATE SET state = excluded.state, updated_at = unixepoch()",
+        params![user.id, game, suits, seed as i64, text],
     )?;
     Ok(Json(json!({})))
 }
 
-async fn get_game(State(app): AppState, headers: HeaderMap, Path((suits, seed)): Path<(u8, u64)>) -> ApiResult<Json<Value>> {
+async fn get_game(State(app): AppState, headers: HeaderMap, Path((game, suits, seed)): Path<(String, u8, u64)>) -> ApiResult<Json<Value>> {
     let user = require_user(&app, &headers)?;
     let text: Option<String> = app
         .db
         .lock()
         .unwrap()
-        .query_row("SELECT state FROM games WHERE user_id = ?1 AND suits = ?2 AND seed = ?3", params![user.id, suits, seed as i64], |r| r.get(0))
+        .query_row(
+            "SELECT state FROM games WHERE user_id = ?1 AND game = ?2 AND suits = ?3 AND seed = ?4",
+            params![user.id, game, suits, seed as i64],
+            |r| r.get(0),
+        )
         .optional()?;
     let state = text.and_then(|t| serde_json::from_str::<Value>(&t).ok());
     Ok(Json(json!({ "state": state })))
 }
 
-/// Challenges up to today, newest day first, with how many players have won
+/// Challenges (all Spider deals) up to today, newest day first, with how many players have won
 /// each and (when logged in) the player's own best win of it.
 async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = current_user(&app, &headers)?;
@@ -379,7 +441,7 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     // names; everyone sees how many.
     let mut solvers: HashMap<(u8, i64), Vec<String>> = HashMap::new();
     let mut stmt = db.prepare(
-        "SELECT w.suits, w.seed, u.username FROM wins w JOIN users u ON u.id = w.user_id
+        "SELECT w.suits, w.seed, u.username FROM wins w JOIN users u ON u.id = w.user_id WHERE w.game = 'spider'
          GROUP BY w.suits, w.seed, w.user_id ORDER BY MIN(w.created_at), MIN(w.id)",
     )?;
     for row in stmt.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))? {
@@ -389,7 +451,7 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     // Worst first, so the best win is inserted last.
     let mut mine: HashMap<(u8, i64), Value> = HashMap::new();
     if let Some(user) = &user {
-        let mut stmt = db.prepare("SELECT suits, seed, real_undos, moves FROM wins WHERE user_id = ?1 ORDER BY real_undos DESC, moves DESC")?;
+        let mut stmt = db.prepare("SELECT suits, seed, real_undos, moves FROM wins WHERE user_id = ?1 AND game = 'spider' ORDER BY real_undos DESC, moves DESC")?;
         for row in stmt.query_map([user.id], |r| {
             Ok(((r.get(0)?, r.get(1)?), json!({ "real_undos": r.get::<_, i64>(2)?, "moves": r.get::<_, i64>(3)? })))
         })? {
@@ -401,7 +463,7 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     // (the client says so in the game it saves).
     let mut lost: HashSet<(u8, i64)> = HashSet::new();
     if let Some(user) = &user {
-        let mut stmt = db.prepare("SELECT suits, seed FROM games WHERE user_id = ?1 AND json_extract(state, '$.lost')")?;
+        let mut stmt = db.prepare("SELECT suits, seed FROM games WHERE user_id = ?1 AND game = 'spider' AND json_extract(state, '$.lost')")?;
         for row in stmt.query_map([user.id], |r| Ok((r.get(0)?, r.get(1)?)))? {
             lost.insert(row?);
         }
@@ -410,7 +472,7 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
     for (date, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
         let key = (*suits, *seed as i64);
         let names = solvers.get(&key).map(Vec::as_slice).unwrap_or_default();
-        let mut challenge = json!({ "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
+        let mut challenge = json!({ "game": "spider", "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
         if user.is_some() {
             challenge["solvers"] = json!(names);
             challenge["lost"] = json!(lost.contains(&key));
@@ -437,8 +499,9 @@ async fn main() {
         "spider".into()
     });
 
-    let db = Connection::open(&db_path).expect("open database");
+    let mut db = Connection::open(&db_path).expect("open database");
     db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;").expect("configure database");
+    migrate(&mut db).expect("migrate database");
     db.execute_batch(SCHEMA).expect("create tables");
     let app = Arc::new(App { db: Mutex::new(db), invite_code, secure_cookie: std::env::var("COOKIE_SECURE").is_ok() });
 
@@ -449,8 +512,8 @@ async fn main() {
         .route("/me", get(me))
         .route("/settings", put(put_settings))
         .route("/wins", post(record_win))
-        .route("/results/{suits}/{seed}", get(get_results))
-        .route("/games/{suits}/{seed}", get(get_game).put(put_game))
+        .route("/results/{game}/{suits}/{seed}", get(get_results))
+        .route("/games/{game}/{suits}/{seed}", get(get_game).put(put_game))
         .route("/dailies", get(dailies))
         .with_state(app);
     // Any other path (e.g. /play/2/1234) is the single-page client.
@@ -515,7 +578,7 @@ mod tests {
             }
             assert_eq!(g.to_position_text(), f[3], "after moves {seed}");
             games += 1;
-            let win = |undos, real_undos| Win { suits: 0, seed: seed as u64, moves: f[2].into(), real_undos, undos };
+            let win = |undos, real_undos| Win { game: "freecell".into(), suits: 4, seed: seed as u64, moves: f[2].into(), real_undos, undos };
             if g.is_won() {
                 wins += 1;
                 assert_eq!(check_win(&win(2, 2)), Ok(f[2].split(',').count()));
@@ -547,6 +610,34 @@ mod tests {
         assert!(n[0] >= 100 && n[1] >= 100, "too few positions judged: {n:?}");
     }
 
+    /// A database from before deals had a game keeps its wins and saved games.
+    #[test]
+    fn migrates_a_database_without_games() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, pw_hash TEXT NOT NULL,
+                 settings TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+             CREATE TABLE wins (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), suits INTEGER NOT NULL, seed INTEGER NOT NULL,
+                 moves INTEGER NOT NULL, real_undos INTEGER NOT NULL, undos INTEGER NOT NULL, move_list TEXT NOT NULL,
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+             CREATE INDEX wins_by_deal ON wins(suits, seed);
+             CREATE TABLE games (user_id INTEGER NOT NULL REFERENCES users(id), suits INTEGER NOT NULL, seed INTEGER NOT NULL, state TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (user_id, suits, seed));
+             INSERT INTO users (username, pw_hash) VALUES ('a', '');
+             INSERT INTO wins (user_id, suits, seed, moves, real_undos, undos, move_list) VALUES (1, 2, 7, 100, 0, 3, 'x'), (1, 0, 7, 90, 1, 1, 'y');
+             INSERT INTO games (user_id, suits, seed, state, updated_at) VALUES (1, 2, 7, '{}', 5), (1, 0, 7, '{\"lost\":true}', 6);",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            // (the second time, there is nothing to do)
+            migrate(&mut db).unwrap();
+            db.execute_batch(SCHEMA).unwrap();
+        }
+        let rows = |sql: &str| -> Vec<String> { db.prepare(sql).unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect() };
+        assert_eq!(rows("SELECT game || suits || '/' || seed || '/' || moves FROM wins ORDER BY id"), ["spider2/7/100", "freecell4/7/90"]);
+        assert_eq!(rows("SELECT game || suits || '/' || seed || state || updated_at FROM games ORDER BY updated_at"), ["spider2/7{}5", "freecell4/7{\"lost\":true}6"]);
+    }
+
     #[test]
     fn challenges_are_complete() {
         let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
@@ -560,7 +651,7 @@ mod tests {
 
     #[test]
     fn rejects_bogus_wins() {
-        let w = |moves: &str| Win { suits: 1, seed: 5, moves: moves.into(), real_undos: 0, undos: 0 };
+        let w = |moves: &str| Win { game: spider(), suits: 1, seed: 5, moves: moves.into(), real_undos: 0, undos: 0 };
         assert!(check_win(&w("")).is_err());
         assert!(check_win(&w("d,d")).is_err());
         assert!(check_win(&w("0>0:1")).is_err());

@@ -217,6 +217,7 @@ export class Game extends Played {
     this.faceDown = this.columns.map(c => c.length - 1);
     this.stock = deck; // dealt from the end
     this.completed = []; // suits of removed K..A runs
+    this.game = 'spider';
     this.suits = suits;
     this.seed = seed;
     // Per column, the fewest face-down cards anywhere in the tree: the cards
