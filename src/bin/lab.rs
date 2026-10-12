@@ -115,6 +115,93 @@ fn main() {
                     println!("{} {} won {} : moves {} last deal at {last_deal} applies {applies} fires {fires} first {}", f[0], f[1], f[3], moves.len(), first.map_or(-1, |i| i as i64));
                     continue;
                 }
+                if mode == "sound4" {
+                    // Every position of a won game, the stock taken as seen: lost_for_all with
+                    // no face-down card seen and with all of them seen must never call it lost.
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    let (mut n, mut gave_up) = (0, 0);
+                    for (i, mv) in moves.iter().enumerate() {
+                        if f[3] == "1" && !g.is_won() {
+                            for seen in [g.face_down, [0; 10]] {
+                                n += 1;
+                                let (dead, w) = spider::certify::lost_for_all(&g, seen, true, budget);
+                                gave_up += (w > budget) as u32;
+                                if dead {
+                                    println!("UNSOUND {} {} after {i} moves seen {:?}: {}", f[0], f[1], seen, g.to_position_text());
+                                }
+                            }
+                        }
+                        g.apply(*mv).unwrap();
+                    }
+                    println!("{} {} won {} : checks {n} gave_up {gave_up}", f[0], f[1], f[3]);
+                    continue;
+                }
+                if mode == "sound5" {
+                    // Every move from every position of the game with at most one deal left
+                    // (the stock taken as seen): where lost_for_all calls the position after it
+                    // lost, the solver must not find a win. And the positions not called lost
+                    // from which every move is: what the solver says of them.
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    let (mut n, mut dead_n, mut all_dead, mut all_dead_won, mut unknown) = (0, 0, 0, 0, 0);
+                    for (i, mv) in moves.iter().enumerate() {
+                        if g.deals_remaining() <= 1 && !g.is_won() && !spider::certify::lost_for_all(&g, g.face_down, true, budget).0 {
+                            let mut succ = Vec::new();
+                            for from in 0..10 {
+                                for to in 0..10 {
+                                    for count in 1..=g.run_len(from) {
+                                        if from != to && g.check_move(from, to, count).is_ok() {
+                                            succ.push(Move::Move { from, to, count });
+                                        }
+                                    }
+                                }
+                            }
+                            if g.check_deal().is_ok() {
+                                succ.push(Move::Deal);
+                            }
+                            let mut every = !succ.is_empty();
+                            for m in succ {
+                                let mut h = g.clone();
+                                h.apply(m).unwrap();
+                                n += 1;
+                                if spider::certify::lost_for_all(&h, h.face_down, true, budget).0 {
+                                    dead_n += 1;
+                                    match Solver::new(&h, 300_000).solve(&h).verdict {
+                                        Verdict::Solvable => println!("UNSOUND {} {} after {i} moves then {}: {}", f[0], f[1], m.encode(), h.to_position_text()),
+                                        Verdict::Unknown => unknown += 1,
+                                        Verdict::Unsolvable => {}
+                                    }
+                                } else {
+                                    every = false;
+                                }
+                            }
+                            if every {
+                                all_dead += 1;
+                                if Solver::new(&g, 2_000_000).solve(&g).verdict == Verdict::Solvable {
+                                    all_dead_won += 1;
+                                    println!("TRAP {} {} after {i} moves: {}", f[0], f[1], g.to_position_text());
+                                }
+                            }
+                        }
+                        g.apply(*mv).unwrap();
+                    }
+                    println!("{} {} won {} : successors {n} called lost {dead_n} (solver unsure {unknown}) positions with every move lost {all_dead}, of them winnable {all_dead_won}", f[0], f[1], f[3]);
+                    continue;
+                }
+                if mode == "at" {
+                    // The position the moves lead to: whether lost_for_all calls it lost
+                    // (no face-down card seen), and the solver's verdict.
+                    let moves = parse_moves(f[4]).unwrap();
+                    let mut g = Game::new(f[0].parse().unwrap(), f[1].parse().unwrap());
+                    for mv in &moves {
+                        g.apply(*mv).unwrap();
+                    }
+                    let (dead, n) = spider::certify::lost_for_all(&g, g.face_down, true, 200_000);
+                    let r = Solver::new(&g, budget).solve(&g);
+                    println!("{} moves {} blind {} ({n}) solver {:?} nodes {} down {:?}", f[2], moves.len(), if dead { "LOST" } else { "-" }, r.verdict, r.nodes, g.face_down);
+                    continue;
+                }
                 if mode == "blind" {
                     // Every position of the game with the stock empty: whether a player who
                     // has not seen the face-down cards can know it lost (lost_for_all), against
