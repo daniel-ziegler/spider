@@ -935,6 +935,9 @@ struct Stage {
 /// Positions of its small game the top-rank certificate may look at for one
 /// position of the search.
 const CERTIFY_LIMIT: u64 = 10_000;
+/// For the larger game of the certificate with empty columns, tried on the
+/// positions after the last deal (more hardly helps).
+const ENTRY_CERTIFY_LIMIT: u64 = 1_000;
 /// And for the position to be solved, when no win was found.
 const ROOT_CERTIFY_LIMIT: u64 = 200_000;
 
@@ -1201,8 +1204,8 @@ impl Solver {
                 // (The position after the last deal gets the certificate
                 // that goes on past emptying a column, which costs more.)
                 let (cols, down) = (std::array::from_fn(|c| &s.cols[c][..s.len[c] as usize]), s.down.map(|d| d as usize));
-                let (dead, nodes) = if p.seq == 0 { lost(cols, down, &[], CERTIFY_LIMIT) } else { top_rank_dead(cols, down, CERTIFY_LIMIT) };
-                self.work += nodes.min(CERTIFY_LIMIT);
+                let (dead, nodes) = if p.seq == 0 { lost(cols, down, &[], ENTRY_CERTIFY_LIMIT) } else { top_rank_dead(cols, down, CERTIFY_LIMIT) };
+                self.work += nodes.min(if p.seq == 0 { ENTRY_CERTIFY_LIMIT } else { CERTIFY_LIMIT });
                 if dead {
                     self.found.insert(s.key());
                     continue;
@@ -1265,7 +1268,7 @@ impl Solver {
                     }
                     let mut t = cls.members[mi as usize].state.clone();
                     t.apply(Move::Deal, &self.deals);
-                    let (dead, nodes) = lost(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), &[], CERTIFY_LIMIT);
+                    let (dead, nodes) = lost(std::array::from_fn(|c| &t.cols[c][..t.len[c] as usize]), t.down.map(|d| d as usize), &[], ENTRY_CERTIFY_LIMIT);
                     self.work += 1 + nodes;
                     if !dead {
                         self.incomplete = true;

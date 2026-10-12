@@ -36,7 +36,7 @@ const PACKED = 128; // completed, deals done, 10 lengths, 10 face-down counts, u
 // The default configuration of solver.rs.
 const W_COMPLETED = 1000, W_HIDDEN = 12, W_SAME = 4, W_DIFF = 1, W_WRONG = 2, W_EMPTY = 30, W_KING = 3;
 const CLASS_CAP = 20000, SUSPEND_KEEP = 20000, STAGE_CAP_MIN = 20000;
-const CERTIFY_LIMIT = 10000, ROOT_CERTIFY_LIMIT = 200000;
+const CERTIFY_LIMIT = 10000, ENTRY_CERTIFY_LIMIT = 1000, ROOT_CERTIFY_LIMIT = 200000;
 const DEALS_PER_CLASS = 4, DEALS_PER_STAGE = 8, RESUME_TAX = 30, SUB_ALLOC = 8, SUB_GROWTH = 2, DEPTH_W = 100000;
 
 const SOLVABLE = 'solvable', UNSOLVABLE = 'unsolvable', NOT_FOUND = 'not found', UNKNOWN = 'unknown';
@@ -199,31 +199,41 @@ function lost(cols, down, deals, limit) {
   // dealt onto it since, and has every card of the suit not in place on
   // the king moved (it has to, onto the run) or been dealt there?
   const completable = (b, moved) => {
-    // The cards dealt and in place on columns emptied and refilled, where a
-    // king that moved may be.
-    const refilled = moved.slice();
-    for (let j = 0; j < b[C_DEALS]; j++) {
-      for (let c = 0; c < NC; c++) if (b[C_LEFT + c] === 0 && inPlace(b, j, c)) refilled[deals[j][c]] = 1;
-    }
+    const made = b[C_DEALS];
     const all = (ace, lowest, have) => {
       for (let card = ace; card < lowest; card++) if (!have[card]) return false;
       return true;
     };
     for (let suit = 0; suit < 4; suit++) {
       const king = suit * 13 + 12, ace = suit * 13;
-      if (moved[king] && all(ace, king, refilled)) return true;
+      if (moved[king]) {
+        // With the cards dealt and in place on columns emptied and
+        // refilled, where a king that moved may be.
+        let have = moved;
+        for (let j = 0; j < made; j++) {
+          for (let c = 0; c < NC; c++) {
+            if (b[C_LEFT + c] === 0 && inPlace(b, j, c)) {
+              if (have === moved) have = moved.slice();
+              have[deals[j][c]] = 1;
+            }
+          }
+        }
+        if (all(ace, king, have)) return true;
+      }
       for (let c = 0; c < NC; c++) {
         // The cards dealt onto the column and in place, last first: a king
         // of the suit there, or under them all, will do if those above it
         // are of the suit.
-        const have = moved.slice();
-        let clear = true;
-        for (let j = b[C_DEALS] - 1; j >= 0 && clear; j--) {
+        let have = moved, clear = true;
+        for (let j = made - 1; j >= 0 && clear; j--) {
           if (!inPlace(b, j, c)) continue;
           const v = deals[j][c];
           if (v === king && all(ace, king, have)) return true;
           if (Math.floor(v / 13) !== suit) clear = false;
-          have[v] = 1;
+          else {
+            if (have === moved) have = moved.slice();
+            have[v] = 1;
+          }
         }
         const left = b[C_LEFT + c];
         if (clear && left > 0 && cols[c][unit(c, left)] === king && all(ace, cols[c][left - 1], have)) return true;
@@ -1020,8 +1030,8 @@ class Solver {
         // goes on past emptying a column, which costs more.)
         let dead;
         if (isEntry) {
-          dead = lost(...this.columnsAt(0), [], CERTIFY_LIMIT);
-          this.work += Math.min(lostNodes, CERTIFY_LIMIT);
+          dead = lost(...this.columnsAt(0), [], ENTRY_CERTIFY_LIMIT);
+          this.work += Math.min(lostNodes, ENTRY_CERTIFY_LIMIT);
         } else {
           dead = this.topRankDead(0);
           this.work += Math.min(this.certNodes, CERTIFY_LIMIT);
@@ -1085,7 +1095,7 @@ class Solver {
           const from = classDeals[i][1] * MS;
           M.copyWithin(scratch, from, from + MS);
           this.dealAt(scratch);
-          const dead = lost(...this.columnsAt(scratch), [], CERTIFY_LIMIT);
+          const dead = lost(...this.columnsAt(scratch), [], ENTRY_CERTIFY_LIMIT);
           this.work += 1 + lostNodes;
           if (!dead) {
             this.incomplete = true;
@@ -1199,7 +1209,8 @@ class Solver {
     this.free = [];
   }
 
-  solve() {
+  // long: whether to give the certificate a long try if no win is found.
+  solve(long = true) {
     if (this.root[0] === 8) return { verdict: SOLVABLE, work: 0, classes: 0, line: [] };
     // A certificate may prove the position lost outright: a quick try
     // first (not with two deals or more to come: it hardly ever does then),
@@ -1231,7 +1242,7 @@ class Solver {
         outcome = this.search();
       }
     }
-    if ((outcome === NOT_FOUND || outcome === UNKNOWN) && certify(ROOT_CERTIFY_LIMIT)) outcome = UNSOLVABLE;
+    if (long && (outcome === NOT_FOUND || outcome === UNKNOWN) && certify(ROOT_CERTIFY_LIMIT)) outcome = UNSOLVABLE;
     const verdict = outcome === NOT_FOUND ? UNKNOWN : outcome;
     return { verdict, work: this.work, classes: this.classes, line: verdict === SOLVABLE ? this.buildLine() : [] };
   }
@@ -1240,8 +1251,10 @@ class Solver {
 // Whether the game can be won from here: {verdict, work, classes, line}.
 // verdict is 'solvable' (line wins), 'unsolvable' (proven: no legal moves
 // win) or 'unknown' (the budget ran out).
-export function solve(game, budget) {
-  return new Solver(game, budget).solve();
+// Without `long` the certificate only gets a quick try (and the result may
+// differ from solver.rs's).
+export function solve(game, budget, long = true) {
+  return new Solver(game, budget).solve(long);
 }
 
 if (typeof WorkerGlobalScope !== 'undefined') {
@@ -1249,8 +1262,9 @@ if (typeof WorkerGlobalScope !== 'undefined') {
     const game = new Game(suits, seed);
     for (const mv of parseMoves(moves)) game.applyRaw(mv);
     for (const [i, budget] of budgets.entries()) {
-      const { verdict, line } = solve(game, budget);
-      postMessage({ key, verdict, line: encodeMoves(line), last: i === budgets.length - 1 });
+      const last = i === budgets.length - 1;
+      const { verdict, line } = solve(game, budget, last);
+      postMessage({ key, verdict, line: encodeMoves(line), last });
       if (verdict !== 'unknown') break;
     }
   };
