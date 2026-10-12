@@ -82,10 +82,18 @@ const lastKey = game => (game === 'freecell' ? 'spider:last:freecell' : 'spider:
 const numCols = () => g.columns.length;
 const pileLen = place => (g.freecell ? g.pile(place).length : g.columns[place].length);
 
+// The site's name and mark go by the game: the spider is Spider's, a crown FreeCell's.
+const siteName = () => (homeGame === 'freecell' ? 'Freecel Friends' : 'Spider Friends');
+const mascot = () => (homeGame === 'freecell' ? '#crown' : '#spider');
+
 function setHomeGame(name) {
   homeGame = name;
   store.set('spider:game', name);
   document.body.dataset.game = name;
+  document.title = $('.logo .word').textContent = siteName();
+  for (const use of document.querySelectorAll('use.mascot')) use.setAttribute('href', mascot());
+  $('#icon').href = name === 'freecell' ? '/freecell.svg' : '/spider.svg';
+  $('meta[name=theme-color]').content = name === 'freecell' ? '#14263a' : '#14302a';
 }
 
 // Real undos take back a card flip or a deal; taking the same move back again does not count again.
@@ -717,7 +725,7 @@ function homeHtml() {
   const resume = last ? `<div class="row start"><button type="button" class="primary" data-play="${last.key}">Continue: ${last.label}</button></div>` : '';
   const game = (name, label) => `<button type="button" data-game="${name}" aria-pressed="${homeGame === name}">${label}</button>`;
   return `<div class="pagewrap">
-    <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="#spider"/></svg></div><h1>Spider Friends</h1></div>
+    <div class="hero"><div class="hang"><span class="thread"></span><svg><use href="${mascot()}"/></svg></div><h1>${siteName()}</h1></div>
     <div class="games">${game('spider', 'Spider')}${game('freecell', 'FreeCell')}</div>
     ${freecell ? freecellHtml(resume) : spiderHtml(resume)}
     <section class="box account">
@@ -960,7 +968,7 @@ function menuDialog() {
     ['help', 'How to play', true],
     me ? ['logout', `Log out (${esc(me.username)})`, true] : ['login', 'Log in or sign up', true],
   ];
-  openDialog(`<h2>Spider Friends</h2><div class="menu">${items.filter(i => i[2]).map(([k, label]) => `<button data-m="${k}">${label}</button>`).join('')}</div>
+  openDialog(`<h2>${siteName()}</h2><div class="menu">${items.filter(i => i[2]).map(([k, label]) => `<button data-m="${k}">${label}</button>`).join('')}</div>
     <div class="row"><button data-close>Close</button></div>`,
   async e => {
     const b = e.target.closest('[data-m]');
@@ -1392,7 +1400,7 @@ $('#info').onclick = e => { if (e.target.closest('.seed')) copyLink(); };
 window.addEventListener('resize', () => { if (view === 'game') { computeLayout(); render(); } });
 window.addEventListener('popstate', route);
 
-document.body.dataset.game = homeGame;
+setHomeGame(homeGame);
 document.documentElement.style.setProperty('--back', cardBack());
 applySettings({}, false);
 const startup = Promise.all([

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14302a">
 <title>Spider Friends</title>
-<link rel="icon" href="/spider.svg">
+<link rel="icon" id="icon" href="/spider.svg">
 <link rel="stylesheet" href="/style.css">
 <script type="module" src="/app.js"></script>
 </head>
@@ -23,11 +23,17 @@
     <path d="M0,6 l-5,8 l5,8 l5,-8 z M0,24 l-3,5 l3,4 l3,-4 z" fill="var(--spider-mark, #c22)"/>
     <circle cx="-4" cy="-14" r="2.2" fill="var(--spider-eye, #fff)"/><circle cx="4" cy="-14" r="2.2" fill="var(--spider-eye, #fff)"/>
   </symbol>
+  <!-- FreeCell's mark: a king's crown. -->
+  <symbol id="crown" viewBox="-50 -50 100 100">
+    <path d="M-36,18 L-43,-20 L-20,-2 L0,-32 L20,-2 L43,-20 L36,18 Z" fill="currentColor" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/>
+    <rect x="-36" y="25" width="72" height="11" rx="4" fill="currentColor"/>
+    <circle cx="0" cy="4" r="5" fill="var(--spider-mark, #c22)"/>
+  </symbol>
 </svg>
 
 <header id="bar">
   <button class="logo" id="b-logo" title="Home">
-    <span class="thread"></span><svg class="hanging"><use href="#spider"/></svg>
+    <span class="thread"></span><svg class="hanging"><use class="mascot" href="#spider"/></svg>
     <span class="word">Spider Friends</span>
   </button>
   <div id="info"></div>
@@ -51,7 +57,7 @@
   <div id="stock" title="Deal (d)"></div>
 </footer>
 
-<div id="dangler" hidden><span class="thread"></span><svg><use href="#spider"/></svg></div>
+<div id="dangler" hidden><span class="thread"></span><svg><use class="mascot" href="#spider"/></svg></div>
 <dialog id="dialog"></dialog>
 </body>
 </html>
