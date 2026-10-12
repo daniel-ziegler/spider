@@ -28,9 +28,10 @@ body[data-game=freecell] {
   --panel: #1e2836;
   --ink-dim: #a3b3c7;
 }
-body[data-game=freecell] :is(.logo, .hero, #dangler) .thread { display: none; }
+body[data-game=freecell] :is(.logo, #dangler) .thread { display: none; }
+body[data-game=freecell] .hero .thread { visibility: hidden; } /* (still there, so the page does not move) */
 body[data-game=freecell] :is(.logo .hanging, .hero .hang, #dangler svg) { animation: none; color: #f0c04a; }
-body[data-game=freecell] .hero svg { margin-top: 0; color: #f0c04a; }
+body[data-game=freecell] .hero svg { color: #f0c04a; }
 body[data-game=freecell] #dangler { top: 12vh; }
 
 * { box-sizing: border-box; }
