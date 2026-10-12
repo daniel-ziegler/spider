@@ -10,6 +10,7 @@ const SUITS = ['♠', '♥', '♦', '♣'].map(s => s + '︎');
 const SUIT_COUNTS = [1, 2, 3, 4];
 const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
+const GHOST = 2 / 3; // how much of a face-up card's strip (and type size) a seen face-down card gets
 const SYNC_MS = 5000; // a game in progress goes to the server at most this often
 
 const $ = s => document.querySelector(s);
@@ -865,8 +866,9 @@ const colX = c => L.left0 + c * (L.cw + L.gap);
 
 // Card tops in a column, squeezed to fit the board's height when possible.
 function cardTops(c) {
-  // Face-down cards that have been seen are spaced like face-up ones, to show what they are.
-  const n = g.columns[c].length, fd = Math.min(g.faceDown[c], g.seen[c]), ups = Math.max(0, n - fd - 1);
+  // Face-down cards that have been seen show what they are, in two thirds of a face-up card's strip.
+  const n = g.columns[c].length, fd = Math.min(g.faceDown[c], g.seen[c]), ghosts = g.faceDown[c] - fd;
+  const ups = Math.max(0, n - g.faceDown[c] - 1) + ghosts * GHOST;
   const room = board.clientHeight - L.top0 - L.ch - 8;
   let down = L.down, up = L.up;
   if (fd * down + ups * up > room) {
@@ -875,7 +877,7 @@ function cardTops(c) {
   }
   const tops = [];
   let y = L.top0;
-  for (let i = 0; i < n; i++) { tops.push(y); y += i < fd ? down : up; }
+  for (let i = 0; i < n; i++) { tops.push(y); y += i < fd ? down : i < g.faceDown[c] ? up * GHOST : up; }
   return tops;
 }
 

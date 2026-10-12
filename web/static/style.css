@@ -128,6 +128,7 @@ button.primary:hover { background: #ffe27a; }
   border-color: #0008;
   cursor: default;
 }
+.card.up.seen .corner { font-size: calc(var(--font) * 2 / 3); }
 .card .corner {
   position: absolute;
   top: 1px;
