@@ -36,8 +36,7 @@ repository root runs them on some 300 positions from play
 (`test/winnable.mjs`) and compares verdicts, work and winning lines.
 
 A deal once played to where it could no longer be won is marked so in its
-saved game (`lost`), and its daily challenge shows red until it is won, and
-yellow then, whatever undos that took.
+saved game (`lost`), and its daily challenge shows red until it is won.
 
 ## Daily challenges
 

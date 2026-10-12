@@ -571,9 +571,9 @@ const started = (suits, seed) => { const s = store.get('spider:saves', {})[keyOf
 
 // Whether the deal was ever played to where it could no longer be won.
 const wasLost = c => !!(c.lost || store.get('spider:saves', {})[keyOf(c.suits, c.seed)]?.lost);
-// Green once you have won it; yellow if that took real undos, or came after
-// playing it to where it was lost; red if it was lost and has not been won.
-const wonClass = c => (c.mine ? (c.mine.real_undos || wasLost(c) ? ' won undos' : ' won') : wasLost(c) ? ' lost' : '');
+// Green once you have won it; yellow if that took real undos; red if it was
+// lost and has not been won.
+const wonClass = c => (c.mine ? (c.mine.real_undos ? ' won undos' : ' won') : wasLost(c) ? ' lost' : '');
 
 function solversText(c) {
   if (!c.solved) return 'No one has won it yet';
@@ -649,7 +649,7 @@ function archiveHtml() {
     <div class="row start"><button type="button" data-go="home">← Home</button></div>
     <section class="box">
       <h2>Daily challenges</h2>
-      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, or first played it to where it could no longer be won; red that you did that and have not won it since. Free undos don't count.</p>
+      <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, red that you played it to where it could no longer be won and have not won it since. Free undos don't count.</p>
       ${dailies ? `<div class="archive"><span></span>${SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
         ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${d.challenges.map(challengeCell).join('')}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
