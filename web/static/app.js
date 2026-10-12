@@ -584,7 +584,7 @@ function solversText(c) {
 // A challenge on the home page.
 function challengeTile(c) {
   const status = c.mine ? `✓ ${plural(c.mine.moves, 'move')} · ${plural(c.mine.real_undos, 'undo')}`
-    : wasLost(c) ? 'Lost: take moves back' : started(c.suits, c.seed) ? 'In progress' : 'Play';
+    : wasLost(c) ? 'Lost' : started(c.suits, c.seed) ? 'In progress' : 'Play';
   const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
   return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${c.suits}/${c.seed}">
