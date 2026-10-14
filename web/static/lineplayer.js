@@ -1,5 +1,5 @@
 // A player that does not look at the face-down cards, for the analysis's
-// rollouts (analyze.js): a port of the line player, ../../src/lines.rs, as
+// rollouts (analysis-worker.js): a port of the line player, ../../src/lines.rs, as
 // far as its cheap configuration needs (LineConfig::fast: no expectimax, no
 // replanning, no wider search before a deal). It decides exactly as the Rust
 // does: the repository root's `cargo test` plays deals with both and compares
@@ -242,7 +242,7 @@ function runLen(S, o, c) {
 // Move count cards in the position at o; a card turned over becomes `turned`
 // if that is not -1 (the search does not know it). Returns whether a card
 // turned.
-function applyMove(S, o, from, to, n, turned) {
+export function applyMove(S, o, from, to, n, turned) {
   const fl = S[o + LEN + from], tl = S[o + LEN + to];
   const fo = o + from * MAXC + fl - n, t = o + to * MAXC + tl;
   for (let i = 0; i < n; i++) S[t + i] = S[fo + i];
@@ -257,7 +257,7 @@ function applyMove(S, o, from, to, n, turned) {
   return removeIfComplete(S, o, to, turned) || flipped;
 }
 
-function removeIfComplete(S, o, c, turned) {
+export function removeIfComplete(S, o, c, turned) {
   const n = S[o + LEN + c];
   if (n < 13 || S[o + c * MAXC + n - 1] % 13 !== 0 || runLen(S, o, c) < 13) return false;
   S[o + LEN + c] = n - 13;
@@ -488,7 +488,9 @@ function decide(root, dealsLeft, visited, tempo, cfg) {
 // from the end, a card for each column from the first) until it is won or the
 // player gives up (play_until in lines.rs). Returns {won, completed, work},
 // and the moves in `moves` if one is given ({from, to, count} or {deal: true}).
-export function playOut(s, stock, cfg, moves = null) {
+// With `toShow` it stops right after the first move that turns a card or
+// deals (and returns nothing).
+export function playOut(s, stock, cfg, moves = null, toShow = false) {
   const visited = new Set(), tempo = { dealing: false, work: 0 };
   let left = stock.length, played = 0;
   const progress = () => {
@@ -511,12 +513,16 @@ export function playOut(s, stock, cfg, moves = null) {
       for (let c = 0; c < NUM_COLS; c++) removeIfComplete(s, 0, c, -1);
     } else {
       for (let j = 0; j < d.length; j += 3) {
-        applyMove(s, 0, d[j], d[j + 1], d[j + 2], -1);
+        const turned = applyMove(s, 0, d[j], d[j + 1], d[j + 2], -1);
         moves?.push({ from: d[j], to: d[j + 1], count: d[j + 2] });
+        if (turned && toShow) return null; // (a step may go on after its card turns: the rest is left out)
       }
       played += d.length / 3;
     }
-    if (progress() !== before) tempo.dealing = false;
+    if (progress() !== before) {
+      tempo.dealing = false;
+      if (toShow && Math.floor(progress() / 10) !== Math.floor(before / 10)) break;
+    }
   }
   return { won: s[DONE] === 8, completed: s[DONE], work: tempo.work };
 }

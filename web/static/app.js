@@ -66,6 +66,7 @@ let keyboardUsed = store.get('spider:keyboard', false); // then columns show the
 let finish = null; // once every card is dealt and face up: {key, line}, line being a winning line once one is found
 let finishing = false; // while auto-complete plays its line
 let L; // layout, see computeLayout
+let review = null; // while the game is being analysed (analysis.js): the board shows its positions and is not played on
 
 // ---------------------------------------------------------------- saving and loading
 
@@ -174,7 +175,7 @@ function sync(leaving = false) {
 // Fetch the server's copy of this game and merge it in: the trees are joined,
 // and the board shows whichever copy was played in last.
 async function pull() {
-  if (!me || view !== 'game') return;
+  if (!me || view !== 'game' || review) return;
   const deal = { game: g.game, suits: g.suits, seed: g.seed }, was = changedAt;
   let remote;
   try { remote = (await api('GET', `/games/${apiPath(deal)}`)).state; } catch { return; }
@@ -212,6 +213,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', () => sync(true));
 
 function load(deal, push = false) {
+  closeReview();
   sync();
   restore(deal, store.get('spider:saves', {})[keyOf(deal)]);
   sel = null;
@@ -243,6 +245,7 @@ function setView(v) {
 // The home page or the archive, of the game the site is dressed for.
 function showPage(name, push = false) {
   setUrl((homeGame === 'freecell' ? '/freecell' : '') + (name === 'archive' ? '/archive' : '') || '/', push);
+  closeReview();
   setView(name);
   sync();
   sel = hint = null;
@@ -271,6 +274,7 @@ function after() {
 }
 
 function play(mv) {
+  if (review) return;
   const err = g.apply(mv);
   if (err) return flash(err);
   sel = null;
@@ -330,7 +334,7 @@ function autoMove(from, count) {
 }
 
 async function undo() {
-  if (!g.canUndo()) return;
+  if (!g.canUndo() || review) return;
   if (g.freecell) {
     // Only the first undo that counts is asked about.
     if (g.undoCosts() && !realUndoCount() && !await confirmDialog('Use an undo?', 'This move cannot just be played back, so taking it back counts as an undo, and you have not used one in this game.', 'Undo', ['u'])) return;
@@ -344,13 +348,13 @@ async function undo() {
 }
 
 function redo() {
-  if (!g.redo()) return;
+  if (review || !g.redo()) return;
   sel = null;
   after();
 }
 
 async function restart() {
-  if (!g.canUndo()) return;
+  if (!g.canUndo() || review) return;
   const real = g.line.filter(n => n.real && !n.undone).length;
   const text = real ? g.freecell ? `Going back to the start counts as ${plural(real, 'undo')}.`
     : `Going back to the start takes back cards you have seen: ${plural(real, 'undo')}.`
@@ -401,7 +405,7 @@ function updateFinish() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function autoComplete() {
-  if (!finish?.line || finishing) return;
+  if (!finish?.line || finishing || review) return;
   const line = finish.line;
   finishing = true;
   sel = hint = null;
@@ -526,6 +530,7 @@ function lostAnswer(key, lost) {
   lostKnown.set(key, lost);
   if (lostAt?.key !== key || !lost) return;
   $('#fate').hidden = false;
+  updateAnalyze();
   noteLost();
   if (lostAt.slipped) warnLost();
 }
@@ -550,6 +555,43 @@ function noteLost() {
 
 function warnLost() {
   flash('Undo to go back.', 8000);
+}
+
+// ---------------------------------------------------------------- analysis
+
+// A game of Spider can be looked over once it is won or lost (or at any
+// time, from the menu): how the chance of winning went over the line of moves
+// on the board, and at its biggest drops whether the moves or the cards were
+// to blame. analysis.js does it, with a network and a player that are fetched
+// only when this is first asked for. While it is open the board shows the
+// position it is looking at (review.shown), and the game is not played on.
+async function analyze() {
+  if (review || view !== 'game' || g.freecell || finishing || !g.history.length) return;
+  if (dialog.open) dialog.close();
+  const deal = { game: g.game, suits: g.suits, seed: g.seed }, moves = g.moves();
+  let open;
+  try { ({ open } = await import('./analysis.js')); } catch { return flash('Could not load the analysis'); }
+  if (review || view !== 'game' || !sameDeal(g, deal) || g.history.length !== moves.length) return;
+  endDrag();
+  press = sel = hint = null;
+  clearFlash();
+  $('#dangler').hidden = true;
+  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), cardName, render, close: closeReview });
+  document.body.dataset.review = '';
+  render();
+}
+
+function closeReview() {
+  if (!review) return;
+  review.destroy();
+  review = null;
+  delete document.body.dataset.review;
+  if (view === 'game') render();
+}
+
+// The Analyze button is in the tray once the game is won or marked as lost.
+function updateAnalyze() {
+  $('#b-analyze').hidden = view !== 'game' || g.freecell || finishing || !g.history.length || !(g.isWon() || !$('#fate').hidden);
 }
 
 // ---------------------------------------------------------------- winning
@@ -609,9 +651,10 @@ function showWinDialog(win, body) {
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
       <b>${plural(win.real_undos, 'undo')}</b>${win.game === 'spider' ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
     <div>${body}</div>
-    <div class="row"><button data-close>Look at the board</button><button class="primary" data-home>More games</button></div>`,
+    <div class="row"><button data-close>Look at the board</button>${win.game === 'spider' ? '<button data-analyze>Analyze</button>' : ''}<button class="primary" data-home>More games</button></div>`,
   e => {
     if (e.target.closest('[data-home]')) showPage('home', true);
+    if (e.target.closest('[data-analyze]')) analyze();
     if (e.target.closest('[data-login]')) accountDialog('login');
   });
 }
@@ -975,6 +1018,7 @@ function menuDialog() {
     ['archive', 'Past daily challenges', view !== 'archive'],
     ['restart', 'Restart this deal', playing && g.canUndo()],
     ['results', 'Results for this deal', playing && g.isWon()],
+    ['analyze', 'Analyze this game', playing && !g.freecell && g.history.length > 0 && !review],
     ['link', 'Copy link to this deal', playing],
     ['settings', 'Settings', true],
     ['help', 'How to play', true],
@@ -991,6 +1035,7 @@ function menuDialog() {
       case 'archive': return showPage('archive', true);
       case 'restart': return restart();
       case 'results': return onWin();
+      case 'analyze': return analyze();
       case 'link': return copyLink();
       case 'settings': return settingsDialog();
       case 'help': return helpDialog();
@@ -1057,8 +1102,11 @@ function computeLayout() {
 
 const colX = c => L.left0 + c * (L.cw + L.gap);
 
+// The position on the board: the game's, or the one an analysis is looking at.
+const shown = () => review?.shown ?? g;
+
 // Card tops in a column, squeezed to fit the board's height when possible.
-function cardTops(c) {
+function cardTops(c, g = shown()) {
   if (g.freecell) {
     const n = g.columns[c].length, room = board.clientHeight - L.top0 - L.ch - 8;
     const up = n > 1 ? Math.max(L.font * 1.1, Math.min(L.up, room / (n - 1))) : L.up;
@@ -1129,11 +1177,13 @@ function renderStatus() {
   $('#b-redo').disabled = !g.canRedo() || finishing;
   updateFinish();
   updateLost();
+  updateAnalyze();
 }
 
 function render() {
   if (view !== 'game') return renderPage();
   if (g.freecell) return renderFreecell();
+  if (review) return renderReview();
   const hinted = hint?.moves[hint.i], hintTo = hinted && !hinted.deal ? hinted.to : null;
   let html = '';
   for (let c = 0; c < NUM_COLS; c++) {
@@ -1156,15 +1206,40 @@ function render() {
     }
   }
   board.innerHTML = html;
+  renderTray(g, hinted?.deal);
+  renderStatus();
+}
 
+// The finished suits and the stock of a position.
+function renderTray(g, hintDeal) {
   const small = L.cw * 0.7;
   $('#done').style.width = `${g.completed.length ? small + (g.completed.length - 1) * small * 0.3 : 0}px`;
   $('#done').innerHTML = g.completed.map((s, i) => faceHtml(s * 13 + 12, `left:${i * small * 0.3}px;top:0`)).join('');
   const deals = g.dealsRemaining();
   $('#stock').style.width = `${deals ? small + (deals - 1) * small * 0.18 : 0}px`;
-  $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down${hinted?.deal && i === deals - 1 ? ' hint' : ''}" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
+  $('#stock').innerHTML = Array.from({ length: deals }, (_, i) => `<div class="card down${hintDeal && i === deals - 1 ? ' hint' : ''}" style="left:${i * small * 0.18}px;top:0"></div>`).join('');
+}
 
-  renderStatus();
+// The board of an analysis: the position it is looking at, with the cards
+// the last move put down outlined (review.mark: {col, count}).
+function renderReview() {
+  const b = review.shown, mark = review.mark;
+  let html = '';
+  for (let c = 0; c < NUM_COLS; c++) {
+    const x = colX(c), col = b.columns[c], fd = b.faceDown[c], tops = cardTops(c);
+    html += `<div class="slot" style="left:${x}px;top:${L.top0}px"></div>`;
+    col.forEach((card, i) => {
+      const style = `left:${x}px;top:${tops[i]}px`;
+      if (i < fd) html += `<div class="card down" style="${style}"></div>`;
+      else {
+        const broken = i > fd && rankOf(card) + 1 !== rankOf(col[i - 1]) ? ' broken' : '';
+        html += faceHtml(card, style, (mark && mark.col === c && i >= col.length - mark.count ? 'hint' : '') + broken);
+      }
+    });
+  }
+  board.innerHTML = html;
+  renderTray(b, false);
+  $('#info').innerHTML = review.info;
 }
 
 let msgTimer;
@@ -1243,7 +1318,7 @@ function endDrag() {
 }
 
 board.addEventListener('pointerdown', e => {
-  if (e.button !== 0 || finishing) return;
+  if (e.button !== 0 || finishing || review) return;
   const col = g.freecell ? placeAt(e.clientX, e.clientY) : colAt(e.clientX);
   showCursor = false;
   if (hint) {
@@ -1320,6 +1395,7 @@ const cardName = c => RANKS[rankOf(c)] + SUITS[suitOf(c)];
 // Tab / Shift-Tab: step through the ranked hints, leaving the hinted run
 // selected so Enter plays it.
 function cycleHint(d) {
+  if (review) return;
   if (!hint) {
     const moves = g.hintMoves();
     if (!moves.length) return flash('No moves left');
@@ -1355,6 +1431,7 @@ function changeCount(d) {
 document.addEventListener('keydown', e => {
   if (dialog.open || finishing || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
+  if (review) return review.key(e);
   if (view !== 'game') {
     if (e.target.closest?.('input, select')) return;
     if (k === '?') helpDialog();
@@ -1405,6 +1482,7 @@ $('#b-menu').onclick = menuDialog;
 $('#b-logo').onclick = () => showPage('home', true);
 $('#stock').onclick = () => { if (!finishing && !g.freecell) play(DEAL); };
 $('#b-finish').onclick = autoComplete;
+$('#b-analyze').onclick = analyze;
 $('#tray').addEventListener('pointerdown', e => {
   if (hint && !e.target.closest('#stock')) { hint = sel = null; clearFlash(); render(); }
 });

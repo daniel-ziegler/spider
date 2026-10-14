@@ -38,6 +38,98 @@ repository root runs them on some 300 positions from play
 A deal once played to where it could no longer be won is marked so in its
 saved game (`lost`), and its daily challenge shows red until it is won.
 
+## Analysis
+
+A game of Spider can be looked over once it is won or marked as lost
+(**Analyze**, in the tray and in the win dialog; at any time from the menu),
+somewhat as a Go server reviews a game: a plot of the chance of winning over
+the moves, the moments it fell most broken down into what the moves cost and
+what the cards did, and the board to step through (click or drag on the plot,
+`←` `→`, `↑` `↓` for the marked moments, `Esc` to go back).
+
+* **Whose chance.** That of a computer player that sees only the cards face
+  up and takes nothing back: the line player of the main README in a cheap
+  configuration (`LineConfig::fast`: six-step lines, a beam of 50, no
+  expectimax; it wins 87%, 63%, 44% and 26% of deals with one to four suits,
+  the full player 88%, 70%, 54% and 39%, at a thirtieth of the work with four
+  suits). `static/lineplayer.js` is a port of it that plays move for move as
+  the Rust does and about as fast (some 50 ms a game).
+* **What is analysed.** The line of moves on the board, as if it had been
+  played straight through. Moves taken back are not looked at: the tree of
+  moves does not say when they were played, so what the player had seen of
+  the face-down cards at each point is not known. A game won with undos is so
+  read as luckier than it was.
+* **Stretches.** A move that turns a card over or deals ends a stretch of
+  moves. Within a stretch the player learns nothing, so what its moves change
+  is the player's doing and what the cards it shows change is luck: the
+  chance is taken at its start, after its moves with the cards they show not
+  yet known, and with them known.
+* **The curve** comes from a network (`static/vnet.js`, a forward pass in
+  plain typed arrays; `static/nets/vN.bin`, 320 kB for each number of suits,
+  float16): the value network of the main README (a transformer over the
+  cards, 160,000 weights) trained anew on games of that cheap player, one for
+  each number of suits, since the existing one was for four suits and
+  another player. It values every position, each position where a card was
+  turned with that card unknown (as it was trained to), and sixteen sampled
+  deals for each deal.
+* **The marked moments** are the (at most six) stretches where the curve
+  falls most, by four points or more, or where the network puts most down to
+  the moves. For each, 256 games are played out from 256 shuffles of the
+  cards the player had not seen at its start: from the start (the player
+  choosing its own moves), after the stretch's moves with the shuffle's cards
+  coming up, and with the cards that really came up (the shuffle's others as
+  they were, but for those swapped at random to make room). The same shuffles
+  for all three make the differences much less noisy than the rates. What is
+  shown is the rates before and after, the moves' part and the cards' part
+  with their 95% intervals (about ±6 points), and a word for it (mistake, bad
+  luck, …) only where a part is twice its standard error and two points.
+* **Where it runs.** All in the browser, in workers (as many as the cores,
+  less one, at most twelve), and shown as it arrives. `analysis.js` (the
+  page), `analysis-core.js`, `analysis-worker.js`, `lineplayer.js`, `vnet.js`,
+  `analysis.css` and the network are fetched only when an analysis is first
+  asked for; the networks are served to be kept for good (`/nets`,
+  `Cache-Control: immutable`) and asked for by version (`NET_VERSION` in
+  `analysis.js`, to be raised when they change). The GPU is not used: valuing
+  a game's 300 to 500 positions takes about two seconds on eight workers, and nine tenths of
+  the time goes to playing games out, which is a search and not arithmetic.
+  A four-suit game of 357 moves with three marked moments took 21 s in
+  Chrome with eight workers (2 s for the curve, then some 6 s a marked
+  moment: 768 games each), so 20 to 40 s for most games on such a machine,
+  and in proportion longer with fewer cores.
+* `cargo test` in the repository root compares the port of the player with
+  the Rust on 48 deals (`GAMES=250` in the environment for 1,000: moves and
+  positions searched are the same), the network's values with PyTorch's
+  (`test/vnet.mjs`: they agree to 1e-6), the positions' encoding with
+  `src/vnet.rs`, and checks the shuffles and statistics (`test/analysis.mjs`).
+
+To make the networks again (the data is some 1.3 GB for each):
+
+```
+cargo build --release
+SPIDER_L_FAST=1 target/release/vdata 4 1000001 200000 runs/analysis/d4.bin 0.05 0.25
+.venv/bin/python vnet/train.py train --data runs/analysis/d4.bin --out runs/analysis/w4.pt
+.venv/bin/python web/tools/analysis/export.py --ckpt runs/analysis/w4.pt --suits 4 --data runs/analysis/d4.bin
+```
+
+| suits | games (records)     | the line player won | log loss, held out (knowing nothing) |
+|-------|---------------------|---------------------|--------------------------------------|
+| 1     | 120,000 (2.9M)      | 86%                 | 0.163 (0.262)                        |
+| 2     | 130,000 (3.4M)      | 63%                 | 0.363 (0.533)                        |
+| 3     | 130,000 (3.7M)      | 42%                 | 0.452 (0.677)                        |
+| 4     | 200,000 (4.3M)      | 24%                 | 0.449 (0.668)                        |
+
+(The games have a random line among the best eight one decision in twenty,
+as the value network's did. One, two and three suits were trained for two
+epochs, four for three.) The network is right on average but not about
+what the player will do next: a position the line player is about to deal
+from it puts four points too high (it cannot tell that nothing is left to
+do), so by its count every deal costs something. Where the moves of a
+stretch are exactly the line player's own, which is checked, they are taken
+to cost nothing; for the rest the games played out are the measure, and the
+curve between the marked moments is to be read as rough.
+`node tools/analysis/calib.mjs SUITS` measures this on the line player's
+own games.
+
 ## FreeCell
 
 The home page switches between Spider and FreeCell. FreeCell has a daily

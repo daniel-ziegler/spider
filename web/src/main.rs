@@ -515,8 +515,15 @@ async fn main() {
         .with_state(app);
     // Any other path (e.g. /play/2/1234) is the single-page client.
     let client = ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
+    // The analysis's networks (static/nets) are big and asked for by version
+    // (analysis.js), so a browser may keep them for good.
+    let keep = |res: &Response<_>| res.status().is_success().then(|| HeaderValue::from_static("public, max-age=31536000, immutable"));
+    let nets = Router::new()
+        .fallback_service(ServeDir::new(format!("{static_dir}/nets")))
+        .layer(SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, keep));
     let router = Router::new()
         .nest("/api", api)
+        .nest("/nets", nets)
         .fallback_service(client)
         .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")));
 
