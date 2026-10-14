@@ -206,7 +206,23 @@ impl LineConfig {
         }
     }
 
-    /// [`LineConfig::for_suits`] with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
+    /// A much cheaper player for rollouts (the web game's analysis plays
+    /// hundreds of games from a position with it, `web/static/lineplayer.js`
+    /// being a port): six-step lines, a beam of 50, no expectimax, no
+    /// replanning and no wider search before a deal. About 15,000 positions
+    /// a game; of seeds 60001-60800 it wins 26% with four suits (the
+    /// default: 37%, at 30 times the work), 44% with three and 63% with
+    /// two. One suit plays as [`LineConfig::for_suits`] does.
+    pub fn fast(suits: u8) -> LineConfig {
+        let d = LineConfig::for_suits(suits);
+        if suits == 1 {
+            return d;
+        }
+        LineConfig { max_steps: 6, beam: 50, expect_top: 0, replan: 0, deal_splits: 0, ..d }
+    }
+
+    /// [`LineConfig::for_suits`] (with `SPIDER_L_FAST` set,
+    /// [`LineConfig::fast`]) with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
     /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
     /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT, REPLAN).
     /// `SPIDER_L_K<n>_*` override them for the play with `n` deals left
@@ -232,7 +248,7 @@ impl LineConfig {
                 parse(var($name), $d)
             };
         }
-        let d = LineConfig::for_suits(suits);
+        let d = if std::env::var_os("SPIDER_L_FAST").is_some() { LineConfig::fast(suits) } else { LineConfig::for_suits(suits) };
         LineConfig {
             max_steps: get!("MAX_STEPS", d.max_steps),
             touch: get!("TOUCH", d.touch as u8) != 0,
