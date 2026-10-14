@@ -87,29 +87,41 @@ export function prepare(suits, seed, moves) {
   return { snaps, shows, stretches, jobs, won: g.isWon() };
 }
 
+// Two things the networks get wrong on average, measured on the line
+// player's own games (tools/analysis/calib.mjs, 24 games for each number of
+// suits), where neither should be there. A position with a turned card
+// unknown is valued higher than it is on average with the card known, by
+// BIAS[suits][0]. And the value climbs between deals and falls at each: a
+// position the player is about to deal from is too high by BIAS[suits][1],
+// since the network cannot tell that nothing is left to do.
+const BIAS = { 1: [0.010, 0.049], 2: [0.018, 0.103], 3: [0.016, 0.107], 4: [0.016, 0.069] };
+
 // The network's three values of a stretch, once it has valued everything
 // (`values`: key -> probability; a won game is worth 1 whatever it says):
-// {start, commit, end, play: commit - start, luck: end - commit}.
-export function stretchValues(st, values, won, last) {
+// {start, commit, end, play: commit - start, luck: end - commit, bias}. With
+// `suits` given, the first bias is taken out of commit; bias is what play is
+// too low by on average (the second bias, for a stretch ending in a deal).
+export function stretchValues(st, values, won, last, suits = 0) {
   const p = t => (won && t === last ? 1 : values.get(`p${t}`));
-  const start = p(st.from), end = p(st.to);
+  const start = p(st.from), end = p(st.to), [turned, dealing] = BIAS[suits] ?? [0, 0];
   let commit = end;
-  if (st.shows === 'turn') commit = values.get(`u${st.to}`);
+  if (st.shows === 'turn') commit = Math.max(0, values.get(`u${st.to}`) - turned);
   else if (st.shows === 'deal') {
     commit = 0;
     for (let j = 0; j < DEAL_SAMPLES; j++) commit += values.get(`d${st.to}/${j}`) / DEAL_SAMPLES;
   }
-  return { start, commit, end, play: commit - start, luck: end - commit };
+  return { start, commit, end, play: commit - start, luck: end - commit, bias: st.shows === 'deal' ? dealing : 0 };
 }
 
 // The stretches to play games out for: those where the value falls most,
 // or where the network puts the most down to the moves; at most `most`, each
-// by at least `least`. Returns indices, in the order of the game. A stretch
+// by at least `least`, less what a deal loses by the network's error
+// (`bias`). Returns indices, in the order of the game. A stretch
 // marked `same` (its moves are the line player's own, so they cost nothing by
 // the measure used: the network's difference there is its error) counts only
 // by what its cards did.
 export function keyStretches(vals, most = 6, least = 0.04) {
-  return vals.map((v, i) => [v.same ? -v.luck : Math.max(v.start - v.end, -v.play), i])
+  return vals.map((v, i) => [v.same ? -v.luck : Math.max(v.start - v.end, -v.play) - (v.bias || 0), i])
     .filter(([drop]) => drop >= least)
     .sort((a, b) => b[0] - a[0] || a[1] - b[1])
     .slice(0, most)

@@ -74,7 +74,8 @@ what the cards did, and the board to step through (click or drag on the plot,
   deals for each deal.
 * **The marked moments** are the (at most six) stretches where the curve
   falls most, by four points or more, or where the network puts most down to
-  the moves. For each, 256 games are played out from 256 shuffles of the
+  the moves, and the last stretch of a game not won (the network is poor at
+  seeing that nothing is left to do). For each, 256 games are played out from 256 shuffles of the
   cards the player had not seen at its start: from the start (the player
   choosing its own moves), after the stretch's moves with the shuffle's cards
   coming up, and with the cards that really came up (the shuffle's others as
@@ -121,12 +122,17 @@ SPIDER_L_FAST=1 target/release/vdata 4 1000001 200000 runs/analysis/d4.bin 0.05 
 (The games have a random line among the best eight one decision in twenty,
 as the value network's did. One, two and three suits were trained for two
 epochs, four for three.) The network is right on average but not about
-what the player will do next: a position the line player is about to deal
-from it puts four points too high (it cannot tell that nothing is left to
-do), so by its count every deal costs something. Where the moves of a
-stretch are exactly the line player's own, which is checked, they are taken
-to cost nothing; for the rest the games played out are the measure, and the
-curve between the marked moments is to be read as rough.
+what the player will do next. On the line player's own games, where the
+moves should cost nothing and luck be fair, its value climbs between deals
+and falls at each (by 5, 10, 11 and 7 points on average with one to four
+suits): it cannot tell that nothing is left to do, so a position about to
+be dealt from is too high. And a position with a turned card unknown is one
+to two points higher than it is on average with the card known. The second
+is taken off (`BIAS` in `analysis-core.js`); the first is taken off a deal's
+fall when the marked moments are chosen, or every deal would be one. Where
+the moves of a stretch are exactly the line player's own, which is checked,
+they are taken to cost nothing. For the rest the games played out are the
+measure, and the curve between the marked moments is to be read as rough.
 `node tools/analysis/calib.mjs SUITS` measures this on the line player's
 own games.
 

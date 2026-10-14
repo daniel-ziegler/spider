@@ -142,7 +142,7 @@ export function open(ctx) {
   const commitAt = t => {
     const st = { from: t - 1, to: t, shows: data.shows[t - 1] };
     if (st.shows === 'turn' ? !values.has(`u${t}`) : !Array.from({ length: DEAL_SAMPLES }, (_, j) => values.has(`d${t}/${j}`)).every(Boolean)) return undefined;
-    const v = stretchValues(st, values, data.won, N);
+    const v = stretchValues(st, values, data.won, N, suits);
     return Number.isFinite(v.commit) ? v.commit : undefined;
   };
   const stretchOf = t => data.stretches.findIndex(st => t > st.from && t <= st.to);
@@ -256,7 +256,7 @@ export function open(ctx) {
       const what = `${st.to - st.from > 1 ? `Moves ${st.from + 1}–${st.to}` : `Move ${st.to}`}${st.shows === 'deal' ? ', a deal' : st.shows === 'turn' ? ', a card turned' : ', to the end'}`;
       const pm = x => `<span class="pm">±${Math.round(196 * x.se)}</span>`;
       const nums = r ? `<b>${pct(r.pre.mean)} → ${pct(r.reveal.mean)}</b><span class="part"><i class="k-play"></i>moves <b>${points(r.play.mean)}</b>${pm(r.play)}</span>${st.shows ? `<span class="part"><i class="k-luck"></i>cards <b>${points(r.luck.mean)}</b>${pm(r.luck)}</span>` : ''}`
-        : `<b>${pct(v.start)} → ${pct(v.end)}</b><span class="part"><i class="k-play"></i>moves ${points(v.same ? 0 : v.play)}</span>${st.shows ? `<span class="part"><i class="k-luck"></i>cards ${points(v.luck)}</span>` : ''}`;
+        : `<b>${pct(v.same ? v.commit : v.start)} → ${pct(v.end)}</b><span class="part"><i class="k-play"></i>moves ${points(v.same ? 0 : v.play)}</span>${st.shows ? `<span class="part"><i class="k-luck"></i>cards ${points(v.luck)}</span>` : ''}`;
       const said = !r ? 'the network\'s guess; playing it out…' : k.rolls.length < WORLDS ? `${k.rolls.length} of ${WORLDS} games…` : verdict(r);
       const cls = r && k.rolls.length === WORLDS ? ` v-${said.split(/[ ,]/)[0].toLowerCase()}` : ' pending';
       return `<button type="button" class="rv-key${i === selected ? ' sel' : ''}" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${what}</span><span class="said${cls}">${esc(said)}</span><span class="nums">${nums}</span></button>`;
@@ -265,7 +265,9 @@ export function open(ctx) {
   }
 
   function note() {
-    let text = value(0) === undefined || value(N) === undefined ? '' : `From ${pct(value(0))} at the deal to ${data.won ? 'the win' : `${pct(value(N))} at the end`}. `;
+    // (The end as the games played out have it, once they are there.)
+    const ended = keys.find(k => k.st.to === N && k.stats)?.stats.reveal.mean ?? value(N);
+    let text = value(0) === undefined || ended === undefined ? '' : `From ${pct(value(0))} at the deal to ${data.won ? 'the win' : `${pct(ended)} at the end`}. `;
     text += `<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt <i class="l-roll"></i>games played out (95% interval)</span> `
       + 'The chance is that of a computer player that sees only what is face up and takes nothing back, so it runs low for a player who thinks longer. '
       + `At the marked moments it is measured by playing ${WORLDS} games out with the unseen cards reshuffled: before the moves, after them, and with the cards that really came up. The first step is the moves' doing, the second the cards'.`;
@@ -380,7 +382,7 @@ export function open(ctx) {
       redraw();
     }));
     if (closed) return;
-    const all = data.stretches.map(st => stretchValues(st, values, data.won, N));
+    const all = data.stretches.map(st => stretchValues(st, values, data.won, N, suits));
     // Where the moves are the line player's own, they are no mistake by its measure.
     const asked = data.stretches.map(st => {
       const start = data.snaps[st.from];
@@ -392,8 +394,11 @@ export function open(ctx) {
     vals = all;
     // Stretches with a column too long for the player are left to the network.
     const playable = st => data.snaps.slice(st.from, st.to + 1).every(s => s.columns.every(c => c.length <= 48));
-    keys = keyStretches(vals.map((v, i) => (playable(data.stretches[i]) ? v : { start: 0, end: 0, play: 0, luck: 0 })), MAX_KEYS)
-      .map(at => ({ at, st: data.stretches[at], rolls: new Uint8Array(0), stats: null }));
+    const picked = keyStretches(vals.map((v, i) => (playable(data.stretches[i]) ? v : { start: 0, end: 0, play: 0, luck: 0 })), MAX_KEYS);
+    // The end of a game not won is always measured: the network does not see well that nothing is left to do.
+    const end = data.stretches.length - 1;
+    if (!data.won && end >= 0 && !picked.includes(end) && playable(data.stretches[end])) picked.push(end);
+    keys = picked.map(at => ({ at, st: data.stretches[at], rolls: new Uint8Array(0), stats: null }));
     total = data.jobs.length + keys.length * WORLDS * ROLL_WEIGHT;
     phase = keys.length ? 'roll' : 'done';
     seconds = (performance.now() - t0) / 1000;

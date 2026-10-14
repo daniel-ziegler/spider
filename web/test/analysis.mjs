@@ -117,7 +117,10 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   check(keyStretches(vals).join() === '0,1,2', 'the key stretches');
   check(keyStretches(vals, 1).join() === '2', 'the biggest drop');
   check(keyStretches(vals.map((v, i) => ({ ...v, same: i === 1 }))).join() === '0,2', 'a stretch of the line player\'s own moves is no key stretch for them');
+  check(keyStretches(vals.map((v, i) => ({ ...v, bias: i === 2 ? 0.31 : 0 }))).join() === '0,1', 'a deal\'s usual loss is not a key stretch');
   const v = stretchValues({ from: 3, to: 4, shows: 'turn' }, new Map([['p3', 0.5], ['u4', 0.4], ['p4', 0.7]]), true, 4);
   check(v.end === 1 && Math.abs(v.play + 0.1) < 1e-12 && Math.abs(v.luck - 0.6) < 1e-12, 'a won game is worth 1');
+  const w = stretchValues({ from: 3, to: 4, shows: 'turn' }, new Map([['p3', 0.5], ['u4', 0.4], ['p4', 0.7]]), false, 4, 4);
+  check(w.commit < 0.4 && w.commit > 0.37 && Math.abs(w.play + w.luck - 0.2) < 1e-12 && w.bias === 0, 'the bias of an unknown card');
 }
 console.log('ok');

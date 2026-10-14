@@ -346,6 +346,11 @@ gains nothing and splitting runs anywhere in the normal search loses.
 
 `cargo run --release --bin lines -- <suits> <first> <count>` plays the
 seeds on all cores; `SPIDER_L_*` override the weights and search.
+`SPIDER_L_FAST=1` is a much cheaper setting (`LineConfig::fast`: six-step
+lines, a beam of 50, no expectimax, no replanning, no wider search before a
+deal), which wins 87%, 63%, 44% and 26% of seeds 60001–60800 with one to
+four suits at some 15,000 positions a game. The web game's analysis plays
+games out with it (`web/static/lineplayer.js` is a port; see `web/README.md`).
 
 `src/pimc.rs` (`--bin pimc`) adds rollouts on top: the line player's
 choice and a few alternatives are played out in worlds guessed from the
