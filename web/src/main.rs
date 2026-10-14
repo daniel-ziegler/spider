@@ -34,16 +34,19 @@ const SESSION_COOKIE: &str = "session";
 /// The most a saved game may take (the request body limit is 2 MB).
 const MAX_GAME_STATE: usize = 1_000_000;
 
-/// Daily challenges `(date, game, suits, seed)` in date order. Spider's are in
-/// challenges.txt (`date suits seed`, made by tools/dailies), four a day;
-/// FreeCell's in freecell-challenges.txt (`date deal`, made by
+/// Daily challenges `(date, game, suits, seed, medium)` in date order.
+/// Spider's are in challenges.txt (`date suits seed`, made by tools/dailies),
+/// four a day, and with three and four suits a second, easier one a day
+/// (`medium`) in medium-challenges.txt (the same, made by `tools/dailies
+/// medium`): other deals, so their wins and saved games are apart.
+/// FreeCell's are in freecell-challenges.txt (`date deal`, made by
 /// tools/freecell/dailies.mjs), one a day. Days start at midnight Pacific time.
-static CHALLENGES: LazyLock<Vec<(String, &'static str, u8, u64)>> = LazyLock::new(|| {
+static CHALLENGES: LazyLock<Vec<(String, &'static str, u8, u64, bool)>> = LazyLock::new(|| {
     let lines = |text: &'static str| text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(|l| l.split_whitespace().collect::<Vec<_>>());
-    let spider = lines(include_str!("../challenges.txt")).map(|f| (f[0].to_string(), "spider", f[1].parse().unwrap(), f[2].parse().unwrap()));
-    let freecell = lines(include_str!("../freecell-challenges.txt")).map(|f| (f[0].to_string(), "freecell", 4, f[1].parse().unwrap()));
-    let mut v: Vec<_> = spider.chain(freecell).collect();
-    v.sort();
+    let spider = |text, medium| lines(text).map(move |f| (f[0].to_string(), "spider", f[1].parse().unwrap(), f[2].parse().unwrap(), medium));
+    let freecell = lines(include_str!("../freecell-challenges.txt")).map(|f| (f[0].to_string(), "freecell", 4, f[1].parse().unwrap(), false));
+    let mut v: Vec<_> = spider(include_str!("../challenges.txt"), false).chain(spider(include_str!("../medium-challenges.txt"), true)).chain(freecell).collect();
+    v.sort_by(|a, b| (&a.0, a.1, a.2, a.4).cmp(&(&b.0, b.1, b.2, b.4)));
     v
 });
 
@@ -428,7 +431,8 @@ async fn get_game(State(app): AppState, headers: HeaderMap, Path((game, suits, s
 }
 
 /// Challenges up to today, newest day first, with how many players have won
-/// each and (when logged in) the player's own best win of it.
+/// each and (when logged in) the player's own best win of it. Where a day
+/// has two of a kind, each says which it is (`tier`: `medium` or `hard`).
 async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = current_user(&app, &headers)?;
     let today = today();
@@ -466,10 +470,16 @@ async fn dailies(State(app): AppState, headers: HeaderMap) -> ApiResult<Json<Val
         }
     }
     let mut days: Vec<Value> = Vec::new();
-    for (date, game, suits, seed) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
+    let has_medium: HashSet<(&str, u8)> = CHALLENGES.iter().filter(|c| c.4).map(|c| (c.0.as_str(), c.2)).collect();
+    for (date, game, suits, seed, medium) in CHALLENGES.iter().rev().filter(|c| c.0 <= today) {
         let key = (game.to_string(), *suits, *seed as i64);
         let names = solvers.get(&key).map(Vec::as_slice).unwrap_or_default();
         let mut challenge = json!({ "game": game, "suits": suits, "seed": seed, "solved": names.len(), "mine": mine.get(&key) });
+        if *medium {
+            challenge["tier"] = json!("medium");
+        } else if *game == "spider" && has_medium.contains(&(date.as_str(), *suits)) {
+            challenge["tier"] = json!("hard");
+        }
         if user.is_some() {
             challenge["solvers"] = json!(names);
             challenge["lost"] = json!(lost.contains(&key));
@@ -646,9 +656,19 @@ mod tests {
     fn challenges_are_complete() {
         let days: std::collections::BTreeSet<&str> = CHALLENGES.iter().map(|c| c.0.as_str()).collect();
         for day in &days {
-            let deals: Vec<(&str, u8)> = CHALLENGES.iter().filter(|c| c.0 == *day).map(|c| (c.1, c.2)).collect();
+            let deals: Vec<(&str, u8)> = CHALLENGES.iter().filter(|c| c.0 == *day && !c.4).map(|c| (c.1, c.2)).collect();
             assert_eq!(deals, [("freecell", 4), ("spider", 1), ("spider", 2), ("spider", 3), ("spider", 4)], "{day}");
         }
+        // The medium ones: both every day, from their first day to their last.
+        let medium: std::collections::BTreeSet<&str> = CHALLENGES.iter().filter(|c| c.4).map(|c| c.0.as_str()).collect();
+        for day in days.range(*medium.first().unwrap()..=*medium.last().unwrap()) {
+            let deals: Vec<(&str, u8)> = CHALLENGES.iter().filter(|c| c.0 == *day && c.4).map(|c| (c.1, c.2)).collect();
+            assert_eq!(deals, [("spider", 3), ("spider", 4)], "medium, {day}");
+        }
+        assert!(medium.contains(today().as_str()), "the medium challenges have run out: run tools/dailies medium");
+        // A medium challenge is no other challenge's deal, or its results would be shared.
+        let spider: HashSet<(u8, u64)> = CHALLENGES.iter().filter(|c| c.1 == "spider").map(|c| (c.2, c.3)).collect();
+        assert_eq!(spider.len(), CHALLENGES.iter().filter(|c| c.1 == "spider").count(), "a Spider deal is a challenge twice");
         assert!(CHALLENGES.iter().all(|c| is_deal(c.1, c.2, c.3)));
         assert!(days.contains(today().as_str()), "the challenges have run out: run tools/dailies and tools/freecell/dailies.mjs");
         let freecell: HashSet<u64> = CHALLENGES.iter().filter(|c| c.1 == "freecell").map(|c| c.3).collect();

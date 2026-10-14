@@ -296,6 +296,11 @@ button.tile .name { font-size: 17px; }
 button.tile small { white-space: normal; font-size: 13px; }
 button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
 .box .archive { max-height: none; overflow: visible; }
+/* With three and four suits the hard challenge is under the medium one. */
+.tiles .tile.hard:nth-child(5) { grid-column: 3; }
+button.tile .tier { font-size: 13px; color: var(--ink-dim); }
+.choices.tiers { margin-bottom: 12px; }
+.choices.tiers button[aria-pressed=true] { background: var(--accent); color: #222; border-color: transparent; }
 
 /* A spider lowers itself on a thread when you win. */
 #dangler[hidden] { display: none; }
@@ -313,6 +318,7 @@ button.tile .who { color: var(--ink-dim); margin-top: auto; padding-top: 6px; }
 
 @media (max-width: 640px) {
   .tiles { gap: 6px; grid-template-columns: repeat(2, 1fr); }
+  .tiles .tile.hard:nth-child(5) { grid-column: auto; }
   button.tile { padding: 10px 8px 8px; min-height: 104px; }
   .archive { gap: 6px 4px; }
   .archive button.challenge { padding: 6px; }

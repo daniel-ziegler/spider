@@ -5,6 +5,7 @@
 !web/Cargo.lock
 !web/src
 !web/challenges.txt
+!web/medium-challenges.txt
 !web/freecell-challenges.txt
 !web/test
 !web/static

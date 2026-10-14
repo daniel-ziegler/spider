@@ -645,9 +645,9 @@ async function onWin() {
 
 function showWinDialog(win, body) {
   if (dialog.open && !dialog.querySelector('[data-win]')) return; // don't replace another dialog
-  const date = dailyDate(win);
+  const daily = dailyOf(win);
   openDialog(`<h2 data-win>Solved!</h2>
-    <p>${date ? `Daily challenge · ${dayLabel(date)} · ${dealLabel(win)}` : `${dealLabel(win)} · deal ${win.seed}`}<br>
+    <p>${daily ? `Daily challenge · ${dayLabel(daily.date)} · ${challengeLabel(daily)}` : `${dealLabel(win)} · deal ${win.seed}`}<br>
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
       <b>${plural(win.real_undos, 'undo')}</b>${win.game === 'spider' ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
     <div>${body}</div>
@@ -704,10 +704,18 @@ async function fetchDailies() {
   render();
 }
 
-// The date of the daily challenge with this deal, if it is one.
-function dailyDate(deal) {
-  return dailies?.days.find(d => d.challenges.some(c => sameDeal(c, deal)))?.date ?? null;
+// The daily challenge with this deal, if it is one, with its date.
+function dailyOf(deal) {
+  for (const d of dailies?.days ?? []) {
+    const c = d.challenges.find(c => sameDeal(c, deal));
+    if (c) return { ...c, date: d.date };
+  }
+  return null;
 }
+
+// With three and four suits a day has two challenges, a medium and a hard
+// one (c.tier), which are different deals.
+const challengeLabel = c => dealLabel(c) + (c.tier ? ` · ${c.tier}` : '');
 
 function dayLabel(date) {
   if (date === dailies?.today) return 'today';
@@ -737,13 +745,18 @@ function challengeTile(c) {
   const pips = Array.from({ length: c.suits }, (_, s) => s)
     .map(s => `<i class="s${s}">${SUITS[s]}</i>`).join('');
   const name = c.game === 'freecell' ? `Deal ${c.seed}` : suitsLabel(c.suits);
-  return `<button type="button" class="challenge tile${wonClass(c)}" data-play="${keyOf(c)}">
-    <span class="pips">${pips}</span><span class="name">${name}</span>
+  const tier = c.tier ? `<b class="tier">${c.tier === 'hard' ? 'Hard' : 'Medium'}</b>` : '';
+  return `<button type="button" class="challenge tile${wonClass(c)}${c.tier ? ` ${c.tier}` : ''}" data-play="${keyOf(c)}">
+    <span class="pips">${pips}</span><span class="name">${name}</span>${tier}
     <small class="status">${status}</small><small class="who">${solversText(c)}</small></button>`;
 }
 
-// The day's challenges of the game the site is dressed for.
-const challengesOf = day => day.challenges.filter(c => c.game === homeGame);
+// The day's challenges of the game the site is dressed for, the medium ones
+// before the hard ones (the tiles put each hard one under its medium one).
+const challengesOf = day => day.challenges.filter(c => c.game === homeGame)
+  .sort((a, b) => (a.tier === 'hard') - (b.tier === 'hard'));
+// The archive shows one tier at a time: the one last chosen there.
+let archiveTier = store.get('spider:archiveTier', 'hard');
 
 // A challenge in the archive, whose columns are labelled with the suits.
 function challengeCell(c) {
@@ -761,8 +774,8 @@ function unfinishedGame(game) {
   if (!s || !s.moves || s.recorded) return null;
   const deal = dealOf(key);
   if (deal.game !== game || pending().some(p => sameDeal(p, deal))) return null;
-  const daily = dailyDate(deal);
-  return { key, label: `${daily ? `daily ${dayLabel(daily)}, ${dealLabel(deal)}` : `${dealLabel(deal)}, deal ${deal.seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
+  const daily = dailyOf(deal);
+  return { key, label: `${daily ? `daily ${dayLabel(daily.date)}, ${challengeLabel(daily)}` : `${dealLabel(deal)}, deal ${deal.seed}`} · ${plural(s.moves.split(',').length, 'move')}` };
 }
 
 function homeHtml() {
@@ -786,7 +799,7 @@ function spiderHtml(resume) {
   const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
   return `<section class="box">
       <h2>Today's challenges</h2>
-      <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
+      <p class="dim">${today ? `${longDate(today.date)} · all winnable${today.challenges.some(c => c.tier) ? ' · three and four suits have a medium deal and a hard one' : ''}` : dailies ? 'No challenges today.' : 'Loading…'}</p>
       ${today ? `<div class="tiles">${challengesOf(today).map(challengeTile).join('')}</div>` : ''}
       <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
     </section>
@@ -829,13 +842,19 @@ function freecellHtml(resume) {
 
 function archiveHtml() {
   const freecell = homeGame === 'freecell';
+  const tiers = !freecell && dailies?.days.some(d => d.challenges.some(c => c.tier));
+  const tier = (name, label) => `<button type="button" data-tier="${name}" aria-pressed="${archiveTier === name}">${label}</button>`;
+  // (The medium ones began on 2026-10-14: before that, their cells are empty.)
+  const cells = d => challengesOf(d).filter(c => !c.tier || c.tier === archiveTier)
+    .map(c => (tiers && archiveTier === 'medium' && c.suits > 2 && !c.tier ? '<span></span>' : challengeCell(c))).join('');
   return `<div class="pagewrap">
     <div class="row start"><button type="button" data-go="home">← Home</button></div>
     <section class="box">
       <h2>Daily challenges</h2>
       <p class="dim">Every deal here can be won. Green means you won it with no undos, yellow that you needed some, red that you played it to where it could no longer be won and have not won it since.${freecell ? '' : ' Free undos don\'t count.'}</p>
-      ${dailies ? `<div class="archive${freecell ? ' one' : ''}"><span></span>${freecell ? '<div class="head">FreeCell</div>' : SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}</div>`).join('')}
-        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${challengesOf(d).map(challengeCell).join('')}`).join('')}</div>`
+      ${tiers ? `<label>With three and four suits, each day has a medium deal and a hard one</label><div class="choices tiers">${tier('medium', 'Medium')}${tier('hard', 'Hard')}</div>` : ''}
+      ${dailies ? `<div class="archive${freecell ? ' one' : ''}"><span></span>${freecell ? '<div class="head">FreeCell</div>' : SUIT_COUNTS.map(n => `<div class="head">${suitsLabel(n)}${tiers && n > 2 ? ` · ${archiveTier}` : ''}</div>`).join('')}
+        ${dailies.days.map(d => `<div class="day">${dayLabel(d.date)}</div>${cells(d)}`).join('')}</div>`
         : '<p class="dim">Loading…</p>'}
     </section>
   </div>`;
@@ -861,6 +880,7 @@ page.addEventListener('click', e => {
   if (!b) return;
   if (b.dataset.go) showPage(b.dataset.go, true);
   else if (b.dataset.game) { setHomeGame(b.dataset.game); showPage('home', true); }
+  else if (b.dataset.tier) { archiveTier = b.dataset.tier; store.set('spider:archiveTier', archiveTier); renderPage(); }
   else if (b.dataset.random) load(b.dataset.random === 'freecell' ? freecellDeal(randomSeed()) : spiderDeal(+b.dataset.random, randomSeed()), true);
   else if ('login' in b.dataset) accountDialog('login');
   else if ('signup' in b.dataset) accountDialog('signup');
@@ -1169,8 +1189,8 @@ function renderFreecell() {
 
 // The line about the game in the header, and the buttons.
 function renderStatus() {
-  const daily = dailyDate(g);
-  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily)}</span> · ${dealLabel(g)}`
+  const daily = dailyOf(g);
+  $('#info').innerHTML = `${daily ? `<span class="seed" title="Copy link to this deal">Daily ${dayLabel(daily.date)}</span> · ${challengeLabel(daily)}`
     : `${dealLabel(g)} · <span class="seed" title="Copy link to this deal">deal ${g.seed}</span>`} ·
     <b>${g.history.length}</b> moves · <b>${realUndoCount()}</b> undos${g.freecell ? '' : ` · <b>${undoCount() - realUndoCount()}</b> free undos`}`;
   $('#b-undo').disabled = !g.canUndo() || finishing;

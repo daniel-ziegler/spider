@@ -185,7 +185,7 @@ when the server starts.)
 ## Daily challenges
 
 Every day (midnight to midnight Pacific time) has four challenges: 1, 2, 3 and
-4 suits (three suits are three sets of spades, three of hearts and two of
+4 suits, and with three and four suits a [medium one](#medium-challenges) too (three suits are three sets of spades, three of hearts and two of
 diamonds; they were added on 2026-10-10 and the earlier days backfilled). They are listed in `challenges.txt` (`date suits seed`), which is built
 into the server. `tools/dailies` picks them: for each date and suit count, the
 first candidate seed (from a hash of the date) that the peeking solver proves
@@ -210,6 +210,44 @@ cd tools/dailies && cargo run --release -- 2028-01-01 2028-12-31
 
 The list runs through 2027-12-31, and `cargo test` fails once today is past
 the end of it.
+
+### Medium challenges
+
+With three and four suits a day (from 2026-10-14) also has a **medium**
+challenge beside the hard one. It is another deal, so both can be played and
+their wins and saved games are apart. The home page shows each medium one
+above its hard one, and the archive one of the two kinds at a time. They are
+listed in `medium-challenges.txt` (`date suits seed`, built into the server
+like the others) and taken, in shuffled order, from
+`tools/dailies/picked3_medium.txt` and `picked4_medium.txt`: seeds that the
+wavering line player wins at least 27 of 30 times and `pick_seeds`' weak
+player 50 to 79 of 100, so they are easy for it but not sure. That keeps 7.4%
+of three-suit seeds (85 of 100001–101147) and 3.0% of four-suit ones (88 of
+100001–102957); 79 of each are used, through 2026-12-31. Played again with
+other salts (`../src/bin/seed_rates.rs`: 12 games each by the line player and
+by it without expectimax or replanning, 50 by the weak one), against 40 of
+the hard deals of `picked3.txt` and `picked4_2026.txt`:
+
+| won                             | 3 suits, medium | hard | 4 suits, medium | hard |
+|---------------------------------|-----------------|------|-----------------|------|
+| line player                     | 95%             | 79%  | 93%             | 76%  |
+| without expectimax, replanning  | 92%             | 65%  | 83%             | 54%  |
+| weak player                     | 66%             | 26%  | 62%             | 31%  |
+| `human.rs` (deals it wins)      | 52%             | 18%  | 38%             | 18%  |
+
+Of all deals the line player wins 54% and 39%, and the weak one about 22%
+and 17%. To extend the list, pick more seeds from where the files end (their
+first lines say), add the kept ones to them, and give the dates:
+
+```
+cd ../.. && SPIDER_W_MIN=0.5 SPIDER_W_MAX=0.8 SPIDER_W_RUNS=100 SPIDER_W_FIRST=20 SPIDER_W_FIRST_MIN=7 \
+    SPIDER_S_MIN=0.89 SPIDER_S_RUNS=30 cargo run --release --bin pick_seeds -- 4 102958 3000
+cd web/tools/dailies && cargo run --release -- medium 2027-01-01 2027-03-31
+```
+
+(about 50 games of the line player, two minutes of one core, for each seed
+kept). `cargo test` fails once today is past the end of the medium
+ones too.
 
 ## Running locally
 
