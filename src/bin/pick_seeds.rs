@@ -9,10 +9,18 @@
 //! expectimax or replanning, with SPIDER_W_STEPS (default 4; 2 with two
 //! suits, 3 with three) steps per line, a beam of SPIDER_W_BEAM (50) and
 //! SPIDER_W_DEAL_SPLITS (0). A seed is kept when the weak player wins
-//! fewer than SPIDER_W_MAX (40%) of SPIDER_W_RUNS (20) runs and the strong
-//! one more than SPIDER_S_MIN (70%) of SPIDER_S_RUNS (20); the weak runs go
-//! first, then 5 strong runs (stopping if fewer than 3 are won), then the
-//! rest.
+//! fewer than SPIDER_W_MAX (40%) of SPIDER_W_RUNS (20) runs, and at least
+//! SPIDER_W_MIN (0) of them, and the strong one more than SPIDER_S_MIN
+//! (70%) of SPIDER_S_RUNS (20); the weak runs go first, then 5 strong runs
+//! (stopping if fewer than 3 are won), then the rest, stopping once too
+//! many are lost. With SPIDER_W_FIRST (0) a seed is also dropped when the
+//! weak player wins fewer than SPIDER_W_FIRST_MIN of its first
+//! SPIDER_W_FIRST runs.
+//!
+//! The medium daily challenges (web/tools/dailies/picked3_medium.txt and
+//! picked4_medium.txt) are seeds kept with SPIDER_W_MIN=0.5
+//! SPIDER_W_MAX=0.8 SPIDER_W_RUNS=100 SPIDER_W_FIRST=20
+//! SPIDER_W_FIRST_MIN=7 SPIDER_S_MIN=0.89 SPIDER_S_RUNS=30.
 use spider::game::Game;
 use spider::lines::{play, LineConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,7 +54,8 @@ fn main() {
         ..strong
     };
     let (w_runs, s_runs): (usize, usize) = (get("SPIDER_W_RUNS", 20), get("SPIDER_S_RUNS", 20));
-    let (w_max, s_min): (f64, f64) = (get("SPIDER_W_MAX", 0.4), get("SPIDER_S_MIN", 0.7));
+    let (w_min, w_max, s_min): (f64, f64, f64) = (get("SPIDER_W_MIN", 0.0), get("SPIDER_W_MAX", 0.4), get("SPIDER_S_MIN", 0.7));
+    let (w_first, w_first_min): (usize, usize) = (get("SPIDER_W_FIRST", 0).min(w_runs), get("SPIDER_W_FIRST_MIN", 0));
     let next = AtomicU64::new(first);
     let out = Mutex::new(std::io::stdout());
     let kept = AtomicU64::new(0);
@@ -59,20 +68,25 @@ fn main() {
                     break;
                 }
                 let g = Game::new(suits, seed);
-                let w = wins(&g, &weak, 1_000_000, w_runs);
+                let (mut w, mut w_done) = (wins(&g, &weak, 1_000_000, w_first), w_first);
+                if w >= w_first_min {
+                    w += wins(&g, &weak, 1_000_000 + w_first as u64, w_runs - w_first);
+                    w_done = w_runs;
+                }
                 let (mut s, mut s_done) = (0, 0);
-                if (w as f64) < w_max * w_runs as f64 {
+                let enough = |s: usize, s_done: usize| (s + s_runs - s_done) as f64 > s_min * s_runs as f64;
+                if w_done == w_runs && (w as f64) < w_max * w_runs as f64 && w as f64 >= w_min * w_runs as f64 {
                     s_done = 5.min(s_runs);
                     s = wins(&g, &strong, 1, s_done);
-                    if s >= 3 {
-                        s += wins(&g, &strong, 1 + s_done as u64, s_runs - s_done);
-                        s_done = s_runs;
+                    while s_done < s_runs && s >= 3 && enough(s, s_done) {
+                        s += wins(&g, &strong, 1 + s_done as u64, 1);
+                        s_done += 1;
                     }
                 }
                 let keep = s_done == s_runs && s as f64 > s_min * s_runs as f64;
                 kept.fetch_add(keep as u64, Ordering::Relaxed);
                 use std::io::Write;
-                writeln!(out.lock().unwrap(), "seed {seed} weak {w}/{w_runs} strong {s}/{s_done}{}", if keep { " KEEP" } else { "" }).unwrap();
+                writeln!(out.lock().unwrap(), "seed {seed} weak {w}/{w_done} strong {s}/{s_done}{}", if keep { " KEEP" } else { "" }).unwrap();
             });
         }
     });
