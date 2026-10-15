@@ -221,24 +221,59 @@ impl LineConfig {
         LineConfig { max_steps: 6, beam: 50, expect_top: 0, replan: 0, deal_splits: 0, ..d }
     }
 
+    /// The player of the web game's analysis, which plays hundreds of games
+    /// out from a position with it and has a network for its chance of
+    /// winning (`web/static/lineplayer.js` is a port of it): the strongest
+    /// found for about six times the work of [`LineConfig::fast`] (see
+    /// `web/README.md` for what else was tried). Fourteen-step lines and a
+    /// beam of 100 (one suit: two-step lines, as the default), and the best
+    /// four lines that turn a card valued by expectimax one step deep; no
+    /// replanning and no wider search before a deal. The default's
+    /// expectimax of four steps is worth four more points with four suits,
+    /// at ten times the work of this. Of seeds 62001-66000 it wins 31.4%
+    /// with four suits and 49.8% with three (`fast`: 25.4% and 42.1%), of
+    /// seeds 62001-65000 68.1% with two and 88.8% with one (`fast`: 62.6%
+    /// and 86.2%; the default with two: 69.5%, at 54 times the work of
+    /// `fast`).
+    pub fn rollout(suits: u8) -> LineConfig {
+        let d = LineConfig::fast(suits);
+        if suits == 1 {
+            return LineConfig { expect_top: 4, expect_steps: 1, ..d };
+        }
+        LineConfig { max_steps: 14, beam: 100, expect_top: 4, expect_steps: 1, ..d }
+    }
+
+    /// [`LineConfig::rollout`] with the `SPIDER_L_*` overrides of
+    /// [`LineConfig::from_env`].
+    pub fn rollout_from_env(suits: u8) -> LineConfig {
+        LineConfig::from_env_stage(LineConfig::rollout(suits), None)
+    }
+
     /// [`LineConfig::for_suits`] (with `SPIDER_L_FAST` set,
-    /// [`LineConfig::fast`]) with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
+    /// [`LineConfig::fast`]; with `SPIDER_L_ROLLOUT`, [`LineConfig::rollout`]) with `SPIDER_L_*` overrides (MAX_STEPS, TOUCH (0/1), BEAM, DEAL_SPLITS, EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM, SPLITS,
     /// COMPLETED, HIDDEN, EMPTY, DEAL_EMPTY, DEAL_FLIP, END_EMPTY, SAME, OFF, OFF_RANK,
     /// KING, RANKS, RUN_SQ, WRONG, CLEAR, HIDDEN_SQ, DIG, TURNABLE, WAVER, SALT, REPLAN).
     /// `SPIDER_L_K<n>_*` override them for the play with `n` deals left
     /// only (see [`LineConfig::staged`]).
     pub fn from_env(suits: u8) -> LineConfig {
-        let mut cfg = LineConfig::from_env_stage(suits, None);
+        let d = if std::env::var_os("SPIDER_L_FAST").is_some() {
+            LineConfig::fast(suits)
+        } else if std::env::var_os("SPIDER_L_ROLLOUT").is_some() {
+            LineConfig::rollout(suits)
+        } else {
+            LineConfig::for_suits(suits)
+        };
+        let mut cfg = LineConfig::from_env_stage(d, None);
         if std::env::vars().any(|(k, _)| k.starts_with("SPIDER_L_K")) {
-            let staged: Vec<LineConfig> = (0..=crate::game::NUM_DEALS).map(|k| LineConfig::from_env_stage(suits, Some(k))).collect();
+            let staged: Vec<LineConfig> = (0..=crate::game::NUM_DEALS).map(|k| LineConfig::from_env_stage(d, Some(k))).collect();
             cfg.staged = Some(Box::leak(Box::new(<[LineConfig; 6]>::try_from(staged).unwrap())));
         }
         cfg
     }
 
-    /// The configuration from the environment for the play with `stage`
+    /// `d` with the environment's overrides for the play with `stage`
     /// deals left (`None`: for any).
-    fn from_env_stage(suits: u8, stage: Option<usize>) -> LineConfig {
+    fn from_env_stage(d: LineConfig, stage: Option<usize>) -> LineConfig {
         let var = |name: &str| stage.and_then(|k| std::env::var(format!("SPIDER_L_K{k}_{name}")).ok()).or_else(|| std::env::var(format!("SPIDER_L_{name}")).ok());
         fn parse<T: std::str::FromStr>(v: Option<String>, d: T) -> T {
             v.and_then(|v| v.parse().ok()).unwrap_or(d)
@@ -248,7 +283,6 @@ impl LineConfig {
                 parse(var($name), $d)
             };
         }
-        let d = if std::env::var_os("SPIDER_L_FAST").is_some() { LineConfig::fast(suits) } else { LineConfig::for_suits(suits) };
         LineConfig {
             max_steps: get!("MAX_STEPS", d.max_steps),
             touch: get!("TOUCH", d.touch as u8) != 0,

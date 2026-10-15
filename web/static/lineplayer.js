@@ -1,16 +1,18 @@
 // A player that does not look at the face-down cards, for the analysis's
 // rollouts (analysis-worker.js): a port of the line player, ../../src/lines.rs, as
-// far as its cheap configuration needs (LineConfig::fast: no expectimax, no
-// replanning, no wider search before a deal). It decides exactly as the Rust
-// does: the repository root's `cargo test` plays deals with both and compares
-// the moves (test/lineplayer.mjs).
+// far as the analysis's configuration needs (LineConfig::rollout, and the
+// cheaper LineConfig::fast: no replanning, no wider search before a deal). It
+// decides exactly as the Rust does: the repository root's `cargo test` plays
+// deals with both and compares the moves (test/lineplayer.mjs).
 //
-// It plays lines of up to six steps. A step puts a run, or a sequence of
+// It plays lines of up to fourteen steps. A step puts a run, or a sequence of
 // several suits by way of the empty columns, from the top of a column onto a
 // card one rank higher or into an empty column; a line ends when a card turns
-// over. Where each line ends is scored from the visible cards, and the best
-// line that raises the score is played; failing that the best by a score that
-// values empty columns low (a deal needs them filled); failing that it deals.
+// over. Where each line ends is scored from the visible cards (the best few
+// lines that turn a card by the mean, over the cards that can come up, of the
+// best score a step further on), and the best line that raises the score is
+// played; failing that the best by a score that values empty columns low (a
+// deal needs them filled); failing that it deals.
 //
 // A position is a Uint8Array of SIZE bytes: MAXC cards for each of ten
 // columns, then each column's length, each column's number of face-down
@@ -26,10 +28,10 @@ export const LEN = NUM_COLS * MAXC, DOWN = LEN + NUM_COLS, DONE = DOWN + NUM_COL
 const LOST = -1073741824;
 const imul = Math.imul;
 
-// LineConfig::fast in lines.rs.
+// LineConfig::fast in lines.rs: six-step lines, a beam of 50, no expectimax.
 export function fastConfig(suits) {
   const base = {
-    maxSteps: 6, touch: true, beam: 0, splits: suits === 1 ? 2 : 1,
+    maxSteps: 6, touch: true, beam: 0, expectTop: 0, expectSteps: 4, expectBeam: 20, splits: suits === 1 ? 2 : 1,
     completed: 1000, hidden: 47, empty: 53, dealEmpty: -72, dealFlip: 0, endEmpty: 3, same: 0, off: -6, offRank: 3,
     king: 0, ranks: 9, runSq: 13, wrong: 0, clear: 0, hiddenSq: 0, dig: 0, turnable: 0,
   };
@@ -76,6 +78,20 @@ function colHash(S, at, n, d) {
 }
 
 const keyOf = (a, b) => (b & 0x1FFFFF) * 4294967296 + (a >>> 0);
+
+// The player the analysis plays games out with and whose chance of winning
+// its network gives: LineConfig::rollout in lines.rs (which see). Lines of up
+// to fourteen steps (two with one suit), a beam of 100, and expectimax one
+// step deep for the best four lines that turn a card: it wins some 89%, 68%,
+// 50% and 31% of deals with one to four suits, at six times the work of
+// fastConfig (86%, 63%, 42%, 25%).
+export function rolloutConfig(suits) {
+  return { ...fastConfig(suits), ...ROLLOUT[suits] };
+}
+
+const STRONGER = { maxSteps: 14, beam: 100, expectTop: 4, expectSteps: 1 };
+const ROLLOUT = { 1: { expectTop: 4, expectSteps: 1 }, 2: STRONGER, 3: STRONGER, 4: STRONGER };
+
 
 // The positions a search has reached: an open-addressed table, emptied by
 // moving on to the next generation.
@@ -397,18 +413,26 @@ function expand(i, splits, require, cfg) {
 // (search_state in lines.rs). A position reached by several lines is kept
 // once; with a beam, only the best positions of each depth are taken further.
 function search(root, cfg, splits, beam) {
-  count = 1;
   NS.set(root, 0);
-  for (let c = 0; c < NUM_COLS; c++) rehashCol(0, c);
-  sumHash(0);
+  searchFrom(0, cfg, splits, cfg.maxSteps, beam);
+}
+
+// The same from the position already in place as node r: the nodes r to
+// count - 1 (those below r are left alone, but for the table of positions
+// reached, which is this search's from here on).
+function searchFrom(r, cfg, splits, maxSteps, beam) {
+  count = r + 1;
+  if (count >= cap) grow();
+  for (let c = 0; c < NUM_COLS; c++) rehashCol(r, c);
+  sumHash(r);
   seenReset();
-  seenInsert(PA[0], PB[0]);
-  parent[0] = -1;
-  leaf[0] = 0;
-  touched[0] = 0;
-  evaluate(0, cfg);
-  let frontier = [0];
-  for (let depth = 0; depth < cfg.maxSteps; depth++) {
+  seenInsert(PA[r], PB[r]);
+  parent[r] = -1;
+  leaf[r] = 0;
+  touched[r] = 0;
+  evaluate(r, cfg);
+  let frontier = [r];
+  for (let depth = 0; depth < maxSteps; depth++) {
     const first = count;
     for (const i of frontier) expand(i, splits, cfg.touch && depth > 0 ? touched[i] : 0, cfg);
     frontier = [];
@@ -425,6 +449,54 @@ function search(root, cfg, splits, beam) {
   }
 }
 
+// Expectimax (expect_flips in lines.rs) for the best cfg.expectTop lines that
+// turn a card, by the normal score and by the other (an empty column worth
+// `empty`): node -> [normal, other], each the mean, over the cards `unseen`
+// (how many of each card the player has not seen) that can come up, of the
+// best score a smaller search reaches with that card there. The smaller
+// searches use the nodes above the search's own, which stay as they are.
+function expectFlips(dealsLeft, visited, cfg, empty, unseen) {
+  const n = count, picked = [];
+  for (const e of [cfg.empty, empty]) {
+    const leaves = [];
+    for (let k = 1; k < n; k++) if (leaf[k] && value(k, dealsLeft, e) > LOST && !visited.has(keyOf(PA[k], PB[k]))) leaves.push(k);
+    leaves.sort((x, y) => value(y, dealsLeft, e) - value(x, dealsLeft, e) || x - y);
+    for (let j = 0; j < cfg.expectTop && j < leaves.length; j++) if (!picked.includes(leaves[j])) picked.push(leaves[j]);
+  }
+  const out = new Map();
+  if (!picked.length) return out;
+  let total = 0;
+  for (let card = 0; card < 52; card++) total += unseen[card];
+  for (const k of picked) {
+    // The card turned: the only face-up card of its column.
+    let at = -1;
+    for (let c = 0; c < NUM_COLS && at < 0; c++) {
+      const len = NS[k * SIZE + LEN + c];
+      if (len > 0 && NS[k * SIZE + DOWN + c] + 1 === len && NS[k * SIZE + c * MAXC + len - 1] === BLANK) at = c * MAXC + len - 1;
+    }
+    let sum0 = 0, sum1 = 0;
+    for (let card = 0; card < 52; card++) {
+      if (!unseen[card]) continue;
+      if (n >= cap) grow();
+      NS.copyWithin(n * SIZE, k * SIZE, (k + 1) * SIZE);
+      NS[n * SIZE + at] = card;
+      searchFrom(n, cfg, cfg.splits, cfg.expectSteps, cfg.expectBeam);
+      let best0 = LOST, best1 = LOST;
+      for (let j = n; j < count; j++) {
+        if (dealsLeft > 0 && evCards[j] < NUM_COLS) continue; // (lost)
+        const v0 = evBase[j] + cfg.empty * evEmpties[j], v1 = evBase[j] + empty * evEmpties[j];
+        if (v0 > best0) best0 = v0;
+        if (v1 > best1) best1 = v1;
+      }
+      sum0 += unseen[card] * Math.max(best0, LOST / 2);
+      sum1 += unseen[card] * Math.max(best1, LOST / 2);
+    }
+    out.set(k, [Math.trunc(sum0 / total), Math.trunc(sum1 / total)]);
+  }
+  count = n;
+  return out;
+}
+
 // The moves of the line to node k, as [from, to, count, ...].
 function lineTo(k) {
   const steps = [];
@@ -437,22 +509,26 @@ const DEAL = 'deal', STUCK = 'stuck';
 // What to do in the position `root` with this many deals left
 // (decide_steps in lines.rs): a line's moves, DEAL or STUCK. `visited` has
 // the keys of the positions never to return to, `tempo.dealing` says that the
-// player is about to deal, `tempo.work` counts the positions looked at.
-function decide(root, dealsLeft, visited, tempo, cfg) {
+// player is about to deal, `tempo.work` counts the positions looked at (those
+// of the expectimax apart, as in the Rust). `unseen` is asked for the cards
+// not seen (see expectFlips) if they are needed.
+function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
   search(root, cfg, cfg.splits, cfg.beam);
   tempo.work += count;
   const fresh = k => !visited.has(keyOf(PA[k], PB[k]));
+  const empty = dealsLeft > 0 ? cfg.dealEmpty : cfg.endEmpty;
+  const expected = cfg.expectTop > 0 ? expectFlips(dealsLeft, visited, cfg, empty, unseen()) : null;
+  const scored = expected?.size ? (k, mode, e) => expected.get(k)?.[mode] ?? value(k, dealsLeft, e) : (k, mode, e) => value(k, dealsLeft, e);
   if (!tempo.dealing) {
     let best = 0, bestScore = value(0, dealsLeft, cfg.empty);
     for (let k = 1; k < count; k++) {
-      const sc = value(k, dealsLeft, cfg.empty);
+      const sc = scored(k, 0, cfg.empty);
       if (sc > bestScore && fresh(k)) { best = k; bestScore = sc; }
     }
     if (best) return lineTo(best);
   }
   // About to deal or, with the stock gone, to give up.
-  const empty = dealsLeft > 0 ? cfg.dealEmpty : cfg.endEmpty;
-  const dealValue = k => { const v = value(k, dealsLeft, empty); return v > LOST && leaf[k] ? v + cfg.dealFlip : v; };
+  const dealValue = k => { const v = scored(k, 1, empty); return v > LOST && leaf[k] ? v + cfg.dealFlip : v; };
   let best = 0, bestScore = value(0, dealsLeft, empty);
   for (let k = 1; k < count; k++) {
     const sc = dealValue(k);
@@ -493,6 +569,14 @@ function decide(root, dealsLeft, visited, tempo, cfg) {
 export function playOut(s, stock, cfg, moves = null, toShow = false) {
   const visited = new Set(), tempo = { dealing: false, work: 0 };
   let left = stock.length, played = 0;
+  // How many of each card are face down or in the stock.
+  const counts = new Uint8Array(52);
+  const unseen = () => {
+    counts.fill(0);
+    for (let c = 0; c < NUM_COLS; c++) for (let i = 0; i < s[DOWN + c]; i++) counts[s[c * MAXC + i]]++;
+    for (let i = 0; i < left; i++) counts[stock[i]]++;
+    return counts;
+  };
   const progress = () => {
     let down = 0;
     for (let c = 0; c < NUM_COLS; c++) down += s[DOWN + c];
@@ -500,7 +584,7 @@ export function playOut(s, stock, cfg, moves = null, toShow = false) {
   };
   while (s[DONE] < 8 && played < 5000) {
     const before = progress();
-    const d = decide(s, left / NUM_COLS, visited, tempo, cfg);
+    const d = decide(s, left / NUM_COLS, visited, tempo, cfg, unseen);
     visited.add(keyOf(PA[0], PB[0])); // (the position it stood in, as the search hashed it; decide only asks about others)
     if (d === STUCK) break;
     if (d === DEAL) {
