@@ -93,9 +93,10 @@ const STRONGER = { maxSteps: 14, beam: 100, expectTop: 4, expectSteps: 1 };
 const ROLLOUT = { 1: { expectTop: 4, expectSteps: 1 }, 2: STRONGER, 3: STRONGER, 4: STRONGER };
 
 
-// The positions a search has reached: an open-addressed table, emptied by
-// moving on to the next generation.
-let tcap = 1 << 14, tA = new Int32Array(tcap), tB = new Int32Array(tcap), tG = new Uint32Array(tcap), gen = 0, tcount = 0;
+// The positions a search has reached: an open-addressed table (for each
+// place the generation that filled it and the two halves of the hash),
+// emptied by moving on to the next generation.
+let tcap = 1 << 14, table = new Int32Array(4 * tcap), gen = 0, tcount = 0;
 
 function seenReset() {
   gen++;
@@ -106,32 +107,30 @@ function seenReset() {
 function seenInsert(a, b) {
   const mask = tcap - 1;
   let i = (a ^ imul(b, 0x9E3779B1)) & mask;
-  while (tG[i] === gen) {
-    if (tA[i] === a && tB[i] === b) return false;
+  while (table[4 * i] === gen) {
+    if (table[4 * i + 1] === a && table[4 * i + 2] === b) return false;
     i = (i + 1) & mask;
   }
-  tG[i] = gen;
-  tA[i] = a;
-  tB[i] = b;
+  table[4 * i] = gen;
+  table[4 * i + 1] = a;
+  table[4 * i + 2] = b;
   if (++tcount * 2 > tcap) seenGrow();
   return true;
 }
 
 function seenGrow() {
-  const [oA, oB, oG, ocap, ogen] = [tA, tB, tG, tcap, gen];
+  const old = table, ocap = tcap, ogen = gen;
   tcap *= 2;
-  tA = new Int32Array(tcap);
-  tB = new Int32Array(tcap);
-  tG = new Uint32Array(tcap);
+  table = new Int32Array(4 * tcap);
   gen = 1;
   const mask = tcap - 1;
   for (let j = 0; j < ocap; j++) {
-    if (oG[j] !== ogen) continue;
-    let i = (oA[j] ^ imul(oB[j], 0x9E3779B1)) & mask;
-    while (tG[i] === gen) i = (i + 1) & mask;
-    tG[i] = gen;
-    tA[i] = oA[j];
-    tB[i] = oB[j];
+    if (old[4 * j] !== ogen) continue;
+    let i = (old[4 * j + 1] ^ imul(old[4 * j + 2], 0x9E3779B1)) & mask;
+    while (table[4 * i] === gen) i = (i + 1) & mask;
+    table[4 * i] = gen;
+    table[4 * i + 1] = old[4 * j + 1];
+    table[4 * i + 2] = old[4 * j + 2];
   }
 }
 
@@ -147,6 +146,7 @@ let CA = new Int32Array(cap * NUM_COLS), CB = new Int32Array(cap * NUM_COLS);
 let PA = new Int32Array(cap), PB = new Int32Array(cap);
 let parent = new Int32Array(cap), leaf = new Uint8Array(cap), touched = new Uint16Array(cap);
 let evBase = new Int32Array(cap), evEmpties = new Uint8Array(cap), evCards = new Uint16Array(cap);
+let colScore = new Int32Array(cap * NUM_COLS), colOff = new Int32Array(cap * NUM_COLS);
 let stepOf = [];
 
 function grow() {
@@ -163,6 +163,8 @@ function grow() {
   evBase = bigger(evBase, Int32Array, 1);
   evEmpties = bigger(evEmpties, Uint8Array, 1);
   evCards = bigger(evCards, Uint16Array, 1);
+  colScore = bigger(colScore, Int32Array, NUM_COLS);
+  colOff = bigger(colOff, Int32Array, NUM_COLS);
 }
 
 function rehashCol(k, c) {
@@ -182,8 +184,86 @@ function sumHash(k) {
   PB[k] = b;
 }
 
-// The evaluation of node k (base_eval and Parts::of in lines.rs).
+// The evaluation of node k (base_eval and Parts::of in lines.rs). What a
+// column adds by itself is kept for each column (colScore, and colOff: the
+// ranks of the lower cards of its off-suit links), so that a position a step
+// away has only the step's two columns to look at again (evaluateStep).
 function evaluate(k, cfg) {
+  if (cfg.turnable !== 0) return evaluateWhole(k, cfg);
+  for (let c = 0; c < NUM_COLS; c++) evaluateCol(k, c, cfg);
+  evaluateSum(k, cfg);
+}
+
+// The evaluation of node k, a step from node i that changed the columns
+// `from` and `to` only.
+function evaluateStep(k, i, from, to, cfg) {
+  if (cfg.turnable !== 0) return evaluateWhole(k, cfg);
+  for (let c = 0, a = k * NUM_COLS, b = i * NUM_COLS; c < NUM_COLS; c++) {
+    colScore[a + c] = colScore[b + c];
+    colOff[a + c] = colOff[b + c];
+  }
+  evaluateCol(k, from, cfg);
+  evaluateCol(k, to, cfg);
+  evaluateSum(k, cfg);
+}
+
+function evaluateCol(k, c, cfg) {
+  const S = NS, o = k * SIZE, n = S[o + LEN + c];
+  let score = 0, offRank = 0;
+  if (n !== 0) {
+    const d = S[o + DOWN + c], co = o + c * MAXC;
+    score = -(cfg.hidden * d + Math.trunc(cfg.hiddenSq * d * d / 16));
+    if (d === 0) score += cfg.clear;
+    const low = S[co + d];
+    if (low !== BLANK && low % 13 === 12) score += cfg.king;
+    let run = 1, seq = true;
+    for (let i = d + 1; i < n; i++) {
+      const upper = S[co + i - 1], lower = S[co + i];
+      if (upper % 13 === lower % 13 + 1) {
+        if (((upper / 13) | 0) === ((lower / 13) | 0)) {
+          score += cfg.same;
+          run++;
+          continue;
+        }
+        score += cfg.off;
+        offRank += lower % 13;
+      } else if (upper !== BLANK && lower !== BLANK) {
+        score += cfg.wrong;
+        seq = false;
+      }
+      score += Math.trunc(cfg.runSq * run * run / 16);
+      run = 1;
+    }
+    score += Math.trunc(cfg.runSq * run * run / 16);
+    if (d > 0 && seq) score += cfg.dig;
+  }
+  colScore[k * NUM_COLS + c] = score;
+  colOff[k * NUM_COLS + c] = offRank;
+}
+
+function evaluateSum(k, cfg) {
+  const S = NS, o = k * SIZE;
+  let score = cfg.completed * S[o + DONE], offRank = 0, topRanks = 0, empties = 0, cards = 0;
+  for (let c = 0, a = k * NUM_COLS; c < NUM_COLS; c++) {
+    const n = S[o + LEN + c];
+    if (n === 0) { empties++; continue; }
+    cards += n;
+    score += colScore[a + c];
+    offRank += colOff[a + c];
+    // A card just turned over is unknown (BLANK): no place to put anything yet.
+    const top = S[o + c * MAXC + n - 1];
+    if (top !== BLANK && top % 13 !== 0) topRanks |= 1 << (top % 13);
+  }
+  let bits = 0;
+  for (let r = topRanks; r; r &= r - 1) bits++;
+  evBase[k] = score + Math.trunc(cfg.offRank * offRank / 4) + cfg.ranks * bits;
+  evEmpties[k] = empties;
+  evCards[k] = cards;
+}
+
+// The same all at once, for the weight (turnable) that goes by what the
+// other columns have room for.
+function evaluateWhole(k, cfg) {
   const S = NS, o = k * SIZE;
   let score = cfg.completed * S[o + DONE];
   let topRanks = 0, offRank = 0, accepts = 0, anyEmpty = false, empties = 0, cards = 0;
@@ -307,14 +387,27 @@ function movePieces(o, from, to, lo, hi, f) {
   movePieces(o, t, to, mid, hi, f + 1);
 }
 
-const tmp = new Uint8Array(2 * MAXC), emptyCols = new Uint8Array(NUM_COLS);
+const tmp = new Uint8Array(2 * MAXC), emptyCols = new Uint8Array(NUM_COLS), onRank = new Uint16Array(14);
+
+// With `peek` set, expand makes no nodes: it only keeps the best scores of
+// the positions a step away (peek0 with an empty column worth cfg.empty,
+// peek1 with it worth peekEmpty; peekDeals deals are left).
+let peek = false, peek0 = 0, peek1 = 0, peekEmpty = 0, peekDeals = 0;
+const peekStep = [];
 
 // Every step from node i (steps in lines.rs) as new nodes: with `require`
 // not zero, only steps touching one of those columns.
 function expand(i, splits, require, cfg) {
   const o = i * SIZE;
+  // The empty columns, and for each rank the columns whose top card has it
+  // (a bit a column; as the Rust, an unknown card counts by its code's).
   let ne = 0;
-  for (let c = 0; c < NUM_COLS; c++) if (NS[o + LEN + c] === 0) emptyCols[ne++] = c;
+  onRank.fill(0);
+  for (let c = 0; c < NUM_COLS; c++) {
+    const n = NS[o + LEN + c];
+    if (n === 0) emptyCols[ne++] = c;
+    else onRank[NS[o + c * MAXC + n - 1] % 13] |= 1 << c;
+  }
   for (let from = 0; from < NUM_COLS; from++) {
     const n = NS[o + LEN + from], d = NS[o + DOWN + from];
     if (n === d) continue;
@@ -327,6 +420,12 @@ function expand(i, splits, require, cfg) {
       // Cutting inside a same-suit run splits it.
       const split = p > start && ((NS[co + p - 1] / 13) | 0) === suit;
       if (split && splits === 0) continue;
+      // Where it can go: onto a card one rank higher, or into the first
+      // empty column (they are all one; a whole column into one changes
+      // nothing), in the order of the columns.
+      let places = onRank[bottom % 13 + 1] & ~(1 << from);
+      if (ne > 0 && p !== 0 && !(split && splits < 2)) places |= 1 << emptyCols[0];
+      if (!places) continue;
       // The same-suit pieces of what moves, bottom first.
       let np = 0;
       for (let a = p; a < n;) {
@@ -335,19 +434,10 @@ function expand(i, splits, require, cfg) {
         sizes[np++] = b - a;
         a = b;
       }
-      let triedEmpty = false;
-      for (let to = 0; to < NUM_COLS; to++) {
-        if (to === from) continue;
+      for (; places; places &= places - 1) {
+        const to = 31 - Math.clz32(places & -places);
         const tl = NS[o + LEN + to], to0 = o + to * MAXC;
-        if (tl === 0) {
-          // Empty columns are all one; a whole column into one changes nothing.
-          if (triedEmpty || p === 0 || (split && splits < 2)) continue;
-          triedEmpty = true;
-        } else {
-          const top = NS[to0 + tl - 1];
-          if (top % 13 !== bottom % 13 + 1) continue;
-          if (split && splits < 3 && ((top / 13) | 0) !== suit) continue;
-        }
+        if (tl !== 0 && split && splits < 3 && ((NS[to0 + tl - 1] / 13) | 0) !== suit) continue;
         if (tl + n - p > MAXC) continue;
         nf = 0;
         for (let e = 0; e < ne; e++) if (emptyCols[e] !== to) free[nf++] = emptyCols[e];
@@ -370,6 +460,22 @@ function expand(i, splits, require, cfg) {
           }
           completes = r === 13;
         }
+        if (count === cap) grow();
+        const k = count, ko = k * SIZE;
+        if (peek) {
+          // (A position reached twice has the same score both times.)
+          NS.copyWithin(ko, o, o + SIZE);
+          step = peekStep;
+          step.length = 0;
+          movePieces(ko, from, to, 0, np, 0);
+          evaluateStep(k, i, from, to, cfg);
+          if (peekDeals > 0 && evCards[k] < NUM_COLS) continue; // (lost)
+          const v0 = evBase[k] + cfg.empty * evEmpties[k], v1 = evBase[k] + peekEmpty * evEmpties[k];
+          if (v0 > peek0) peek0 = v0;
+          if (v1 > peek1) peek1 = v1;
+          continue;
+        }
+        let a = 0, b = 0, fa = 0, fb = 0, ta = 0, tb = 0;
         if (!completes) {
           const df = p > 0 && p === d ? d - 1 : d;
           const turns = df < d; // (the card turned will be BLANK)
@@ -377,33 +483,45 @@ function expand(i, splits, require, cfg) {
             tmp[d - 1] = BLANK;
             colHash(tmp, 0, p, d - 1);
           } else colHash(NS, co, p, d);
-          let a = (PA[i] - CA[i * NUM_COLS + from] - CA[i * NUM_COLS + to] + ha) | 0;
-          let b = (PB[i] - CB[i * NUM_COLS + from] - CB[i * NUM_COLS + to] + hb) | 0;
+          fa = ha;
+          fb = hb;
           for (let j = td; j < tl; j++) tmp[j] = NS[to0 + j];
           for (let j = p; j < n; j++) tmp[tl + j - p] = NS[co + j];
           colHash(tmp, 0, nt, td);
-          a = (a + ha) | 0;
-          b = (b + hb) | 0;
+          ta = ha;
+          tb = hb;
+          a = (PA[i] - CA[i * NUM_COLS + from] - CA[i * NUM_COLS + to] + fa + ta) | 0;
+          b = (PB[i] - CB[i * NUM_COLS + from] - CB[i * NUM_COLS + to] + fb + tb) | 0;
           if (!seenInsert(a, b)) continue;
         }
-        if (count === cap) grow();
-        const k = count, ko = k * SIZE;
         NS.copyWithin(ko, o, o + SIZE);
         step = [];
         stepFlip = false;
         movePieces(ko, from, to, 0, np, 0);
-        CA.copyWithin(k * NUM_COLS, i * NUM_COLS, (i + 1) * NUM_COLS);
-        CB.copyWithin(k * NUM_COLS, i * NUM_COLS, (i + 1) * NUM_COLS);
-        rehashCol(k, from);
-        rehashCol(k, to);
-        sumHash(k);
-        if (completes && !seenInsert(PA[k], PB[k])) continue;
+        for (let c = 0, x = k * NUM_COLS, y = i * NUM_COLS; c < NUM_COLS; c++) {
+          CA[x + c] = CA[y + c];
+          CB[x + c] = CB[y + c];
+        }
+        if (completes) {
+          rehashCol(k, from);
+          rehashCol(k, to);
+          sumHash(k);
+          if (!seenInsert(PA[k], PB[k])) continue;
+        } else {
+          // The two columns as hashed above (the columns the pieces went by are empty again).
+          CA[k * NUM_COLS + from] = fa;
+          CB[k * NUM_COLS + from] = fb;
+          CA[k * NUM_COLS + to] = ta;
+          CB[k * NUM_COLS + to] = tb;
+          PA[k] = a;
+          PB[k] = b;
+        }
         count++;
         parent[k] = i;
         stepOf[k] = step;
         leaf[k] = stepFlip ? 1 : 0;
         touched[k] = touched[i] | 1 << from | 1 << to;
-        evaluate(k, cfg);
+        evaluateStep(k, i, from, to, cfg);
       }
     }
   }
@@ -416,6 +534,8 @@ function search(root, cfg, splits, beam) {
   NS.set(root, 0);
   searchFrom(0, cfg, splits, cfg.maxSteps, beam);
 }
+
+let keys = new Float64Array(1024);
 
 // The same from the position already in place as node r: the nodes r to
 // count - 1 (those below r are left alone, but for the table of positions
@@ -438,10 +558,19 @@ function searchFrom(r, cfg, splits, maxSteps, beam) {
     frontier = [];
     for (let k = first; k < count; k++) if (!leaf[k]) frontier.push(k);
     if (beam > 0 && frontier.length > beam) {
-      const keep = new Set();
+      // The best by each score, the earlier of two that score the same: by
+      // one number for both, sorted (the scores are far below 2^30, the
+      // nodes fewer than 2^21).
+      const keep = new Set(), m = frontier.length;
+      if (keys.length < m) keys = new Float64Array(2 * m);
+      const sorted = keys.subarray(0, m);
       for (const [empty, n] of [[cfg.empty, beam - (beam >> 1)], [cfg.dealEmpty, beam >> 1]]) {
-        const ranked = frontier.slice().sort((x, y) => value(y, 0, empty) - value(x, 0, empty) || x - y);
-        for (let j = 0; j < n; j++) keep.add(ranked[j]);
+        for (let j = 0; j < m; j++) {
+          const k = frontier[j];
+          sorted[j] = (evBase[k] + empty * evEmpties[k] + 1073741824) * 2097152 + (2097151 - k);
+        }
+        sorted.sort();
+        for (let j = m - n; j < m; j++) keep.add(2097151 - sorted[j] % 2097152);
       }
       frontier = frontier.filter(k => keep.has(k));
     }
@@ -480,13 +609,31 @@ function expectFlips(dealsLeft, visited, cfg, empty, unseen) {
       if (n >= cap) grow();
       NS.copyWithin(n * SIZE, k * SIZE, (k + 1) * SIZE);
       NS[n * SIZE + at] = card;
-      searchFrom(n, cfg, cfg.splits, cfg.expectSteps, cfg.expectBeam);
       let best0 = LOST, best1 = LOST;
-      for (let j = n; j < count; j++) {
-        if (dealsLeft > 0 && evCards[j] < NUM_COLS) continue; // (lost)
-        const v0 = evBase[j] + cfg.empty * evEmpties[j], v1 = evBase[j] + empty * evEmpties[j];
-        if (v0 > best0) best0 = v0;
-        if (v1 > best1) best1 = v1;
+      if (cfg.expectSteps === 1) {
+        // One step deep: the scores are all that is wanted of the positions.
+        count = n + 1;
+        evaluate(n, cfg);
+        peek0 = peek1 = LOST;
+        if (!(dealsLeft > 0 && evCards[n] < NUM_COLS)) {
+          peek0 = evBase[n] + cfg.empty * evEmpties[n];
+          peek1 = evBase[n] + empty * evEmpties[n];
+        }
+        peek = true;
+        peekEmpty = empty;
+        peekDeals = dealsLeft;
+        expand(n, cfg.splits, 0, cfg);
+        peek = false;
+        best0 = peek0;
+        best1 = peek1;
+      } else {
+        searchFrom(n, cfg, cfg.splits, cfg.expectSteps, cfg.expectBeam);
+        for (let j = n; j < count; j++) {
+          if (dealsLeft > 0 && evCards[j] < NUM_COLS) continue; // (lost)
+          const v0 = evBase[j] + cfg.empty * evEmpties[j], v1 = evBase[j] + empty * evEmpties[j];
+          if (v0 > best0) best0 = v0;
+          if (v1 > best1) best1 = v1;
+        }
       }
       sum0 += unseen[card] * Math.max(best0, LOST / 2);
       sum1 += unseen[card] * Math.max(best1, LOST / 2);
