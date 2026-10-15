@@ -799,7 +799,7 @@ function spiderHtml(resume) {
   const today = dailies && dailies.days[0]?.date === dailies.today ? dailies.days[0] : null;
   return `<section class="box">
       <h2>Today's challenges</h2>
-      <p class="dim">${today ? `${longDate(today.date)} · all winnable${today.challenges.some(c => c.tier) ? ' · three and four suits have a medium deal and a hard one' : ''}` : dailies ? 'No challenges today.' : 'Loading…'}</p>
+      <p class="dim">${today ? `${longDate(today.date)} · all winnable` : dailies ? 'No challenges today.' : 'Loading…'}</p>
       ${today ? `<div class="tiles">${challengesOf(today).map(challengeTile).join('')}</div>` : ''}
       <div class="row start"><button type="button" data-go="archive">Past challenges</button></div>
     </section>
