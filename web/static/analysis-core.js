@@ -107,7 +107,9 @@ export function stretchValues(st, values, won, last, suits = 0) {
 // The numbers are in games played out, since the time is theirs: `games` for
 // finding the mistakes, then for each found at most some 2 * `pin` for
 // putting it to a move and 2 * `fresh` for its loss, and 2 * `luck` for the
-// cards' biggest swing.
+// cards' biggest swing. Where few mistakes are found, those that may be are
+// brought up to `enough` worlds (some two for each place to fill) and put to
+// a move as well.
 export const SEARCH = {
   games: 2400, // games played out to find the mistakes
   round: 16, // worlds in a piece of work
@@ -123,6 +125,9 @@ export const SEARCH = {
   fresh: 128, // worlds, not used before, for the loss shown
   spread: 0.1, // a loss not put to one move is shown only if it is this large
   luck: 128, // worlds for the cards' biggest swing
+  shown: 3, // with fewer mistakes than this, the list is filled up with what may be mistakes
+  maybe: 0.02, // which is what lost this much in its games, however unsurely,
+  enough: 128, // in this many worlds at least
 };
 
 // What the network is to value besides the game's own positions, to say
@@ -230,14 +235,15 @@ export function nextRound(stats, order, left, opt = SEARCH) {
 // candidates so far.
 //
 // Returns the mistakes, the costliest first, each
-//   {at, move, line, exact, n, better, yours, cost: {mean, se}}
+//   {at, move, line, exact, unsure, n, better, yours, cost: {mean, se}}
 // stretch `at`; the move numbered `move` in the game (1 is the first) was
 // the mistake, `line` what the line player would have played in its place up
 // to its first move that shows cards; `better` and `yours` are the line
 // player's rates of winning from before the move and from after it (with
 // `exact`), or, where no one move of the stretch is surely the loss, from
 // before it and from the end of the stretch: in `n` worlds not played
-// before, as is the cost.
+// before, as is the cost. After them, where they are fewer than `shown`,
+// come those that may be mistakes, `unsure` (see likeliest).
 //
 // A stretch's games: each world is played from the stretch's start (the line
 // player choosing: bit 0) and from its end (bit 1). The moves between two
@@ -281,9 +287,11 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
   const found = cands.filter(c => isMistake(c.stat, opt)).sort((a, b) => a.stat.mean - b.stat.mean).slice(0, opt.most);
   for (const c of cands) if (!found.includes(c)) c.state = 'out';
   update(cands, spent);
-  return (await Promise.all(found.map(async c => {
-    const len = c.st.to - c.st.from, n = Math.min(c.n, opt.pin);
-    const ends = [0, ...c.cuts.slice(0, -1).map(cut => cut.at), len]; // games from after ends[i] moves: what the stretch is worth after its first i departures
+  // The departure of a candidate's stretch that lost most, by cutting in two:
+  // {ends, lo, hi}, the games from after ends[lo] and ends[hi] moves being those before and after it.
+  const cut = async (c, n) => {
+    const len = c.st.to - c.st.from;
+    const ends = [0, ...c.cuts.slice(0, -1).map(x => x.at), len]; // games from after ends[i] moves: what the stretch is worth after its first i departures
     let lo = 0, hi = c.cuts.length;
     while (hi - lo > 1) {
       const mid = (lo + hi) >> 1;
@@ -292,6 +300,12 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
       if (paired(w(lo), w(mid), n).mean <= paired(w(mid), w(hi), n).mean) hi = mid;
       else lo = mid;
     }
+    return { ends, lo, hi };
+  };
+  const record = (c, lo, exact, d, unsure) => ({ at: c.at, move: c.st.from + c.cuts[lo].at, line: c.cuts[lo].line, exact, unsure, n: d.n, better: d.a, yours: d.b, cost: { mean: d.mean, se: d.se } });
+  const sure = (await Promise.all(found.map(async c => {
+    const n = Math.min(c.n, opt.pin), at = await cut(c, n), { ends } = at;
+    let { lo, hi } = at;
     const one = c.cuts.length === 1;
     const exact = one || isMistake(paired(c.wins.get(ends[lo]), c.wins.get(ends[hi]), n), opt, Math.min(n, opt.least));
     if (!exact) { lo = 0; hi = c.cuts.length; }
@@ -303,10 +317,40 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
       update(cands, spent);
       return null;
     }
-    c.found = { at: c.at, move: c.st.from + c.cuts[lo].at, line: c.cuts[lo].line, exact, n: d.n, better: d.a, yours: d.b, cost: { mean: d.mean, se: d.se } };
+    c.found = record(c, lo, exact, d, false);
     update(cands, spent);
     return c.found;
   }))).filter(m => m?.line.length).sort((a, b) => a.cost.mean - b.cost.mean);
+  return [...sure, ...await likeliest(opt.shown - sure.length)];
+
+  // What may be mistakes, to fill `slots` places: the candidates not found
+  // to be that lost most in all their games (those of a mistake that its
+  // fresh games did not bear out among them), each brought up to `enough`
+  // worlds first, since a few worlds say little; then put to a move as a
+  // mistake is, the move being taken for the loss if most of it is there.
+  // Their losses are too bad on average, being picked for them, and are
+  // marked `unsure`.
+  async function likeliest(slots) {
+    if (slots <= 0) return [];
+    const whole = c => paired(c.wins.get(0), c.wins.get(c.st.to - c.st.from), Infinity);
+    const worst = () => cands.filter(c => c.n && !c.found && c.cuts[0].line.length).map(c => [whole(c), c])
+      .filter(([d]) => d.mean <= -opt.maybe).sort((a, b) => a[0].mean - b[0].mean || a[1].at - b[1].at);
+    for (let pass = 0; pass < 3; pass++) {
+      const few = worst().slice(0, slots + 1).map(([, c]) => c).filter(c => c.n < opt.enough);
+      if (!few.length) break;
+      await Promise.all(few.map(c => { c.n = opt.enough; return play(c, [0, c.st.to - c.st.from], c.n); }));
+    }
+    const out = await Promise.all(worst().filter(([d]) => d.n >= opt.enough).slice(0, slots).map(async ([all, c]) => {
+      const n = Math.min(c.n, opt.pin), { ends, lo, hi } = await cut(c, n);
+      const d = paired(c.wins.get(ends[lo]), c.wins.get(ends[hi]), Infinity);
+      const exact = c.cuts.length === 1 || (d.mean <= -opt.maybe && d.mean <= 0.6 * all.mean);
+      c.state = 'maybe';
+      c.found = exact ? record(c, lo, true, d, true) : record(c, 0, false, all, true);
+      update(cands, spent);
+      return c.found;
+    }));
+    return out.sort((a, b) => a.cost.mean - b.cost.mean);
+  }
 }
 
 // What the cards shown by a stretch did, by games played out after its moves

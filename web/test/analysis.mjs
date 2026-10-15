@@ -177,7 +177,19 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   const few = { ...SEARCH, games: 300, start: 1, group: 1 };
   const led = await findMistakes({ stretches, cuts, prior: made.map((_, i) => (i === 3 ? -0.3 : 0)), job: i => ({ i }), roll: fake, opt: few });
   const blind = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: fake, opt: few });
-  check(led.length === 1 && led[0].at === 3 && blind.length === 0, `the network's order is not followed: ${led.map(m => m.at)}, ${blind.map(m => m.at)}`);
+  const surely = ms => ms.filter(m => !m.unsure);
+  check(surely(led).length === 1 && led[0].at === 3 && surely(blind).length === 0, `the network's order is not followed: ${led.map(m => m.at)}, ${blind.map(m => m.at)}`);
+  // Where fewer than three mistakes are found the list is filled with what may be mistakes: the worst of the
+  // rest by their games, in enough worlds, after the sure ones, each put to a move if most of its loss is there.
+  for (const ms of [led, blind]) {
+    const maybe = ms.filter(m => m.unsure);
+    check(ms.length <= SEARCH.shown && ms.slice(surely(ms).length).every(m => m.unsure), 'what may be mistakes is not after the mistakes');
+    check(maybe.every((m, i) => m.cost.mean <= -SEARCH.maybe && m.n >= SEARCH.enough && m.line.length && (!i || m.cost.mean >= maybe[i - 1].cost.mean)), 'what may be a mistake lost nothing, or has too few games');
+    check(new Set(ms.map(m => m.at)).size === ms.length, 'a mistake is listed twice');
+  }
+  const none = await findMistakes({ stretches, cuts, prior: made.map((_, i) => (i === 1 || i === 5 ? -0.3 : 0)), job: i => ({ i }), roll: fake, opt: { ...SEARCH, games: 200, start: 2 } });
+  check(none.length === 2 && none.every(m => m.unsure) && none[0].at === 1 && none[0].exact && none[0].move === stretches[1].from + 3 && none[1].at === 5 && !none[1].exact && none[1].move === stretches[5].from + 1,
+    `what may be mistakes: ${JSON.stringify(none.map(m => [m.at, m.move, m.exact, m.n, m.cost.mean]))}`);
   // With every game the same there are none, and the games are not all played.
   games = 0;
   const same = job => { games += job.at.length * (job.to - job.from); return Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 5 < 2 ? (1 << job.at.length) - 1 : 0))); };

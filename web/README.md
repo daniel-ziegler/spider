@@ -45,8 +45,11 @@ A game of Spider can be looked over once it is won or marked as lost
 somewhat as a Go server reviews a game: the player's biggest mistakes, each
 with the move that would have been better and what it was for, a plot of the
 chance of winning over the moves, and the board to step through (click or
-drag on the plot, `←` `→`, `↑` `↓` or the digits for the mistakes, `B` for
-the better move and `S` for what it sets up, `Esc` to go back).
+drag on the plot; `←` `→` are always the game's own moves, `↑` `↓` or the
+digits pick the mistakes; `A`, `Y`, `B` and `S` show a mistake's position
+before, your move, the better move and what it sets up; `,` `.` step along
+the better line; `?` or `C` has the computer's move shown at every position;
+`Esc` goes back).
 
 * **Whose chance.** That of a computer player that sees only the cards face
   up and takes nothing back: the line player of the main README in a
@@ -129,10 +132,23 @@ the better move and `S` for what it sets up, `Esc` to go back).
     card it then turns, or the deal, and how many moves on); the chances of
     winning after each; and on the board the two moves as arrows, red and
     green. One click shows the position the better line reaches just before
-    its card is turned or its deal is made, and `→` steps along it.
+    its card is turned or its deal is made, and the line can be stepped
+    along move by move (‹ › on the mistake, or `,` `.`), each next move
+    drawn as an arrow; `←` `→` leave it for the game's neighbouring move.
+  * *What may be mistakes.* With fewer than three mistakes the list is
+    filled up with the candidates that lost most in the games they got (two
+    points or more, in at least 128 shuffles: those that have fewer are
+    first brought up to that), marked as unsure and drawn dashed, each put
+    to a move if most of its loss is there. A mistake that its fresh games
+    did not bear out is among them. Their losses are picked for being bad
+    and so are worse than the truth on average; the ± says how little is
+    known. Only where nothing lost two points does the page say that there
+    are no clear mistakes and nothing more.
   * *At any position* the same can be asked for (**?** beside the arrows, or
-    the `?` or `C` key): the computer player's line from the position on the
-    board, shown as a mistake's better line is, with its first move, what
+    the `?` or `C` key, which stays on from position to position and from one
+    analysis to the next until it is turned off; where a mistake picked out
+    begins the mistake says it instead): the computer player's line from the
+    position on the board, shown as a mistake's better line is, with its first move, what
     that is for and what it sets up, and whether the move played there was
     the same or came to the same. Nothing is played out for it; it is worked
     out in a worker ahead of the games waiting (some 10 to 100 ms, a second

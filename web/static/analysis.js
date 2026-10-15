@@ -116,8 +116,10 @@ export function open(ctx) {
   let luck = null; // the cards' biggest swing: {t, show, mean}
   let step = N, selected = -1, hover = -1;
   let alt = -1; // the board is on the selected mistake's better line, after this many of its moves (-1: on the game's)
-  let adv = null; // what the line player would play at a position, asked for (see ask): {from, wait} or as a mistake is, with `advice`
-  const advice = new Map(); // those worked out: move -> promise
+  let adv = null; // what the line player would play at the position on the board, while that is asked for (see settle): {from, wait} or as a mistake is, with `advice`
+  let asking = false; // whether it is asked for: at every position the board comes to
+  try { asking = localStorage.getItem('spider:analysis:ask') === '1'; } catch { /* no storage */ }
+  const advice = new Map(), advised = new Map(); // those worked out: move -> promise, and -> what it gave
   let pooled; // (called when the workers are there)
   const workers = new Promise(resolve => { pooled = resolve; });
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
@@ -129,7 +131,7 @@ export function open(ctx) {
   el.id = 'review';
   el.innerHTML = `<div class="rv-head">
       <b class="rv-title">Analysis</b>
-      <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button><button data-ask title="What would the computer play here? (?)">?<span class="long"> Computer's move</span></button></span>
+      <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button><button data-ask title="Show at every position what the computer would play there (? or C)">?<span class="long"> Computer's move</span></button></span>
       <span class="rv-move"></span>
       <span class="rv-status"><span class="rv-bar"><i></i></span><span class="rv-text"></span></span>
       <button class="primary" data-close title="Close the analysis (Esc)">Back<span class="long"> to the game</span></button>
@@ -231,17 +233,31 @@ export function open(ctx) {
   }
 
   function ask() {
-    if (adv && adv.from === step && alt < 0) { adv = null; return show(); } // again: away with it
-    const t = alt >= 0 ? cur().from : step;
-    step = t;
-    alt = -1;
-    adv = { from: t, wait: true };
-    advise(t).then(a => {
-      if (closed || adv?.from !== t || !adv.wait) return; // (the board has gone elsewhere)
-      adv = a;
-      show();
-    });
+    asking = !asking;
+    try { localStorage.setItem('spider:analysis:ask', asking ? '1' : '0'); } catch { /* no storage */ }
+    if (alt >= 0 && cur()?.advice) { step = cur().from; alt = -1; }
     show();
+  }
+
+  // What the line player would play is shown for the position the board is
+  // at, while it is asked for: but not where a mistake picked out begins,
+  // since the mistake says it there. (Called whenever the board has moved.)
+  function settle() {
+    if (alt >= 0) return;
+    const t = step, m = found?.[selected];
+    if (!asking || (m && t === m.from)) adv = null;
+    else if (adv?.from !== t) {
+      adv = advised.get(t) ?? { from: t, wait: true };
+      if (adv.wait) {
+        advise(t).then(a => {
+          advised.set(t, a);
+          if (closed || adv?.from !== t || !adv.wait) return; // (the board has gone elsewhere)
+          adv = a;
+          ctx.render();
+          redraw();
+        });
+      }
+    }
   }
 
   // The mistake picked out, or what was asked for in its place: what the views and the other line are of.
@@ -301,7 +317,7 @@ export function open(ctx) {
     shownItems().map((m, i) => [m, i]).sort((a, b) => a[0].at - b[0].at).forEach(([m, i]) => {
       const x = X(m.at), bx = marked = Math.max(x, marked + 21);
       s += `<line class="lead" x1="${f(bx)}" x2="${f(x)}" y1="18" y2="${mt}"/>`;
-      s += `<g class="badge${i === selected ? ' sel' : ''}${m.sure ? '' : ' unsure'}" data-key="${i}"><circle cx="${f(bx)}" cy="11" r="9"/><text x="${f(bx)}" y="15" text-anchor="middle">${i + 1}</text></g>`;
+      s += `<g class="badge${i === selected ? ' sel' : ''}${m.sure && !m.maybe ? '' : ' unsure'}" data-key="${i}"><circle cx="${f(bx)}" cy="11" r="9"/><text x="${f(bx)}" y="15" text-anchor="middle">${i + 1}</text></g>`;
     });
     if (luck && value(luck.t) !== undefined) s += `<circle class="swing" data-luck cx="${f(X(luck.t))}" cy="${f(Y(value(luck.t)))}" r="4.5"/>`;
     // Where the board is, and where the pointer is.
@@ -334,37 +350,42 @@ export function open(ctx) {
       : phase === 'value' ? `Valuing ${N + 1} positions…`
       : phase === 'roll' ? `Playing out games: ${spent.toLocaleString()}`
       : `Done in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`);
-    const items = shownItems();
+    $('.rv-text').title = spent ? `${spent.toLocaleString()} games played out` : '';
+    const items = shownItems(), sure = found?.filter(m => !m.maybe).length ?? 0;
     $('.rv-sum').textContent = failed || phase === 'net' || phase === 'value' ? '' : !found ? 'Looking for your biggest mistakes…'
       : !found.length ? `No clear mistakes: no move of yours surely cost ${Math.round(SEARCH.cost * 100)} points or more.`
-      : `Your ${found.length > 1 ? `${found.length} biggest mistakes` : 'one clear mistake'}, and what would have been better:`;
-    // The views of a mistake, or of what was asked for.
+      : !sure ? 'No clear mistakes. The likeliest, none of them sure:'
+      : `Your ${sure > 1 ? `${sure} biggest mistakes` : 'one clear mistake'}, and what would have been better:`;
+    // The views of a mistake, or of what was asked for, and the steps along its other line.
     const views = m => {
-      const view = alt < 0 ? (step === m.move ? 'mine' : step === m.move - 1 ? 'before' : '') : alt === m.len - 1 && m.len > 1 ? 'setup' : alt === 1 ? 'better' : '';
+      const view = alt < 0 ? (step === m.move && !m.advice ? 'mine' : step === m.move - 1 ? 'before' : '') : alt === m.len - 1 && m.len > 1 ? 'setup' : alt === 1 ? 'better' : '';
       const b = (name, text, title) => `<button type="button" data-view="${name}" title="${title}"${view === name ? ' class="on"' : ''}>${text}</button>`;
       const its = m.advice ? 'the computer\'s' : 'the better';
-      return `<div class="views">${b('before', m.advice ? 'Here' : 'Before', m.advice ? 'The position asked about' : 'The position before the mistake, with both moves (click the mistake)')}${m.mine ? b('mine', 'Your move', 'The position after your move') : ''}${b('better', m.advice ? 'Its move' : 'Better move', `The position after ${its} move (B)`)}${m.len > 1 ? b('setup', 'What it sets up', `What ${its} move sets up: the position it reaches before the next card is shown (S)`) : ''}</div>`;
+      return `<div class="views">${b('before', m.advice ? 'Here' : 'Before', m.advice ? 'The position in the game (A)' : 'The position before the mistake, with both moves (A)')}${m.advice ? '' : b('mine', 'Your move', 'The position after your move (Y)')}${b('better', m.advice ? 'Its move' : 'Better move', `The position after ${its} move (B)`)}${m.len > 1 ? b('setup', 'What it sets up', `What ${its} move sets up: the position it reaches before the next card is shown (S)`) : ''}`
+        + `<span class="along"><button type="button" data-along="-1" title="Back a move along ${its} line (,)"${alt < 1 ? ' disabled' : ''}>‹</button><span class="at" title="How far along ${its} line the board is">${Math.max(alt, 0)} of ${m.len}</span><button type="button" data-along="1" title="On a move along ${its} line (.)"${alt >= m.len ? ' disabled' : ''}>›</button></span></div>`;
     };
-    // What was asked for comes first.
+    // What the computer would play here comes first.
     let asked = '';
     if (adv) {
-      const head = `<div class="rv-head1"><span class="num">?</span><span class="what">${adv.from < N ? `At move ${adv.from + 1}` : 'At the end'}: the computer's choice</span><button type="button" class="shut" data-ask title="Away with it (?)">×</button></div>`;
+      const head = `<div class="rv-head1"><span class="num">?</span><span class="what">${adv.from < N ? `At move ${adv.from + 1}` : 'At the end'}: the computer's choice</span><button type="button" class="shut" data-ask title="No more of this (? or C)">×</button></div>`;
       asked = `<div class="rv-key sel asked">${head}<div class="rv-more">${adv.wait ? '<div class="odds"><i class="spin"></i>Thinking…</div>' : adv.none ? `<div class="odds">${adv.none}</div>`
         : `${adv.same ? `<div class="better"><i></i><span>The same as you played: <b>${esc(adv.betterText[0])}</b>${esc(adv.betterText[1])}</span></div>`
           : `${adv.mine ? `<div class="you"><i></i><span>You: <b>${esc(adv.mine)}</b>${adv.level ? ' (as good: it comes to the same)' : ''}</span></div>` : ''}<div class="better"><i></i><span>Computer: <b>${esc(adv.betterText[0])}</b>${esc(adv.betterText[1])}</span></div>`}${views(adv)}`}</div></div>`;
     }
     const html = asked + items.map((m, i) => {
+      const section = m.maybe && sure && i === sure ? '<p class="rv-sub">And these may be mistakes:</p>' : '';
       const pm = `<span class="pm">±${Math.max(1, Math.round(196 * m.cost.se))}</span>`;
-      const head = `<button type="button" class="rv-head1" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${esc(m.title)}</span><span class="cost${m.sure ? '' : ' pending'}">${m.sure ? '' : 'checking… '}<b>${points(m.cost.mean)}</b>${pm}</span></button>`;
-      if (!m.sure || i !== selected || adv) return `<div class="rv-key${i === selected && !adv ? ' sel' : ''}${m.sure ? '' : ' unsure'}">${head}</div>`;
-      return `<div class="rv-key sel">${head}<div class="rv-more">
+      const head = `<button type="button" class="rv-head1" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${esc(m.title)}</span><span class="cost${m.sure ? '' : ' pending'}">${m.sure ? '' : 'checking… '}<b>${points(m.cost.mean)}</b>${pm}${m.maybe ? ', unsure' : ''}</span></button>`;
+      const cls = `${m.sure ? '' : ' unsure'}${m.maybe ? ' maybe' : ''}`;
+      if (!m.sure || i !== selected || adv) return `${section}<div class="rv-key${i === selected && !adv ? ' sel' : ''}${cls}">${head}</div>`;
+      return `${section}<div class="rv-key sel${cls}">${head}<div class="rv-more">
           <div class="you"><i></i><span>You: <b>${esc(m.mine)}</b></span></div>
           <div class="better"><i></i><span>Better: <b>${esc(m.betterText[0])}</b>${esc(m.betterText[1])}</span></div>
-          <div class="odds">Chance of winning: yours <b>${pct(m.yours)}</b> → better <b>${pct(m.better)}</b></div>
+          <div class="odds">Chance of winning: yours <b>${pct(m.yours)}</b> → better <b>${pct(m.better)}</b>${m.maybe ? ` (in ${m.n} games each: unsure)` : ''}</div>
           ${views(m)}
         </div></div>`;
     }).join('');
-    $('[data-ask]').classList.toggle('on', !!adv);
+    $('[data-ask]').classList.toggle('on', asking);
     if ($('.rv-keys').dataset.html !== html) { // (left alone when nothing changed, so that a click on it is not lost)
       $('.rv-keys').dataset.html = html;
       $('.rv-keys').innerHTML = html;
@@ -386,6 +407,7 @@ export function open(ctx) {
   function note() {
     let text = '<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt</span> ';
     if (found?.length) text += 'Each mistake is measured by playing some hundreds of games out both ways, with the cards you had not seen reshuffled. ';
+    text += '<span class="keys">Keys: ← → the game\'s moves · ↑ ↓ or 1–9 the mistakes · A Y B S their views · , . along the other line · ? the computer\'s move everywhere</span> ';
     if (ctx.undos) text += 'Moves that were taken back are left out: the game is read as if it had been played straight through.';
     return text;
   }
@@ -393,6 +415,7 @@ export function open(ctx) {
   // ---- stepping
 
   function show() {
+    settle();
     ctx.render();
     redraw();
     requestAnimationFrame(() => el.querySelector('.rv-key.sel')?.scrollIntoView({ block: 'nearest' }));
@@ -403,39 +426,44 @@ export function open(ctx) {
     // The mistake picked out stays so while the board is within it.
     const items = shownItems(), within = m => m && t >= m.from && t <= m.end;
     if (!within(items[selected])) selected = items.findIndex(within);
-    if (adv && t !== adv.from && t !== adv.from + 1) adv = null; // (what was asked for stays for its position and the move played there)
     step = t;
     alt = -1;
     show();
   }
 
-  // Along the line the board is on: the game's, or the better line of the
-  // mistake picked out (back from its start is the game again).
+  // Along the game by d moves: always the game's own moves, from the
+  // position in it that another line on the board began at.
   function go(d) {
+    setStep((alt >= 0 ? cur().from : step) + d);
+  }
+
+  // Along the other line (the better line of the mistake picked out, or the
+  // computer's from the position on the board); back from its start is the game again.
+  function along(d) {
     const m = cur();
-    if (alt < 0 || !m) return setStep(step + d);
-    alt = Math.min(m.len, alt + d);
-    if (alt <= 0) alt = -1;
+    if (!m) return;
+    if (alt < 0 && (step !== m.from || d < 0)) return;
+    alt = Math.min(m.len, Math.max(alt, 0) + d);
+    if (alt <= 0) { alt = -1; step = m.from; }
     show();
   }
 
   function pick(i) {
     const m = shownItems()[i];
     if (!m) return;
-    step = selected === i && alt < 0 && step === m.from && m.sure && !adv ? m.move : m.from; // again: the move
-    adv = null;
+    step = selected === i && alt < 0 && step === m.from && m.sure ? m.move : m.from; // again: the move
     selected = i;
     alt = -1;
     show();
   }
 
-  // One of the views of the mistake picked out.
+  // One of the views of the mistake picked out, or of what the computer would play here.
   function view(name) {
     const m = cur();
     if (!m) return;
     step = m.from;
     alt = -1;
-    if (name === 'mine') step = m.move;
+    if (name === 'mine') step = Math.min(N, m.move);
     else if (name === 'better') alt = 1;
     else if (name === 'setup') alt = Math.max(1, m.len - 1);
     show();
@@ -470,6 +498,7 @@ export function open(ctx) {
     if ('close' in b.dataset) ctx.close();
     else if (b.dataset.key) pick(+b.dataset.key);
     else if (b.dataset.view) view(b.dataset.view);
+    else if (b.dataset.along) along(+b.dataset.along);
     else if ('ask' in b.dataset) ask();
     else if ('luck' in b.dataset) setStep(luck.t);
     else if (b.dataset.go === 'start') setStep(0);
@@ -491,17 +520,22 @@ export function open(ctx) {
     setStep(t);
   }
 
+  // The keys: the arrows are the game's moves, always; the other line has its own.
   function key(e) {
-    const k = e.key;
-    if (k === 'ArrowLeft' || k === 'h') e.shiftKey ? setStep(step - 10) : go(-1);
-    else if (k === 'ArrowRight' || k === 'l') e.shiftKey ? setStep(step + 10) : go(1);
+    const k = e.key, m = cur();
+    if (k === 'ArrowLeft' || k === 'h') go(e.shiftKey ? -10 : -1);
+    else if (k === 'ArrowRight' || k === 'l') go(e.shiftKey ? 10 : 1);
     else if (k === 'ArrowUp' || k === '[') jump(-1);
     else if (k === 'ArrowDown' || k === ']') jump(1);
     else if (k === 'Home') setStep(0);
     else if (k === 'End') setStep(N);
     else if (k === 'Escape') ctx.close();
-    else if (k === 'b' && cur()) view(alt === 1 ? 'before' : 'better');
-    else if (k === 's' && cur()) view(alt >= 0 && alt === cur().len - 1 ? 'before' : 'setup');
+    else if (k === ',' || k === '<') along(-1);
+    else if (k === '.' || k === '>') along(1);
+    else if (k === 'a' && m) view('before');
+    else if (k === 'y' && m && !m.advice) view('mine');
+    else if (k === 'b' && m) view(alt === 1 ? 'before' : 'better');
+    else if (k === 's' && m) view(alt >= 0 && alt === m.len - 1 ? 'before' : 'setup');
     else if (k === '?' || k === 'c') ask();
     else if (/^[1-9]$/.test(k) && shownItems()[+k - 1]) pick(+k - 1);
     else return;
@@ -573,12 +607,11 @@ export function open(ctx) {
     });
     await lucky;
     if (closed) return;
-    found = mistakes.map(m => { const x = mistake(m); return { ...x, sure: true, at: x.move, from: x.move - 1 }; });
+    found = mistakes.map(m => { const x = mistake(m); return { ...x, sure: true, maybe: !!m.unsure, at: x.move, from: x.move - 1 }; });
     selected = found.findIndex(m => step >= m.from && step <= m.end);
     phase = 'done';
     seconds = (performance.now() - t0) / 1000; // (the workers stay, for what is asked for)
-    ctx.render();
-    redraw();
+    show();
   }
   // The move of the better line that the board is about to see played, and
   // at the position before a mistake the move that was played.
