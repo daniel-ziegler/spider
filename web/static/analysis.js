@@ -271,7 +271,7 @@ export function open(ctx) {
     $('.rv-bar i').style.width = `${(frac * 100).toFixed(1)}%`;
     $('.rv-text').textContent = failed || (phase === 'net' ? 'Fetching the network…'
       : phase === 'value' ? `Valuing ${N + 1} positions…`
-      : phase === 'roll' ? `Looking for mistakes: ${spent.toLocaleString()} games played out`
+      : phase === 'roll' ? `Playing out games: ${spent.toLocaleString()}`
       : `Done in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`);
     const items = shownItems();
     $('.rv-sum').textContent = failed || phase === 'net' || phase === 'value' ? '' : !found ? 'Looking for your biggest mistakes…'
@@ -424,7 +424,7 @@ export function open(ctx) {
     else if (k === 'Escape') ctx.close();
     else if (k === 'b' && found?.[selected]) view(alt === 1 ? 'before' : 'better');
     else if (k === 's' && found?.[selected]) view(alt >= 0 && alt === found[selected].len - 1 ? 'before' : 'setup');
-    else if (/^[1-9]$/.test(k) && shownItems()[+k - 1]) { selected = -1; pick(+k - 1); }
+    else if (/^[1-9]$/.test(k) && shownItems()[+k - 1]) pick(+k - 1);
     else return;
     e.preventDefault();
   }
