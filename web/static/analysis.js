@@ -269,7 +269,6 @@ export function open(ctx) {
     const ended = keys.find(k => k.st.to === N && k.stats)?.stats.reveal.mean ?? value(N);
     let text = value(0) === undefined || ended === undefined ? '' : `From ${pct(value(0))} at the deal to ${data.won ? 'the win' : `${pct(ended)} at the end`}. `;
     text += `<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt <i class="l-roll"></i>games played out (95% interval)</span> `
-      + 'The chance is that of a computer player that sees only what is face up and takes nothing back, so it runs low for a player who thinks longer. '
       + `At the marked moments it is measured by playing ${WORLDS} games out with the unseen cards reshuffled: before the moves, after them, and with the cards that really came up. The first step is the moves' doing, the second the cards'.`;
     if (ctx.undos) text += ' Moves that were taken back are left out: the game is read as if it had been played straight through.';
     return text;
