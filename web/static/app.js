@@ -337,10 +337,10 @@ async function undo() {
   if (!g.canUndo() || review) return;
   if (g.freecell) {
     // Only the first undo that counts is asked about.
-    if (g.undoCosts() && !realUndoCount() && !await confirmDialog('Use an undo?', 'This move cannot just be played back, so taking it back counts as an undo, and you have not used one in this game.', 'Undo', ['u'])) return;
+    if (g.undoCosts() && !realUndoCount() && !await confirmDialog('Use an undo?', 'This move cannot just be played back, so taking it back counts as an undo, and you have not used one in this game.', 'Undo')) return;
   } else if (g.undoCosts()) {
     const what = g.history.at(-1).mv.deal ? 'a deal' : 'a move that turned a card over';
-    if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo', ['u'])) return;
+    if (!await confirmDialog('Use an undo?', `This takes back ${what}, so it counts as an undo, not a free one.`, 'Undo')) return;
   }
   g.undo();
   sel = null;
