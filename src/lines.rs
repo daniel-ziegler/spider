@@ -682,6 +682,8 @@ pub struct Tempo {
     pub dealing: bool,
     /// The value (in its mode) of where the line chosen last ends.
     pub value: i32,
+    /// The line chosen last turns a card over.
+    pub turns: bool,
     /// With [`LineConfig::replan`]: the rest of the line being played, the
     /// value where it ends, and whether that is about to deal.
     pub plan: Vec<Vec<Move>>,
@@ -732,6 +734,7 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
     if !tempo.dealing {
         if let Some(k) = best_raising(0, cfg.empty) {
             tempo.value = value(k, 0, cfg.empty);
+            tempo.turns = nodes[k].leaf;
             return (Choice::Line(line_to(&nodes, k)), nodes.len());
         }
     }
@@ -767,6 +770,7 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
     if let Some((v, k)) = best {
         tempo.dealing = true;
         tempo.value = v;
+        tempo.turns = dn[k].leaf;
         return (Choice::Line(line_to(dn, k)), work);
     }
     if deals_left == 0 {
@@ -787,12 +791,14 @@ pub(crate) fn decide_steps(obs: &Game, deals_left: usize, visited: &HashSet<u64>
     };
     if let Some(k) = fill(&nodes) {
         tempo.value = nodes[k].parts.value(deals_left, empty);
+        tempo.turns = nodes[k].leaf;
         return (Choice::Line(line_to(&nodes, k)), nodes.len());
     }
     let wide = search_state(nodes[0].state.clone(), &LineConfig { splits: 3, beam: cfg.beam.max(100), ..*cfg });
     match fill(&wide) {
         Some(k) => {
             tempo.value = wide[k].parts.value(deals_left, empty);
+            tempo.turns = wide[k].leaf;
             (Choice::Line(line_to(&wide, k)), nodes.len() + wide.len())
         }
         None => (Choice::Stuck, nodes.len() + wide.len()),

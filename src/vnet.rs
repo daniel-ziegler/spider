@@ -11,7 +11,7 @@
 
 use crate::game::{Game, Move, NUM_COLS};
 use crate::human::{mask, BLANK};
-use crate::lines::{decide_steps, line_to, masked_hash, progress, search_state, unseen_counts, Choice, LineConfig, Tempo, LOST};
+use crate::lines::{decide, decide_steps, line_to, masked_hash, progress, search_state, unseen_counts, Choice, Decision, LineConfig, Tempo, LOST};
 use crate::smart::Rng;
 use crate::solver::{State, MAXC};
 use std::collections::HashSet;
@@ -46,6 +46,20 @@ pub(crate) fn encode(s: &State, deals_left: usize, out: &mut [u8]) {
 pub fn encode_game(g: &Game) -> Vec<u8> {
     let mut out = vec![0; ENC];
     encode(&State::from_game(&mask(g)), g.deals_remaining(), &mut out);
+    out
+}
+
+/// Encode the masked position right after a deal from `g` with the ten cards
+/// dealt not yet known: an unknown card on every column and a deal less (the
+/// analysis's network is trained on these too, made of the positions dealt
+/// from; `web/static/analysis-core.js` encodes the same).
+pub fn encode_dealt(g: &Game) -> Vec<u8> {
+    let mut m = mask(g);
+    for col in &mut m.columns {
+        col.push(BLANK);
+    }
+    let mut out = vec![0; ENC];
+    encode(&State::from_game(&m), g.deals_remaining() - 1, &mut out);
     out
 }
 
@@ -122,6 +136,159 @@ pub fn record_game(g: &Game, cfg: &LineConfig, eps: f64, sample: f64, seed: u64,
         out.extend_from_slice(&(seed as u32).to_le_bytes());
     }
     (won, g.completed.len())
+}
+
+/// Bytes per record of [`record_for_analysis`]: the encoding, won (0/1),
+/// suits completed at the end, the number of suits, the kind of position
+/// (see there) and the seed (u32).
+pub const ANALYSIS_RECORD: usize = ENC + 8;
+
+/// Training data for the network of the web game's analysis, which is to say
+/// of every position of a person's game what share of games the line player
+/// would win from there: positions, each with the outcome of the line player
+/// playing on from it (and nothing else: no exploration after a position
+/// recorded, so that the network and games played out from a position
+/// estimate the same thing).
+///
+/// To have positions the line player would not get into itself, half the
+/// games start with a noisy stretch of up to `noisy` decisions, in which a
+/// decision is with probability `noise` a random line among the best eight
+/// by the normal evaluation, or (a tenth as often) a deal before its time;
+/// nothing is recorded there, and the player starts afresh after it.
+/// From then on, a decision's position is recorded with probability
+/// `sample` (kind 0), and with it the end of the line played (1; a card it
+/// turns is unknown) and, each with probability `mid`, the positions between
+/// the line's moves (2), which the player does not stop in but a person's
+/// game does. Always recorded are the position a game not won ends in (3)
+/// and a position dealt from (4), and half the time the one after a deal (5).
+/// Returns (won, suits completed, decisions).
+pub fn record_for_analysis(g: &Game, cfg: &LineConfig, noise: f64, noisy: usize, sample: f64, mid: f64, seed: u64, out: &mut Vec<u8>) -> (bool, usize, usize) {
+    let mut g = g.clone();
+    let mut rng = Rng(seed ^ 0xA7A1);
+    let unit = |rng: &mut Rng| (rng.next() >> 11) as f64 / (1u64 << 53) as f64;
+    let quiet_from = if rng.next() % 2 == 0 || noisy == 0 { 0 } else { 1 + (rng.next() % noisy as u64) as usize };
+    let mut visited = HashSet::new();
+    let mut tempo = Tempo::default();
+    let mut recs: Vec<(Vec<u8>, u8)> = Vec::new();
+    let record = |s: &State, deals_left: usize, kind: u8, recs: &mut Vec<(Vec<u8>, u8)>| {
+        let mut e = vec![0; ENC];
+        encode(s, deals_left, &mut e);
+        recs.push((e, kind));
+    };
+    let start = g.move_count();
+    let mut decisions = 0;
+    let mut dealt = false;
+    while !g.is_won() && g.move_count() - start < 5000 && g.columns.iter().all(|c| c.len() <= MAXC) {
+        if decisions == quiet_from {
+            visited.clear();
+            tempo = Tempo::default();
+        }
+        let quiet = decisions >= quiet_from;
+        decisions += 1;
+        let obs = mask(&g);
+        let root = State::from_game(&obs);
+        visited.insert(root.hash());
+        let before = progress(&g);
+        let deals_left = g.deals_remaining();
+        let mut decision = decide(&obs, deals_left, &visited, &mut tempo, cfg).0;
+        if !quiet && matches!(decision, Decision::Play(_)) {
+            let u = unit(&mut rng);
+            if u < noise {
+                let nodes = search_state(root.clone(), cfg);
+                let mut ranked: Vec<(i32, usize)> = (1..nodes.len())
+                    .filter(|&k| !visited.contains(&nodes[k].state.hash()))
+                    .map(|k| (nodes[k].parts.value(deals_left, cfg.empty), k))
+                    .filter(|&(v, _)| v > LOST)
+                    .collect();
+                ranked.sort_unstable_by_key(|&(v, k)| (std::cmp::Reverse(v), k));
+                ranked.truncate(8);
+                if !ranked.is_empty() {
+                    let k = ranked[(rng.next() % ranked.len() as u64) as usize].1;
+                    decision = Decision::Play(line_to(&nodes, k).concat());
+                    tempo.plan.clear();
+                }
+            } else if u < 1.1 * noise && deals_left > 0 && g.columns.iter().all(|c| !c.is_empty() && c.len() < MAXC) {
+                decision = Decision::Deal;
+            }
+        }
+        let rec = quiet && unit(&mut rng) < sample;
+        let after_deal = quiet && std::mem::take(&mut dealt) && rng.next() % 2 == 0;
+        match decision {
+            Decision::Play(moves) => {
+                if rec || after_deal {
+                    record(&root, deals_left, if after_deal { 5 } else { 0 }, &mut recs);
+                }
+                let mut after = obs.clone();
+                let last = moves.len() - 1;
+                for (i, mv) in moves.into_iter().enumerate() {
+                    g.apply(mv).expect("planned move is legal");
+                    after.apply(mv).expect("planned move is legal");
+                    let fits = after.columns.iter().all(|c| c.len() <= MAXC);
+                    if quiet && fits && if i == last { rec } else { unit(&mut rng) < mid } {
+                        record(&State::from_game(&after), deals_left, if i == last { 1 } else { 2 }, &mut recs);
+                    }
+                }
+            }
+            Decision::Deal => {
+                if quiet {
+                    record(&root, deals_left, 4, &mut recs);
+                }
+                g.apply(Move::Deal).expect("deal is legal");
+                dealt = true;
+            }
+            Decision::Stuck => {
+                if quiet {
+                    record(&root, deals_left, 3, &mut recs);
+                }
+                break;
+            }
+        }
+        if progress(&g) != before {
+            tempo = Tempo::default();
+        }
+    }
+    let won = g.is_won();
+    for (e, kind) in recs {
+        out.extend_from_slice(&e);
+        out.extend_from_slice(&[won as u8, g.completed.len() as u8, g.suits, kind]);
+        out.extend_from_slice(&(seed as u32).to_le_bytes());
+    }
+    (won, g.completed.len(), decisions)
+}
+
+/// What the line player would do next in an encoded position, for the
+/// analysis's network (one more thing it is told, since it cannot see it):
+/// 0 unknown (a card turned and not yet known, or the game won), 1 a line
+/// that raises the evaluation, 2 one that turns a card, 3 and 4 the same
+/// about to deal (or, with the stock gone, about to give up), 5 a deal, 6
+/// nothing. The player asked is the cheap one, [`LineConfig::fast`] (a
+/// search for every position valued; and the rollout player's expectimax
+/// wants to know which cards are unseen, while the encoding does not say
+/// which suits are completed), starting afresh in the position as the
+/// encoding has it (the top [`ROWS`] cards of each column).
+pub fn next_kind(enc: &[u8], suits: u8) -> u8 {
+    let mut g = Game::new(suits, 0);
+    for c in 0..NUM_COLS {
+        let codes = &enc[c * ROWS..(c + 1) * ROWS];
+        if codes.contains(&2) {
+            return 0;
+        }
+        g.columns[c] = codes.iter().take_while(|&&x| x != 0).map(|&x| if x == 1 { BLANK } else { crate::game::Card(x - 3) }).collect();
+        g.face_down[c] = codes.iter().filter(|&&x| x == 1).count();
+    }
+    let deals_left = enc[NUM_COLS * ROWS] as usize;
+    g.stock = vec![BLANK; deals_left * NUM_COLS];
+    g.completed = vec![0; enc[NUM_COLS * ROWS + 1] as usize];
+    if g.is_won() {
+        return 0;
+    }
+    let cfg = LineConfig::fast(suits);
+    let mut tempo = Tempo::default();
+    match decide_steps(&g, deals_left, &HashSet::new(), &mut tempo, &cfg).0 {
+        Choice::Line(_) => 1 + tempo.turns as u8 + 2 * tempo.dealing as u8,
+        Choice::Deal => 5,
+        Choice::Stuck => 6,
+    }
 }
 
 /// Settings of the network player.
