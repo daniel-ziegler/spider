@@ -1241,9 +1241,13 @@ function renderTray(g, hintDeal) {
 }
 
 // The board of an analysis: the position it is looking at, with the cards
-// the last move put down outlined (review.mark: {col, count}).
+// the last move put down outlined (review.mark: {col, count}) and moves about
+// to be played drawn as arrows (review.arrows: {from, to, count, kind}, the
+// kind 'you' for the move played and 'better' for the one that should have
+// been; review.dealing: whose deal the stock is marked for).
 function renderReview() {
-  const b = review.shown, mark = review.mark;
+  const b = review.shown, mark = review.mark, arrows = review.arrows;
+  const moving = (c, i, n) => arrows.filter(a => a.from === c && i >= n - a.count).map(a => ` mv-${a.kind}`).join('');
   let html = '';
   for (let c = 0; c < NUM_COLS; c++) {
     const x = colX(c), col = b.columns[c], fd = b.faceDown[c], tops = cardTops(c);
@@ -1253,12 +1257,27 @@ function renderReview() {
       if (i < fd) html += `<div class="card down" style="${style}"></div>`;
       else {
         const broken = i > fd && rankOf(card) + 1 !== rankOf(col[i - 1]) ? ' broken' : '';
-        html += faceHtml(card, style, (mark && mark.col === c && i >= col.length - mark.count ? 'hint' : '') + broken);
+        html += faceHtml(card, style, (mark && mark.col === c && i >= col.length - mark.count ? 'last' : '') + broken + moving(c, i, col.length));
       }
     });
   }
+  // An arrow goes from the top card moved to where it would lie; two from one card part a little.
+  if (arrows.length) {
+    let paths = '';
+    arrows.forEach((a, k) => {
+      const from = cardTops(a.from), to = cardTops(a.to), n = b.columns[a.from].length, m = b.columns[a.to].length;
+      const strip = Math.min(L.up, L.ch) / 2, shift = arrows.length > 1 && arrows[0].from === arrows[1].from ? (k ? 5 : -5) : 0;
+      const x0 = colX(a.from) + L.cw / 2, y0 = from[n - a.count] + strip + shift;
+      const x1 = colX(a.to) + L.cw / 2, y1 = m ? Math.min(to[m - 1] + (to[m - 1] - (to[m - 2] ?? to[m - 1] - L.up)) + strip, to[m - 1] + L.ch - 4) : L.top0 + L.ch / 2;
+      const lift = Math.min(60, Math.abs(x1 - x0) * 0.25) + 12, d = `M${x0.toFixed(1)},${y0.toFixed(1)}Q${((x0 + x1) / 2).toFixed(1)},${(Math.min(y0, y1) - lift).toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`;
+      paths += `<path class="under" d="${d}"/><path class="mv-${a.kind}" d="${d}" marker-end="url(#arrow-${a.kind})"/><circle class="mv-${a.kind}" cx="${x0.toFixed(1)}" cy="${y0.toFixed(1)}" r="${Math.max(2.5, Math.min(4, L.cw * 0.045)).toFixed(1)}"/>`;
+    });
+    const head = kind => `<marker id="arrow-${kind}" class="mv-${kind}" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0L10,5L0,10z"/></marker>`;
+    html += `<svg class="arrows" style="--aw:${Math.max(2.5, Math.min(4, L.cw * 0.045)).toFixed(1)}px" width="${board.clientWidth}" height="${Math.max(board.clientHeight, board.scrollHeight)}"><defs>${head('you')}${head('better')}</defs>${paths}</svg>`;
+  }
   board.innerHTML = html;
   renderTray(b, false);
+  if (review.dealing) $('#stock').lastElementChild?.classList.add(`mv-${review.dealing}`);
   $('#info').innerHTML = review.info;
 }
 

@@ -1,8 +1,9 @@
-// The analysis of a game of Spider, somewhat like a Go server's review: a
-// plot of the chance of winning over the moves, the moments it fell most
-// broken down into what the moves cost and what the cards did, and the board
-// to step through. app.js loads this only when an analysis is asked for, and
-// it then fetches the network; nothing here is part of an ordinary page load.
+// The analysis of a game of Spider, somewhat like a Go server's review: the
+// player's biggest mistakes, each with the move that would have been better
+// and what it was for, a plot of the chance of winning over the moves, and
+// the board to step through. app.js loads this only when an analysis is asked
+// for, and it then fetches the network; nothing here is part of an ordinary
+// page load.
 //
 // "The chance of winning" is that of a computer player that sees only the
 // cards face up and takes nothing back (the line player, lineplayer.js); the
@@ -15,19 +16,16 @@
 // as they arrive:
 //   1. A network values every position (and each position where cards came
 //      up, also before they were known): the curve.
-//   2. For the stretches of moves where it falls most, games are played out
-//      from WORLDS shuffles of the cards the player had not seen: before the
-//      moves, after them, and with the cards that really came up. These give
-//      win rates with an honest error, and the split into moves and cards.
-// analysis-core.js has what is computed; this file the workers and the page.
-import { prepare, stretchValues, keyStretches, rollStats, verdict, DEAL_SAMPLES } from './analysis-core.js';
+//   2. The mistakes are found by playing games out in shuffles of the cards
+//      the player had not seen, from before the player's moves (the line
+//      player choosing its own) and from after them: see findMistakes in
+//      analysis-core.js, which has what is computed; this file has the
+//      workers and the page.
+import { prepare, stretchValues, findMistakes, measureLuck, branch, SEARCH, DEAL_SAMPLES } from './analysis-core.js';
 
 const NET_VERSION = 1; // in the networks' address, which is cached for good: change it with them
-const WORLDS = 256; // shuffles played out for each key stretch
-const ROUND = 16; // of them in one piece of work
 const VALUES = 6; // positions valued in one piece of work
-const MAX_KEYS = 6;
-const ROLL_WEIGHT = 8; // a world's three games against a position's valuing, for the progress bar
+const ROLL_WEIGHT = 3; // a game played out against a position's valuing, for the progress bar
 
 const nets = new Map(); // suits -> the promise of the network's bytes
 function fetchNet(suits) {
@@ -112,9 +110,13 @@ export function open(ctx) {
   const data = prepare(suits, seed, moves);
   const values = new Map(); // what the network has said: key -> chance
   let vals = null; // its three values of each stretch, once it has said everything
-  let keys = []; // the key stretches: {at: index of the stretch, st, rolls: bytes so far, stats}
+  let cands = []; // the stretches games are being played out for (see findMistakes)
+  let found = null; // the mistakes, once they are known: see mistake() for what each has
+  let luck = null; // the cards' biggest swing: {t, show, mean}
   let step = N, selected = -1, hover = -1;
-  let pool = null, closed = false, failed = '', phase = 'net', done = 0, total = data.jobs.length + MAX_KEYS * WORLDS * ROLL_WEIGHT;
+  let alt = -1; // the board is on the selected mistake's better line, after this many of its moves (-1: on the game's)
+  let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
+  const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
 
@@ -129,7 +131,7 @@ export function open(ctx) {
     </div>
     <div class="rv-body">
       <div class="rv-plot"><svg role="img" aria-label="The chance of winning over the moves of the game"></svg><div class="rv-tip" hidden></div></div>
-      <div class="rv-side"><div class="rv-keys"></div><p class="rv-note"></p></div>
+      <div class="rv-side"><p class="rv-sum"></p><div class="rv-keys"></div><p class="rv-luck"></p><p class="rv-note"></p></div>
     </div>`;
   const $ = s => el.querySelector(s);
   const plot = $('.rv-plot'), svg = $('svg'), tip = $('.rv-tip');
@@ -145,19 +147,43 @@ export function open(ctx) {
     const v = stretchValues(st, values, data.won, N, suits);
     return Number.isFinite(v.commit) ? v.commit : undefined;
   };
-  const stretchOf = t => data.stretches.findIndex(st => t > st.from && t <= st.to);
+
+  // A move in words, from the position it is played in.
+  function moveText(mv, before) {
+    if (mv.deal) return 'a deal';
+    const src = before.columns[mv.from];
+    return `${ctx.cardName(src[src.length - mv.count])}${mv.count > 1 ? ` and ${mv.count - 1} more` : ''} to column ${mv.to + 1}`;
+  }
 
   function describe(t) {
     if (t === 0) return 'The deal';
-    const mv = moves[t - 1], before = data.snaps[t - 1], after = data.snaps[t];
-    let text = 'deals a row';
-    if (!mv.deal) {
-      const src = before.columns[mv.from];
-      text = `${ctx.cardName(src[src.length - mv.count])}${mv.count > 1 ? ` and ${mv.count - 1} more` : ''} to column ${mv.to + 1}`;
-      if (data.shows[t - 1]) text += ', turning a card';
-    }
+    const before = data.snaps[t - 1], after = data.snaps[t];
+    let text = moveText(moves[t - 1], before);
+    if (data.shows[t - 1] === 'turn') text += ', turning a card';
     if (after.completed.length > before.completed.length) text += ', finishing a suit';
     return `Move ${t} of ${N}: ${text}`;
+  }
+
+  // A mistake found, with what the page says of it: the positions of the
+  // better line (alt.snaps[i] after i of its moves; the last of them shows
+  // cards: its goal), and the words.
+  function mistake(m) {
+    const st = data.stretches[m.at], mine = moves[m.move - 1], before = data.snaps[m.move - 1];
+    const alt = branch(suits, seed, moves, m.move - 1, m.line), len = alt.snaps.length - 1, line = m.line.slice(0, len);
+    const goal = alt.shows[len - 1] ?? { show: null }, first = line[0];
+    const early = !!mine.deal && !first.deal;
+    const n = len - 2, between = n > 0 ? `${n} more move${n > 1 ? 's' : ''}` : '';
+    let goes = '';
+    if (goal.show === 'turn') goes = len === 1 ? `, turning the card in column ${goal.col + 1}` : `, then ${between ? `${between} to ` : ''}turn the card in column ${goal.col + 1}`;
+    else if (goal.show === 'deal' && len > 1) goes = between ? ` and ${between}, then deal` : ', then deal';
+    else if (len > 1) goes = `, then ${len - 1} more move${len > 2 ? 's' : ''}`;
+    const end = m.exact ? m.move : st.to, after = end - m.move;
+    return {
+      ...m, st, alt, len, line, goal, end,
+      title: early ? `Move ${m.move}: dealt too early` : after ? `Moves ${m.move}–${end}` : `Move ${m.move}`,
+      mine: (mine.deal ? 'dealt' : moveText(mine, before)) + (after ? ` and the ${after > 1 ? `${after} moves` : 'move'} after` : ''),
+      betterText: [first.deal ? 'deal' : moveText(first, before), goes],
+    };
   }
 
   // ---- drawing
@@ -190,11 +216,11 @@ export function open(ctx) {
       s += `<text class="axis" x="${f(x)}" y="${H - 5}" text-anchor="middle">deal</text>`;
       labelled = x;
     });
-    // The stretch picked out.
-    const sel = keys[selected];
-    if (sel) s += `<rect class="band" x="${f(X(sel.st.from))}" width="${f(Math.max(2, X(sel.st.to) - X(sel.st.from)))}" y="${mt}" height="${h}"/>`;
+    // The mistake picked out.
+    const sel = shownItems()[selected];
+    if (sel) s += `<rect class="band" x="${f(X(sel.from))}" width="${f(Math.max(2, X(sel.end) - X(sel.from)))}" y="${mt}" height="${h}"/>`;
     // The curve: what the moves did slopes, what the cards did is upright.
-    let area = '', play = '', luck = '', last = -1;
+    let area = '', play = '', jumps = '', last = -1;
     for (let t = 0; t <= N; t++) {
       const p = value(t);
       if (p === undefined) continue;
@@ -202,27 +228,21 @@ export function open(ctx) {
       if (last < 0) play += `M${f(X(t))},${f(Y(p))}`;
       else if (c !== undefined) {
         play += `L${f(X(t))},${f(Y(c))}M${f(X(t))},${f(Y(p))}`;
-        luck += `M${f(X(t))},${f(Y(c))}L${f(X(t))},${f(Y(p))}`;
+        jumps += `M${f(X(t))},${f(Y(c))}L${f(X(t))},${f(Y(p))}`;
       } else play += `L${f(X(t))},${f(Y(p))}`;
       area += `${area ? 'L' : 'M'}${f(X(t))},${f(Y(p))}`;
       last = t;
     }
     if (last > 0) s += `<path class="area" d="${area}L${f(X(last))},${f(Y(0))}L${f(X(0))},${f(Y(0))}Z"/>`;
-    s += `<path class="play" d="${play}"/><path class="luck" d="${luck}"/>`;
-    // The key stretches: a numbered mark above, and the games played out as dots with their 95% intervals.
+    s += `<path class="play" d="${play}"/><path class="luck" d="${jumps}"/>`;
+    // The mistakes: a numbered mark above each (side by side where they are close), and the cards' biggest swing.
     let marked = -99;
-    keys.forEach((k, i) => {
-      const x0 = X(k.st.from), x1 = X(k.st.to), bx = marked = Math.max(x1, marked + 21); // marks side by side where stretches are close
-      s += `<line class="lead" x1="${f(bx)}" x2="${f(x1)}" y1="18" y2="${mt}"/>`;
-      if (k.stats) {
-        const dot = (x, st, cls) => {
-          const lo = Math.max(0, st.mean - 1.96 * st.se), hi = Math.min(1, st.mean + 1.96 * st.se);
-          return `<line class="whisker" x1="${f(x)}" x2="${f(x)}" y1="${f(Y(lo))}" y2="${f(Y(hi))}"/><circle class="roll ${cls}" cx="${f(x)}" cy="${f(Y(st.mean))}" r="4.5"/>`;
-        };
-        s += dot(x0, k.stats.pre, '') + dot(x1, k.stats.reveal, '');
-      }
-      s += `<g class="badge${i === selected ? ' sel' : ''}" data-key="${i}"><circle cx="${f(bx)}" cy="11" r="9"/><text x="${f(bx)}" y="15" text-anchor="middle">${i + 1}</text></g>`;
+    shownItems().map((m, i) => [m, i]).sort((a, b) => a[0].at - b[0].at).forEach(([m, i]) => {
+      const x = X(m.at), bx = marked = Math.max(x, marked + 21);
+      s += `<line class="lead" x1="${f(bx)}" x2="${f(x)}" y1="18" y2="${mt}"/>`;
+      s += `<g class="badge${i === selected ? ' sel' : ''}${m.sure ? '' : ' unsure'}" data-key="${i}"><circle cx="${f(bx)}" cy="11" r="9"/><text x="${f(bx)}" y="15" text-anchor="middle">${i + 1}</text></g>`;
     });
+    if (luck && value(luck.t) !== undefined) s += `<circle class="swing" data-luck cx="${f(X(luck.t))}" cy="${f(Y(value(luck.t)))}" r="4.5"/>`;
     // Where the board is, and where the pointer is.
     const p = value(step);
     s += `<line class="cursor" x1="${f(X(step))}" x2="${f(X(step))}" y1="${mt - 4}" y2="${mt + h + 4}"/>`;
@@ -243,57 +263,105 @@ export function open(ctx) {
     // The header's line (its chance may have come since the board was drawn),
     // the line about the move, the progress, the key stretches and the note.
     document.querySelector('#info').innerHTML = review.info;
-    $('.rv-move').textContent = describe(step) + (p === undefined ? '' : ` · ${pct(p)}`);
+    const m = alt >= 0 && found[selected];
+    $('.rv-move').textContent = m ? `The better line, move ${alt} of ${m.len}: ${moveText(m.line[alt - 1], m.alt.snaps[alt - 1])}${alt === m.len && m.goal.show === 'turn' ? ', turning a card' : ''}`
+      : describe(step) + (p === undefined ? '' : ` · ${pct(p)}`);
     const frac = Math.min(1, done / total);
     $('.rv-bar').hidden = phase === 'done' || !!failed;
     $('.rv-bar i').style.width = `${(frac * 100).toFixed(1)}%`;
     $('.rv-text').textContent = failed || (phase === 'net' ? 'Fetching the network…'
       : phase === 'value' ? `Valuing ${N + 1} positions…`
-      : phase === 'roll' ? `Playing out games: ${keys.reduce((n, k) => n + k.rolls.length, 0).toLocaleString()} of ${(keys.length * WORLDS).toLocaleString()}`
+      : phase === 'roll' ? `Looking for mistakes: ${spent.toLocaleString()} games played out`
       : `Done in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`);
-    $('.rv-keys').innerHTML = keys.map((k, i) => {
-      const st = k.st, v = vals[k.at], r = k.stats;
-      const what = `${st.to - st.from > 1 ? `Moves ${st.from + 1}–${st.to}` : `Move ${st.to}`}${st.shows === 'deal' ? ', a deal' : st.shows === 'turn' ? ', a card turned' : ', to the end'}`;
-      const pm = x => `<span class="pm">±${Math.round(196 * x.se)}</span>`;
-      const nums = r ? `<b>${pct(r.pre.mean)} → ${pct(r.reveal.mean)}</b><span class="part"><i class="k-play"></i>moves <b>${points(r.play.mean)}</b>${pm(r.play)}</span>${st.shows ? `<span class="part"><i class="k-luck"></i>cards <b>${points(r.luck.mean)}</b>${pm(r.luck)}</span>` : ''}`
-        : `<b>${pct(v.same ? v.commit : v.start)} → ${pct(v.end)}</b><span class="part"><i class="k-play"></i>moves ${points(v.same ? 0 : v.play)}</span>${st.shows ? `<span class="part"><i class="k-luck"></i>cards ${points(v.luck)}</span>` : ''}`;
-      const said = !r ? 'the network\'s guess; playing it out…' : k.rolls.length < WORLDS ? `${k.rolls.length} of ${WORLDS} games…` : verdict(r);
-      const cls = r && k.rolls.length === WORLDS ? ` v-${said.split(/[ ,]/)[0].toLowerCase()}` : ' pending';
-      return `<button type="button" class="rv-key${i === selected ? ' sel' : ''}" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${what}</span><span class="said${cls}">${esc(said)}</span><span class="nums">${nums}</span></button>`;
-    }).join('') || (vals ? '<p class="rv-none">No stretch of moves lost four points or more.</p>' : '');
+    const items = shownItems();
+    $('.rv-sum').textContent = failed || phase === 'net' || phase === 'value' ? '' : !found ? 'Looking for your biggest mistakes…'
+      : !found.length ? 'No clear mistakes: no move of yours surely cost three points or more.'
+      : `Your ${found.length > 1 ? `${found.length} biggest mistakes` : 'one clear mistake'}, and what would have been better:`;
+    const html = items.map((m, i) => {
+      const pm = `<span class="pm">±${Math.max(1, Math.round(196 * m.cost.se))}</span>`;
+      const head = `<button type="button" class="rv-head1" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${esc(m.title)}</span><span class="cost${m.sure ? '' : ' pending'}">${m.sure ? '' : 'checking… '}<b>${points(m.cost.mean)}</b>${pm}</span></button>`;
+      if (!m.sure || i !== selected) return `<div class="rv-key${i === selected ? ' sel' : ''}${m.sure ? '' : ' unsure'}">${head}</div>`;
+      const view = alt < 0 ? (step === m.move ? 'mine' : step === m.move - 1 ? 'before' : '') : alt === m.len - 1 && m.len > 1 ? 'setup' : alt === 1 ? 'better' : '';
+      const b = (name, text, title) => `<button type="button" data-view="${name}" title="${title}"${view === name ? ' class="on"' : ''}>${text}</button>`;
+      return `<div class="rv-key sel">${head}<div class="rv-more">
+          <div class="you"><i></i><span>You: <b>${esc(m.mine)}</b></span></div>
+          <div class="better"><i></i><span>Better: <b>${esc(m.betterText[0])}</b>${esc(m.betterText[1])}</span></div>
+          <div class="odds">Chance of winning: yours <b>${pct(m.yours)}</b> → better <b>${pct(m.better)}</b></div>
+          <div class="views">${b('before', 'Before', 'The position before the mistake, with both moves (click the mistake)')}${b('mine', 'Your move', 'The position after your move')}${b('better', 'Better move', 'The position after the better move (B)')}${m.len > 1 ? b('setup', 'What it sets up', 'What the better move sets up: the position it reaches before the next card is shown (S)') : ''}</div>
+        </div></div>`;
+    }).join('');
+    if ($('.rv-keys').dataset.html !== html) { // (left alone when nothing changed, so that a click on it is not lost)
+      $('.rv-keys').dataset.html = html;
+      $('.rv-keys').innerHTML = html;
+    }
+    $('.rv-luck').innerHTML = luck ? `<button type="button" data-luck><i class="l-luck"></i>The biggest swing of luck: the ${luck.show === 'deal' ? 'deal' : 'card turned'} at move ${luck.t} ${luck.mean < 0 ? 'cost' : 'was worth'} about ${Math.abs(Math.round(luck.mean * 100))} points.</button>` : '';
     $('.rv-note').innerHTML = note();
   }
 
+  // What is listed: the mistakes found, or while they are looked for the
+  // stretches that look like mistakes so far. Each {at: the move the mark is
+  // at, from..end: the moves picked out, sure, title, cost, ...}.
+  function shownItems() {
+    if (found) return found;
+    return cands.filter(c => c.stat.n >= 64 && c.stat.mean <= -SEARCH.cost && c.state !== 'out')
+      .sort((a, b) => a.stat.mean - b.stat.mean).slice(0, SEARCH.most)
+      .map(c => ({ sure: false, at: c.st.to, from: c.st.from, end: c.st.to, move: c.st.from + 1, cost: c.stat, title: c.st.to - c.st.from > 1 ? `Moves ${c.st.from + 1}–${c.st.to}` : `Move ${c.st.to}` }));
+  }
+
   function note() {
-    // (The end as the games played out have it, once they are there.)
-    const ended = keys.find(k => k.st.to === N && k.stats)?.stats.reveal.mean ?? value(N);
-    let text = value(0) === undefined || ended === undefined ? '' : `From ${pct(value(0))} at the deal to ${data.won ? 'the win' : `${pct(ended)} at the end`}. `;
-    text += `<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt <i class="l-roll"></i>games played out (95% interval)</span> `
-      + `At the marked moments it is measured by playing ${WORLDS} games out with the unseen cards reshuffled: before the moves, after them, and with the cards that really came up. The first step is the moves' doing, the second the cards'.`;
-    if (ctx.undos) text += ' Moves that were taken back are left out: the game is read as if it had been played straight through.';
+    let text = '<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt</span> ';
+    if (found?.length) text += 'Each mistake is measured by playing some hundreds of games out both ways, with the cards you had not seen reshuffled. ';
+    if (ctx.undos) text += 'Moves that were taken back are left out: the game is read as if it had been played straight through.';
     return text;
   }
 
   // ---- stepping
 
-  function setStep(t) {
-    t = Math.max(0, Math.min(N, t));
-    // The stretch picked out stays so while the board is within it.
-    const within = k => k && t >= k.st.from && t <= k.st.to;
-    if (!within(keys[selected])) selected = keys.findIndex(k => t > k.st.from && t <= k.st.to);
-    step = t;
+  function show() {
     ctx.render();
     redraw();
+    requestAnimationFrame(() => el.querySelector('.rv-key.sel')?.scrollIntoView({ block: 'nearest' }));
+  }
+
+  function setStep(t) {
+    t = Math.max(0, Math.min(N, t));
+    // The mistake picked out stays so while the board is within it.
+    const items = shownItems(), within = m => m && t >= m.from && t <= m.end;
+    if (!within(items[selected])) selected = items.findIndex(within);
+    step = t;
+    alt = -1;
+    show();
+  }
+
+  // Along the line the board is on: the game's, or the better line of the
+  // mistake picked out (back from its start is the game again).
+  function go(d) {
+    const m = found?.[selected];
+    if (alt < 0 || !m) return setStep(step + d);
+    alt = Math.min(m.len, alt + d);
+    if (alt <= 0) alt = -1;
+    show();
   }
 
   function pick(i) {
-    const k = keys[i];
-    if (!k) return;
-    const at = selected === i && step === k.st.from ? k.st.to : k.st.from; // again: its end
+    const m = shownItems()[i];
+    if (!m) return;
+    step = selected === i && alt < 0 && step === m.from && m.sure ? m.move : m.from; // again: the move
     selected = i;
-    step = at;
-    ctx.render();
-    redraw();
+    alt = -1;
+    show();
+  }
+
+  // One of the views of the mistake picked out.
+  function view(name) {
+    const m = found?.[selected];
+    if (!m) return;
+    step = m.from;
+    alt = -1;
+    if (name === 'mine') step = m.move;
+    else if (name === 'better') alt = 1;
+    else if (name === 'setup') alt = Math.max(1, m.len - 1);
+    show();
   }
 
   const stepAt = e => {
@@ -305,6 +373,7 @@ export function open(ctx) {
     if (e.button !== 0) return;
     const badge = e.target.closest?.('[data-key]');
     if (badge) return pick(+badge.dataset.key);
+    if (e.target.closest?.('[data-luck]')) return setStep(luck.t);
     dragging = true;
     plot.setPointerCapture(e.pointerId);
     setStep(stepAt(e));
@@ -323,15 +392,20 @@ export function open(ctx) {
     if (!b) return;
     if ('close' in b.dataset) ctx.close();
     else if (b.dataset.key) pick(+b.dataset.key);
-    else if (b.dataset.go) setStep(b.dataset.go === 'start' ? 0 : b.dataset.go === 'end' ? N : step + +b.dataset.go);
+    else if (b.dataset.view) view(b.dataset.view);
+    else if ('luck' in b.dataset) setStep(luck.t);
+    else if (b.dataset.go === 'start') setStep(0);
+    else if (b.dataset.go === 'end') setStep(N);
+    else if (b.dataset.go) go(+b.dataset.go);
   });
-  for (const b of el.querySelectorAll('button')) b.addEventListener('mousedown', e => e.preventDefault()); // keep the keys with the page
+  el.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); }); // keep the keys with the page
 
-  // The next key stretch in a direction (or, with none, the next move that showed cards).
+  // The next mistake of the list in a direction (or, with none, the next move that showed cards).
   function jump(d) {
-    if (keys.length) {
-      const i = d > 0 ? keys.findIndex(k => k.st.from > step) : keys.findLastIndex(k => k.st.from < step);
-      if (i >= 0) { selected = i; step = keys[i].st.from; ctx.render(); redraw(); }
+    const items = shownItems();
+    if (items.length) {
+      const i = selected < 0 ? (d > 0 ? 0 : items.length - 1) : selected + d;
+      if (items[i]) { selected = -1; pick(i); }
       return;
     }
     let t = step + d;
@@ -341,14 +415,16 @@ export function open(ctx) {
 
   function key(e) {
     const k = e.key;
-    if (k === 'ArrowLeft' || k === 'h') setStep(step - (e.shiftKey ? 10 : 1));
-    else if (k === 'ArrowRight' || k === 'l') setStep(step + (e.shiftKey ? 10 : 1));
+    if (k === 'ArrowLeft' || k === 'h') e.shiftKey ? setStep(step - 10) : go(-1);
+    else if (k === 'ArrowRight' || k === 'l') e.shiftKey ? setStep(step + 10) : go(1);
     else if (k === 'ArrowUp' || k === '[') jump(-1);
     else if (k === 'ArrowDown' || k === ']') jump(1);
     else if (k === 'Home') setStep(0);
     else if (k === 'End') setStep(N);
     else if (k === 'Escape') ctx.close();
-    else if (/^[1-9]$/.test(k) && keys[+k - 1]) pick(+k - 1);
+    else if (k === 'b' && found?.[selected]) view(alt === 1 ? 'before' : 'better');
+    else if (k === 's' && found?.[selected]) view(alt >= 0 && alt === found[selected].len - 1 ? 'before' : 'setup');
+    else if (/^[1-9]$/.test(k) && shownItems()[+k - 1]) { selected = -1; pick(+k - 1); }
     else return;
     e.preventDefault();
   }
@@ -381,68 +457,77 @@ export function open(ctx) {
       redraw();
     }));
     if (closed) return;
-    const all = data.stretches.map(st => stretchValues(st, values, data.won, N, suits));
-    // Where the moves are the line player's own, they are no mistake by its measure.
-    const asked = data.stretches.map(st => {
-      const start = data.snaps[st.from];
-      return { suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock, moves: moves.slice(st.from, st.to) };
-    });
-    const answers = await Promise.all(Array.from({ length: Math.ceil(asked.length / 16) }, (_, i) => pool.run({ same: asked.slice(16 * i, 16 * i + 16) })));
-    if (closed) return;
-    answers.flatMap(a => a.same).forEach((same, i) => { all[i].same = same; });
-    vals = all;
-    // Stretches with a column too long for the player are left to the network.
-    const playable = st => data.snaps.slice(st.from, st.to + 1).every(s => s.columns.every(c => c.length <= 48));
-    const picked = keyStretches(vals.map((v, i) => (playable(data.stretches[i]) ? v : { start: 0, end: 0, play: 0, luck: 0 })), MAX_KEYS);
-    // The end of a game not won is always measured: the network does not see well that nothing is left to do.
-    const end = data.stretches.length - 1;
-    if (!data.won && end >= 0 && !picked.includes(end) && playable(data.stretches[end])) picked.push(end);
-    keys = picked.map(at => ({ at, st: data.stretches[at], rolls: new Uint8Array(0), stats: null }));
-    total = data.jobs.length + keys.length * WORLDS * ROLL_WEIGHT;
-    phase = keys.length ? 'roll' : 'done';
-    seconds = (performance.now() - t0) / 1000;
+    vals = data.stretches.map(st => stretchValues(st, values, data.won, N, suits));
+    phase = 'roll';
     redraw();
-    const work = [];
-    for (let from = 0; from < WORLDS; from += ROUND) {
-      for (const k of keys) {
-        const start = data.snaps[k.st.from];
-        const roll = {
-          suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock,
-          moves: moves.slice(k.st.from, k.st.to), seed: (Number(BigInt(seed) % 1000003n) * 131 + k.at) | 0, from, to: from + ROUND,
-        };
-        work.push(pool.run({ roll }).then(({ rolls }) => {
-          const all = new Uint8Array(k.rolls.length + rolls.length);
-          all.set(k.rolls);
-          all.set(rolls, k.rolls.length);
-          k.rolls = all;
-          k.stats = rollStats(all);
-          done += rolls.length * ROLL_WEIGHT;
-          redraw();
-        }));
-      }
-    }
-    await Promise.all(work);
+    // A stretch's position and moves, for the worker (stretches with a column too long for the player are left out).
+    const job = at => {
+      const st = data.stretches[at], start = data.snaps[st.from];
+      return {
+        suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock,
+        moves: moves.slice(st.from, st.to), seed: (Number(BigInt(seed) % 1000003n) * 131 + at) | 0,
+      };
+    };
+    const asked = data.stretches.map((_, at) => job(at));
+    const answers = await Promise.all(Array.from({ length: Math.ceil(asked.length / 4) }, (_, i) => pool.run({ track: asked.slice(4 * i, 4 * i + 4) })));
     if (closed) return;
+    const cuts = answers.flatMap(a => a.tracks);
+    const roll = r => pool.run({ roll: r }).then(a => a.rolls);
+    // The cards' biggest swing by the network, measured alongside.
+    const swing = vals.map((v, at) => [cuts[at] && data.stretches[at].shows ? Math.abs(v.luck) : 0, at]).sort((a, b) => b[0] - a[0])[0];
+    const lucky = swing && swing[0] >= 0.05 ? measureLuck({ st: data.stretches[swing[1]], job: job(swing[1]), roll }).then(d => {
+      const st = data.stretches[swing[1]];
+      if (Math.abs(d.mean) >= 0.05 && Math.abs(d.mean) >= 2 * d.se) luck = { t: st.to, show: st.shows, mean: d.mean, se: d.se };
+    }) : null;
+    const mistakes = await findMistakes({
+      stretches: data.stretches, cuts, job, roll,
+      update: (c, n) => { cands = c; spent = n; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
+    });
+    await lucky;
+    if (closed) return;
+    found = mistakes.map(m => { const x = mistake(m); return { ...x, sure: true, at: x.move, from: x.move - 1 }; });
+    selected = found.findIndex(m => step >= m.from && step <= m.end);
     phase = 'done';
     seconds = (performance.now() - t0) / 1000;
     pool.close();
     pool = null;
+    ctx.render();
     redraw();
   }
+  // The move of the better line that the board is about to see played, and
+  // at the position before a mistake the move that was played.
+  const pending = () => {
+    const m = found?.[selected];
+    if (!m) return {};
+    if (alt >= 0) return { better: m.line[alt] };
+    return step === m.move - 1 ? { you: moves[m.move - 1], better: m.line[0] } : {};
+  };
   const review = {
-    get shown() { return data.snaps[step]; },
+    get shown() { return alt >= 0 ? found[selected].alt.snaps[alt] : data.snaps[step]; },
+    // The cards the last move put down: {col, count}.
     get mark() {
-      const mv = step > 0 && moves[step - 1];
-      if (!mv || mv.deal || data.snaps[step].completed.length > data.snaps[step - 1].completed.length) return null;
+      const snaps = alt >= 0 ? found[selected].alt.snaps : data.snaps, i = alt >= 0 ? alt : step;
+      const mv = i > 0 && (alt >= 0 ? found[selected].line[i - 1] : moves[i - 1]);
+      if (!mv || mv.deal || snaps[i].completed.length > snaps[i - 1].completed.length) return null;
       return { col: mv.to, count: mv.count };
     },
+    // Moves to draw on the board as arrows: [{from, to, count, kind: 'you' or 'better'}], and whose deal it is to mark the stock for.
+    get arrows() { return Object.entries(pending()).filter(([, mv]) => mv && !mv.deal).map(([kind, mv]) => ({ ...mv, kind })); },
+    get dealing() { const p = pending(); return p.better?.deal ? 'better' : p.you?.deal ? 'you' : null; },
     get info() {
       const p = value(step);
+      if (alt >= 0) return `Analysis · the better line at move <b>${found[selected].move}</b>, ${alt} of ${found[selected].len} played`;
       return `Analysis · ${suits === 1 ? '1 suit' : `${suits} suits`} · move <b>${step}</b> of ${N}${p === undefined ? '' : ` · chance of winning <b>${pct(p)}</b>`}`;
     },
     key,
     // For tests and the curious: where the work stands.
-    get state() { return { phase, failed, seconds, done, total, step, selected, values: values.size, keys: keys.map(k => ({ from: k.st.from, to: k.st.to, shows: k.st.shows, n: k.rolls.length, stats: k.stats, net: vals[k.at] })) }; },
+    get state() {
+      return {
+        phase, failed, seconds, done, total, step, alt, selected, spent, values: values.size, luck,
+        cands: cands.map(c => ({ from: c.st.from, to: c.st.to, n: c.stat.n, mean: c.stat.mean, se: c.stat.se, state: c.state })),
+        found: found?.map(m => ({ move: m.move, end: m.end, exact: m.exact, n: m.n, yours: m.yours, better: m.better, cost: m.cost, line: m.line, title: m.title, mine: m.mine, betterText: m.betterText })),
+      };
+    },
     destroy() {
       closed = true;
       pool?.close();

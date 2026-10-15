@@ -42,10 +42,11 @@ saved game (`lost`), and its daily challenge shows red until it is won.
 
 A game of Spider can be looked over once it is won or marked as lost
 (**Analyze**, in the tray and in the win dialog; at any time from the menu),
-somewhat as a Go server reviews a game: a plot of the chance of winning over
-the moves, the moments it fell most broken down into what the moves cost and
-what the cards did, and the board to step through (click or drag on the plot,
-`←` `→`, `↑` `↓` for the marked moments, `Esc` to go back).
+somewhat as a Go server reviews a game: the player's biggest mistakes, each
+with the move that would have been better and what it was for, a plot of the
+chance of winning over the moves, and the board to step through (click or
+drag on the plot, `←` `→`, `↑` `↓` or the digits for the mistakes, `B` for
+the better move and `S` for what it sets up, `Esc` to go back).
 
 * **Whose chance.** That of a computer player that sees only the cards face
   up and takes nothing back: the line player of the main README in a cheap
@@ -61,9 +62,7 @@ what the cards did, and the board to step through (click or drag on the plot,
   read as luckier than it was.
 * **Stretches.** A move that turns a card over or deals ends a stretch of
   moves. Within a stretch the player learns nothing, so what its moves change
-  is the player's doing and what the cards it shows change is luck: the
-  chance is taken at its start, after its moves with the cards they show not
-  yet known, and with them known.
+  is the player's doing and what the cards it shows change is luck.
 * **The curve** comes from a network (`static/vnet.js`, a forward pass in
   plain typed arrays; `static/nets/vN.bin`, 320 kB for each number of suits,
   float16): the value network of the main README (a transformer over the
@@ -72,18 +71,47 @@ what the cards did, and the board to step through (click or drag on the plot,
   another player. It values every position, each position where a card was
   turned with that card unknown (as it was trained to), and sixteen sampled
   deals for each deal.
-* **The marked moments** are the (at most six) stretches where the curve
-  falls most, by four points or more, or where the network puts most down to
-  the moves, and the last stretch of a game not won (the network is poor at
-  seeing that nothing is left to do). For each, 256 games are played out from 256 shuffles of the
-  cards the player had not seen at its start: from the start (the player
-  choosing its own moves), after the stretch's moves with the shuffle's cards
-  coming up, and with the cards that really came up (the shuffle's others as
-  they were, but for those swapped at random to make room). The same shuffles
-  for all three make the differences much less noisy than the rates. What is
-  shown is the rates before and after, the moves' part and the cards' part
-  with their 95% intervals (about ±6 points), and a word for it (mistake, bad
-  luck, …) only where a part is twice its standard error and two points.
+* **A mistake** is a move after which the computer player wins less often
+  than from the position before it, where it would have chosen its own. That
+  is measured by playing games out, in shuffles of the cards the player had
+  not seen: the same shuffles from both positions, which makes the difference
+  much less noisy than the two rates. The network is not asked (its error
+  from one position to the next is as large as most mistakes, and the
+  moments it used to pick were mostly not consequential), and what the cards
+  did is no part of it.
+  * *Candidates.* Every stretch whose moves are not in effect the computer
+    player's own (`track` in `analysis-worker.js`): its own line from the
+    stretch's start goes up to its first move that shows cards, a move played
+    that is its next is no departure, and one that is not is a departure only
+    if the player, asked anew after it, would end its line somewhere else
+    (moves can often be played in another order, or taken back). A deal or a
+    turned card where it would first have made other moves is a departure
+    like any other: the commonest mistake, dealing too early, is found so.
+  * *Sharing out the games* (`findMistakes` in `analysis-core.js`, `SEARCH`
+    for the numbers). Each candidate first gets 16 shuffles, two games in
+    each (from its start and from its end); then, round by round, the six
+    that look worst and are not settled get as many again, up to 512. A
+    candidate is settled when it is surely a mistake (256 shuffles or more, a
+    loss of at least three points and at least 2.5 standard errors) or
+    cannot well become one. This goes on until all are settled or 4,400
+    games are played. What is not surely a mistake by then is not listed: a
+    game may have none, and the page then says so.
+  * *Which move.* A stretch with several departures is cut in two at one in
+    its middle, games are played from there in 256 of the same shuffles, and
+    the half that lost more is cut again, until one move is left. If that
+    move by itself is surely a mistake it is the one shown; if not (the loss
+    is spread over several) the stretch is shown from its first departure on.
+  * *What is shown*, for at most five, the costliest first: the move played;
+    the computer player's next move in its place and what that is for (the
+    card it then turns, or the deal, and how many moves on); the chances of
+    winning after each; and on the board the two moves as arrows, red and
+    green. One click shows the position the better line reaches just before
+    its card is turned or its deal is made, and `→` steps along it.
+  * *Luck* is one line: the stretch where the network has the cards doing
+    most is played out (128 shuffles, after its moves with the shuffle's
+    cards and with the real ones, the shuffle's others as they were but for
+    those swapped at random to make room), and named if that is five points
+    or more and twice its standard error.
 * **Where it runs.** All in the browser, in workers (as many as the cores,
   less one, at most twelve), and shown as it arrives. `analysis.js` (the
   page), `analysis-core.js`, `analysis-worker.js`, `lineplayer.js`, `vnet.js`,
@@ -93,15 +121,14 @@ what the cards did, and the board to step through (click or drag on the plot,
   `analysis.js`, to be raised when they change). The GPU is not used: valuing
   a game's 300 to 500 positions takes about two seconds on eight workers, and nine tenths of
   the time goes to playing games out, which is a search and not arithmetic.
-  A four-suit game of 357 moves with three marked moments took 21 s in
-  Chrome with eight workers (2 s for the curve, then some 6 s a marked
-  moment: 768 games each), so 20 to 40 s for most games on such a machine,
-  and in proportion longer with fewer cores.
+  The mistakes take at most some 5,500 games played out (4,400 to find
+  them, the rest to put them to their moves and for the luck).
 * `cargo test` in the repository root compares the port of the player with
   the Rust on 48 deals (`GAMES=250` in the environment for 1,000: moves and
   positions searched are the same), the network's values with PyTorch's
   (`test/vnet.mjs`: they agree to 1e-6), the positions' encoding with
-  `src/vnet.rs`, and checks the shuffles and statistics (`test/analysis.mjs`).
+  `src/vnet.rs`, and checks the shuffles, the departures and the search for
+  mistakes, the last with games won by chance (`test/analysis.mjs`).
 
 To make the networks again (the data is some 1.3 GB for each):
 
@@ -128,11 +155,9 @@ and falls at each (by 5, 10, 11 and 7 points on average with one to four
 suits): it cannot tell that nothing is left to do, so a position about to
 be dealt from is too high. And a position with a turned card unknown is one
 to two points higher than it is on average with the card known. The second
-is taken off (`BIAS` in `analysis-core.js`); the first is taken off a deal's
-fall when the marked moments are chosen, or every deal would be one. Where
-the moves of a stretch are exactly the line player's own, which is checked,
-they are taken to cost nothing. For the rest the games played out are the
-measure, and the curve between the marked moments is to be read as rough.
+is taken off (`BIAS` in `analysis-core.js`); the first is left in the
+curve, and is one reason why the mistakes are not chosen by it: they are
+found by games played out alone, and the curve is to be read as rough.
 `node tools/analysis/calib.mjs SUITS` measures this on the line player's
 own games.
 
