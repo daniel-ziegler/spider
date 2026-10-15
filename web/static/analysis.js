@@ -21,7 +21,7 @@
 //      player choosing its own) and from after them: see findMistakes in
 //      analysis-core.js, which has what is computed; this file has the
 //      workers and the page.
-import { prepare, stretchValues, findMistakes, measureLuck, branch, SEARCH, DEAL_SAMPLES } from './analysis-core.js';
+import { prepare, stretchValues, findMistakes, measureLuck, branch, SEARCH } from './analysis-core.js';
 
 const NET_VERSION = 1; // in the networks' address, which is cached for good: change it with them
 const VALUES = 6; // positions valued in one piece of work
@@ -64,9 +64,10 @@ class Pool {
     });
   }
 
-  run(msg) {
+  // (`first`: before the work that is waiting.)
+  run(msg, first = false) {
     return new Promise(resolve => {
-      this.queue.push({ msg, resolve });
+      this.queue[first ? 'unshift' : 'push']({ msg, resolve });
       this.pump();
     });
   }
@@ -115,6 +116,10 @@ export function open(ctx) {
   let luck = null; // the cards' biggest swing: {t, show, mean}
   let step = N, selected = -1, hover = -1;
   let alt = -1; // the board is on the selected mistake's better line, after this many of its moves (-1: on the game's)
+  let adv = null; // what the line player would play at a position, asked for (see ask): {from, wait} or as a mistake is, with `advice`
+  const advice = new Map(); // those worked out: move -> promise
+  let pooled; // (called when the workers are there)
+  const workers = new Promise(resolve => { pooled = resolve; });
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
   const total = data.jobs.length + (SEARCH.games + SEARCH.extra) * ROLL_WEIGHT;
   const t0 = performance.now();
@@ -124,7 +129,7 @@ export function open(ctx) {
   el.id = 'review';
   el.innerHTML = `<div class="rv-head">
       <b class="rv-title">Analysis</b>
-      <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button></span>
+      <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button><button data-ask title="What would the computer play here? (?)">?<span class="long"> Computer's move</span></button></span>
       <span class="rv-move"></span>
       <span class="rv-status"><span class="rv-bar"><i></i></span><span class="rv-text"></span></span>
       <button class="primary" data-close title="Close the analysis (Esc)">Back<span class="long"> to the game</span></button>
@@ -143,7 +148,7 @@ export function open(ctx) {
   // The value after move t before the cards it showed were known.
   const commitAt = t => {
     const st = { from: t - 1, to: t, shows: data.shows[t - 1] };
-    if (st.shows === 'turn' ? !values.has(`u${t}`) : !Array.from({ length: DEAL_SAMPLES }, (_, j) => values.has(`d${t}/${j}`)).every(Boolean)) return undefined;
+    if (!values.has(`u${t}`)) return undefined;
     const v = stretchValues(st, values, data.won, N, suits);
     return Number.isFinite(v.commit) ? v.commit : undefined;
   };
@@ -164,29 +169,83 @@ export function open(ctx) {
     return `Move ${t} of ${N}: ${text}`;
   }
 
-  // A mistake found, with what the page says of it: the positions of the
-  // better line (alt.snaps[i] after i of its moves; the last of them shows
-  // cards: its goal), and the words.
-  function mistake(m) {
-    const st = data.stretches[m.at], mine = moves[m.move - 1], before = data.snaps[m.move - 1];
-    const alt = branch(suits, seed, moves, m.move - 1, m.line), len = alt.snaps.length - 1, line = m.line.slice(0, len);
+  // Another line from the position after t moves, with what the page says of
+  // it: its positions (alt.snaps[i] after i of its moves; the last of them
+  // shows cards: its goal), and its first move and what that is for, in words.
+  function lineInfo(t, moved) {
+    const alt = branch(suits, seed, moves, t, moved), len = alt.snaps.length - 1, line = moved.slice(0, len);
     const goal = alt.shows[len - 1] ?? { show: null }, first = line[0];
-    const early = !!mine.deal && !first.deal;
-    // (The line player would have turned the same card, after other moves.)
-    const hasty = m.exact && len > 1 && data.shows[m.move - 1] === 'turn' && goal.show === 'turn' && data.snaps[m.move].faceDown[goal.col] < before.faceDown[goal.col];
     const n = len - 2, between = n > 0 ? `${n} more move${n > 1 ? 's' : ''}` : '';
     let goes = '';
     if (goal.show === 'turn') goes = len === 1 ? `, turning the card in column ${goal.col + 1}` : `, then ${between ? `${between} to ` : ''}turn the card in column ${goal.col + 1}`;
     else if (goal.show === 'deal' && len > 1) goes = between ? ` and ${between}, then deal` : ', then deal';
     else if (len > 1) goes = `, then ${len - 1} more move${len > 2 ? 's' : ''}`;
+    return { alt, len, line, goal, betterText: len ? [first.deal ? 'deal' : moveText(first, data.snaps[t]), goes] : ['', ''] };
+  }
+
+  // The move played and another from the same position in words: [mine, the
+  // other], saying where from if they would otherwise read the same (there
+  // are two of each card).
+  function twoMoves(mine, other, before) {
+    const a = mine.deal ? 'dealt' : moveText(mine, before), b = other.deal ? 'deal' : moveText(other, before);
+    return a === b && mine.from !== other.from ? [`${a}, from column ${mine.from + 1}`, `${b}, from column ${other.from + 1}`] : [a, b];
+  }
+
+  // A mistake found, with its better line and the words for it.
+  function mistake(m) {
+    const st = data.stretches[m.at], mine = moves[m.move - 1], before = data.snaps[m.move - 1];
+    const info = lineInfo(m.move - 1, m.line), { len, goal } = info;
+    const early = !!mine.deal && !info.line[0].deal;
+    // (The line player would have turned the same card, after other moves.)
+    const hasty = m.exact && len > 1 && data.shows[m.move - 1] === 'turn' && goal.show === 'turn' && data.snaps[m.move].faceDown[goal.col] < before.faceDown[goal.col];
     const end = m.exact ? m.move : st.to, after = end - m.move;
+    const [played, better] = twoMoves(mine, info.line[0], before);
     return {
-      ...m, st, alt, len, line, goal, end,
+      ...m, st, ...info, end, betterText: [better, info.betterText[1]],
       title: early ? `Move ${m.move}: dealt too early` : hasty ? `Move ${m.move}: a card turned too early` : after ? `Moves ${m.move}–${end}` : `Move ${m.move}`,
-      mine: (mine.deal ? 'dealt' : moveText(mine, before)) + (after ? ` and the ${after > 1 ? `${after} moves` : 'move'} after` : ''),
-      betterText: [first.deal ? 'deal' : moveText(first, before), goes],
+      mine: played + (after ? ` and the ${after > 1 ? `${after} moves` : 'move'} after` : ''),
     };
   }
+
+  // What the line player would play at the position on the board (after t
+  // moves of the game), asked for: shown as a mistake is, but that nothing is
+  // said of what it costs. It is worked out in a worker, ahead of the games
+  // being played out, and kept. `same`: the move played there is its move;
+  // `level`: another, but one that does not leave its line (see track).
+  function advise(t) {
+    if (!advice.has(t)) {
+      const st = data.stretches.find(x => t >= x.from && t < x.to), start = data.snaps[t];
+      const job = { suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock, moves: st ? moves.slice(t, st.to) : [] };
+      advice.set(t, workers.then(() => pool.run({ ask: job }, true)).then(({ asked }) => {
+        const info = lineInfo(t, asked?.line ?? []), mine = moves[t], first = info.line[0];
+        const same = !!mine && !!first && (mine.deal ? !!first.deal : !first.deal && mine.from === first.from && mine.to === first.to && mine.count === first.count);
+        const [played, its] = mine && first ? twoMoves(mine, first, start) : ['', info.betterText[0]];
+        return {
+          ...info, betterText: [its, info.betterText[1]], advice: true, from: t, move: t + 1, end: Math.min(N, t + 1), same, level: !same && !!mine && !!asked && asked.cuts[0]?.at !== 1,
+          none: !asked ? 'A column is too long for the computer player here.' : !info.len ? (start.completed.length === 8 ? 'The game is won.' : 'The computer would give up here.') : '',
+          mine: mine ? played || (mine.deal ? 'dealt' : moveText(mine, start)) : '',
+        };
+      }));
+    }
+    return advice.get(t);
+  }
+
+  function ask() {
+    if (adv && adv.from === step && alt < 0) { adv = null; return show(); } // again: away with it
+    const t = alt >= 0 ? cur().from : step;
+    step = t;
+    alt = -1;
+    adv = { from: t, wait: true };
+    advise(t).then(a => {
+      if (closed || adv?.from !== t || !adv.wait) return; // (the board has gone elsewhere)
+      adv = a;
+      show();
+    });
+    show();
+  }
+
+  // The mistake picked out, or what was asked for in its place: what the views and the other line are of.
+  const cur = () => (adv ? (adv.wait || adv.none ? null : adv) : found?.[selected]);
 
   // ---- drawing
 
@@ -265,8 +324,8 @@ export function open(ctx) {
     // The header's line (its chance may have come since the board was drawn),
     // the line about the move, the progress, the key stretches and the note.
     document.querySelector('#info').innerHTML = review.info;
-    const m = alt >= 0 && found[selected];
-    $('.rv-move').textContent = m ? `The better line, move ${alt} of ${m.len}: ${moveText(m.line[alt - 1], m.alt.snaps[alt - 1])}${alt === m.len && m.goal.show === 'turn' ? ', turning a card' : ''}`
+    const m = alt >= 0 && cur();
+    $('.rv-move').textContent = m ? `${m.advice ? 'The computer\'s' : 'The better'} line, move ${alt} of ${m.len}: ${moveText(m.line[alt - 1], m.alt.snaps[alt - 1])}${alt === m.len && m.goal.show === 'turn' ? ', turning a card' : ''}`
       : describe(step) + (p === undefined ? '' : ` · ${pct(p)}`);
     const frac = Math.min(1, done / total);
     $('.rv-bar').hidden = phase === 'done' || !!failed;
@@ -279,19 +338,33 @@ export function open(ctx) {
     $('.rv-sum').textContent = failed || phase === 'net' || phase === 'value' ? '' : !found ? 'Looking for your biggest mistakes…'
       : !found.length ? `No clear mistakes: no move of yours surely cost ${Math.round(SEARCH.cost * 100)} points or more.`
       : `Your ${found.length > 1 ? `${found.length} biggest mistakes` : 'one clear mistake'}, and what would have been better:`;
-    const html = items.map((m, i) => {
-      const pm = `<span class="pm">±${Math.max(1, Math.round(196 * m.cost.se))}</span>`;
-      const head = `<button type="button" class="rv-head1" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${esc(m.title)}</span><span class="cost${m.sure ? '' : ' pending'}">${m.sure ? '' : 'checking… '}<b>${points(m.cost.mean)}</b>${pm}</span></button>`;
-      if (!m.sure || i !== selected) return `<div class="rv-key${i === selected ? ' sel' : ''}${m.sure ? '' : ' unsure'}">${head}</div>`;
+    // The views of a mistake, or of what was asked for.
+    const views = m => {
       const view = alt < 0 ? (step === m.move ? 'mine' : step === m.move - 1 ? 'before' : '') : alt === m.len - 1 && m.len > 1 ? 'setup' : alt === 1 ? 'better' : '';
       const b = (name, text, title) => `<button type="button" data-view="${name}" title="${title}"${view === name ? ' class="on"' : ''}>${text}</button>`;
+      const its = m.advice ? 'the computer\'s' : 'the better';
+      return `<div class="views">${b('before', m.advice ? 'Here' : 'Before', m.advice ? 'The position asked about' : 'The position before the mistake, with both moves (click the mistake)')}${m.mine ? b('mine', 'Your move', 'The position after your move') : ''}${b('better', m.advice ? 'Its move' : 'Better move', `The position after ${its} move (B)`)}${m.len > 1 ? b('setup', 'What it sets up', `What ${its} move sets up: the position it reaches before the next card is shown (S)`) : ''}</div>`;
+    };
+    // What was asked for comes first.
+    let asked = '';
+    if (adv) {
+      const head = `<div class="rv-head1"><span class="num">?</span><span class="what">${adv.from < N ? `At move ${adv.from + 1}` : 'At the end'}: the computer's choice</span><button type="button" class="shut" data-ask title="Away with it (?)">×</button></div>`;
+      asked = `<div class="rv-key sel asked">${head}<div class="rv-more">${adv.wait ? '<div class="odds"><i class="spin"></i>Thinking…</div>' : adv.none ? `<div class="odds">${adv.none}</div>`
+        : `${adv.same ? `<div class="better"><i></i><span>The same as you played: <b>${esc(adv.betterText[0])}</b>${esc(adv.betterText[1])}</span></div>`
+          : `${adv.mine ? `<div class="you"><i></i><span>You: <b>${esc(adv.mine)}</b>${adv.level ? ' (as good: it comes to the same)' : ''}</span></div>` : ''}<div class="better"><i></i><span>Computer: <b>${esc(adv.betterText[0])}</b>${esc(adv.betterText[1])}</span></div>`}${views(adv)}`}</div></div>`;
+    }
+    const html = asked + items.map((m, i) => {
+      const pm = `<span class="pm">±${Math.max(1, Math.round(196 * m.cost.se))}</span>`;
+      const head = `<button type="button" class="rv-head1" data-key="${i}"><span class="num">${i + 1}</span><span class="what">${esc(m.title)}</span><span class="cost${m.sure ? '' : ' pending'}">${m.sure ? '' : 'checking… '}<b>${points(m.cost.mean)}</b>${pm}</span></button>`;
+      if (!m.sure || i !== selected || adv) return `<div class="rv-key${i === selected && !adv ? ' sel' : ''}${m.sure ? '' : ' unsure'}">${head}</div>`;
       return `<div class="rv-key sel">${head}<div class="rv-more">
           <div class="you"><i></i><span>You: <b>${esc(m.mine)}</b></span></div>
           <div class="better"><i></i><span>Better: <b>${esc(m.betterText[0])}</b>${esc(m.betterText[1])}</span></div>
           <div class="odds">Chance of winning: yours <b>${pct(m.yours)}</b> → better <b>${pct(m.better)}</b></div>
-          <div class="views">${b('before', 'Before', 'The position before the mistake, with both moves (click the mistake)')}${b('mine', 'Your move', 'The position after your move')}${b('better', 'Better move', 'The position after the better move (B)')}${m.len > 1 ? b('setup', 'What it sets up', 'What the better move sets up: the position it reaches before the next card is shown (S)') : ''}</div>
+          ${views(m)}
         </div></div>`;
     }).join('');
+    $('[data-ask]').classList.toggle('on', !!adv);
     if ($('.rv-keys').dataset.html !== html) { // (left alone when nothing changed, so that a click on it is not lost)
       $('.rv-keys').dataset.html = html;
       $('.rv-keys').innerHTML = html;
@@ -330,6 +403,7 @@ export function open(ctx) {
     // The mistake picked out stays so while the board is within it.
     const items = shownItems(), within = m => m && t >= m.from && t <= m.end;
     if (!within(items[selected])) selected = items.findIndex(within);
+    if (adv && t !== adv.from && t !== adv.from + 1) adv = null; // (what was asked for stays for its position and the move played there)
     step = t;
     alt = -1;
     show();
@@ -338,7 +412,7 @@ export function open(ctx) {
   // Along the line the board is on: the game's, or the better line of the
   // mistake picked out (back from its start is the game again).
   function go(d) {
-    const m = found?.[selected];
+    const m = cur();
     if (alt < 0 || !m) return setStep(step + d);
     alt = Math.min(m.len, alt + d);
     if (alt <= 0) alt = -1;
@@ -348,7 +422,8 @@ export function open(ctx) {
   function pick(i) {
     const m = shownItems()[i];
     if (!m) return;
-    step = selected === i && alt < 0 && step === m.from && m.sure ? m.move : m.from; // again: the move
+    step = selected === i && alt < 0 && step === m.from && m.sure && !adv ? m.move : m.from; // again: the move
+    adv = null;
     selected = i;
     alt = -1;
     show();
@@ -356,7 +431,7 @@ export function open(ctx) {
 
   // One of the views of the mistake picked out.
   function view(name) {
-    const m = found?.[selected];
+    const m = cur();
     if (!m) return;
     step = m.from;
     alt = -1;
@@ -395,6 +470,7 @@ export function open(ctx) {
     if ('close' in b.dataset) ctx.close();
     else if (b.dataset.key) pick(+b.dataset.key);
     else if (b.dataset.view) view(b.dataset.view);
+    else if ('ask' in b.dataset) ask();
     else if ('luck' in b.dataset) setStep(luck.t);
     else if (b.dataset.go === 'start') setStep(0);
     else if (b.dataset.go === 'end') setStep(N);
@@ -424,8 +500,9 @@ export function open(ctx) {
     else if (k === 'Home') setStep(0);
     else if (k === 'End') setStep(N);
     else if (k === 'Escape') ctx.close();
-    else if (k === 'b' && found?.[selected]) view(alt === 1 ? 'before' : 'better');
-    else if (k === 's' && found?.[selected]) view(alt >= 0 && alt === found[selected].len - 1 ? 'before' : 'setup');
+    else if (k === 'b' && cur()) view(alt === 1 ? 'before' : 'better');
+    else if (k === 's' && cur()) view(alt >= 0 && alt === cur().len - 1 ? 'before' : 'setup');
+    else if (k === '?' || k === 'c') ask();
     else if (/^[1-9]$/.test(k) && shownItems()[+k - 1]) pick(+k - 1);
     else return;
     e.preventDefault();
@@ -444,6 +521,7 @@ export function open(ctx) {
     if (closed) return;
     const cores = navigator.hardwareConcurrency || 4;
     pool = new Pool(Math.max(1, Math.min(12, cores - 1)), net, e => { failed = `The analysis failed: ${e.message || 'a worker stopped'}`; redraw(); });
+    pooled();
     phase = 'value';
     redraw();
     // The positions where cards came up first, so that the curve is there roughly at once.
@@ -490,26 +568,24 @@ export function open(ctx) {
     found = mistakes.map(m => { const x = mistake(m); return { ...x, sure: true, at: x.move, from: x.move - 1 }; });
     selected = found.findIndex(m => step >= m.from && step <= m.end);
     phase = 'done';
-    seconds = (performance.now() - t0) / 1000;
-    pool.close();
-    pool = null;
+    seconds = (performance.now() - t0) / 1000; // (the workers stay, for what is asked for)
     ctx.render();
     redraw();
   }
   // The move of the better line that the board is about to see played, and
   // at the position before a mistake the move that was played.
   const pending = () => {
-    const m = found?.[selected];
+    const m = cur();
     if (!m) return {};
     if (alt >= 0) return { better: m.line[alt] };
-    return step === m.move - 1 ? { you: moves[m.move - 1], better: m.line[0] } : {};
+    return step === m.move - 1 ? { you: m.same ? undefined : moves[m.move - 1], better: m.line[0] } : {};
   };
   const review = {
-    get shown() { return alt >= 0 ? found[selected].alt.snaps[alt] : data.snaps[step]; },
+    get shown() { return alt >= 0 ? cur().alt.snaps[alt] : data.snaps[step]; },
     // The cards the last move put down: {col, count}.
     get mark() {
-      const snaps = alt >= 0 ? found[selected].alt.snaps : data.snaps, i = alt >= 0 ? alt : step;
-      const mv = i > 0 && (alt >= 0 ? found[selected].line[i - 1] : moves[i - 1]);
+      const snaps = alt >= 0 ? cur().alt.snaps : data.snaps, i = alt >= 0 ? alt : step;
+      const mv = i > 0 && (alt >= 0 ? cur().line[i - 1] : moves[i - 1]);
       if (!mv || mv.deal || snaps[i].completed.length > snaps[i - 1].completed.length) return null;
       return { col: mv.to, count: mv.count };
     },
@@ -518,7 +594,7 @@ export function open(ctx) {
     get dealing() { const p = pending(); return p.better?.deal ? 'better' : p.you?.deal ? 'you' : null; },
     get info() {
       const p = value(step);
-      if (alt >= 0) return `Analysis · the better line at move <b>${found[selected].move}</b>, ${alt} of ${found[selected].len} played`;
+      if (alt >= 0) return `Analysis · the ${cur().advice ? 'computer\'s' : 'better'} line at move <b>${cur().move}</b>, ${alt} of ${cur().len} played`;
       return `Analysis · ${suits === 1 ? '1 suit' : `${suits} suits`} · move <b>${step}</b> of ${N}${p === undefined ? '' : ` · chance of winning <b>${pct(p)}</b>`}`;
     },
     key,

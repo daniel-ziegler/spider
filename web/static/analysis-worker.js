@@ -9,6 +9,7 @@
 //   {id, track: [{suits, columns, faceDown, completed, stock, moves}, ...]}
 //                                    for each position and the moves played from it up to the first that showed
 //                                    cards: where they leave the line player's own (see track); answers {id, tracks: [...]}
+//   {id, ask: {the same}}            the same of one position, and the line player's own line from it; answers {id, asked: {cuts, line}}
 //
 // A roll is {suits, columns, faceDown, completed, stock, moves, seed, from, to, at, reveal}:
 // a position with its real cards, moves played from it (the last of which
@@ -154,8 +155,9 @@ export function roll(job) {
 // move moves[at - 1], and the line player's moves in its place, up to its
 // first that shows cards. None: the moves cost nothing by the line player's
 // measure. (Its lines do not depend on the hidden cards.) Null if a column is
-// too long for it.
-export function track({ suits, columns, faceDown, completed, stock, moves }) {
+// too long for it. With `whole`, {cuts, line}: the departures, and the line
+// player's own line from the position.
+export function track({ suits, columns, faceDown, completed, stock, moves }, whole = false) {
   if (columns.some(c => c.length > MAXC)) return null;
   const cfg = fastConfig(suits), cards = Uint8Array.from(stock), cur = makeState(columns, faceDown, completed);
   let left = cards.length;
@@ -175,6 +177,7 @@ export function track({ suits, columns, faceDown, completed, stock, moves }) {
   };
   const cuts = [];
   let line = lineFrom(), used = 0;
+  const first = line.own;
   for (let j = 1; j <= moves.length; j++) {
     const mv = moves[j - 1], next = line.own[used], down = hidden(cur);
     left = play(cur, cards, left, mv);
@@ -187,14 +190,15 @@ export function track({ suits, columns, faceDown, completed, stock, moves }) {
     line = now;
     used = 0;
   }
-  return cuts;
+  return whole ? { cuts, line: first } : cuts;
 }
 
 if (typeof WorkerGlobalScope !== 'undefined') {
   onmessage = ({ data }) => {
     if (data.net) net = new Net(data.net);
     else if (data.value) postMessage({ id: data.id, values: data.value.map(enc => net.winProb(enc)) });
-    else if (data.track) postMessage({ id: data.id, tracks: data.track.map(track) });
+    else if (data.track) postMessage({ id: data.id, tracks: data.track.map(job => track(job)) });
+    else if (data.ask) postMessage({ id: data.id, asked: track(data.ask, true) });
     else if (data.roll) postMessage({ id: data.id, rolls: roll(data.roll) });
   };
 }

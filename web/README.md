@@ -108,6 +108,13 @@ the better move and `S` for what it sets up, `Esc` to go back).
     winning after each; and on the board the two moves as arrows, red and
     green. One click shows the position the better line reaches just before
     its card is turned or its deal is made, and `→` steps along it.
+  * *At any position* the same can be asked for (**?** beside the arrows, or
+    the `?` or `C` key): the computer player's line from the position on the
+    board, shown as a mistake's better line is, with its first move, what
+    that is for and what it sets up, and whether the move played there was
+    the same or came to the same. Nothing is played out for it; it is worked
+    out in a worker ahead of the games waiting (some 10 to 100 ms, a second
+    at most) and kept, and the workers stay for it when the search is done.
   * *Luck* is one line: the stretch where the network has the cards doing
     most is played out (128 shuffles, after its moves with the shuffle's
     cards and with the real ones, the shuffle's others as they were but for
