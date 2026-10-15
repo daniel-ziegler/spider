@@ -128,6 +128,7 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   const stats = [s(0, 0.06, 16), s(-0.2, 0.1, 16), s(-0.1, 0.03, 256), s(0.02, 0.02, 256), s(-0.06, 0.04, 128)];
   check(nextRound(stats, 10000, { ...SEARCH, group: 2 }).join() === '1,16,4,128' && nextRound(stats, 100, { ...SEARCH, group: 2 }).join() === '1,16,4,32', 'a later round');
   check(nextRound([s(-0.1, 0.03, 256), s(0.02, 0.02, 256)], 10000).length === 0, 'rounds do not end');
+  check(nextRound(stats, 10000, SEARCH, true).join() === '4,128' && nextRound([s(-0.06, 0.05, 128), s(-0.2, 0.1, 32)], 10000, SEARCH, true).length === 0, 'a round for those close to mistakes');
 }
 
 // The search for mistakes, with games that are won by chance: stretch i is
@@ -154,7 +155,7 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   };
   let seen = 0;
   const found = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: fake, update: (c, n) => { check(n >= seen && c.length === made.length - 1, 'the search goes backwards'); seen = n; } });
-  check(seen === games && games <= SEARCH.games + 2 * SEARCH.most * SEARCH.pin, `the search plays ${games} games`);
+  check(seen === games && games <= SEARCH.games + SEARCH.extra + 2 * SEARCH.most * SEARCH.pin, `the search plays ${games} games`);
   check(found.length === 3 && found.map(m => m.at).join() === '3,1,5', `the mistakes found: ${found.map(m => m.at)}`);
   const [one, two, three] = found;
   check(one.exact && one.move === stretches[3].from + 1 && Math.abs(one.cost.mean + 0.4) < 0.08 && Math.abs(one.better - 0.5) < 0.08 && Math.abs(one.yours - 0.1) < 0.08, 'a mistake of one move');
@@ -163,8 +164,9 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   for (const m of found) check(isMistake({ n: m.n, ...m.cost }, SEARCH, 1), 'a mistake that is not surely one');
   // With every game the same there are none, and the games are not all played.
   games = 0;
-  const flat = await findMistakes({ stretches, cuts, job: i => ({ i: 2 }), roll: fake });
-  check(flat.length === 0 && games < SEARCH.games, `no mistakes to find: ${flat.length} found in ${games} games`);
+  const same = job => { games += job.at.length * (job.to - job.from); return Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 5 < 2 ? (1 << job.at.length) - 1 : 0))); };
+  const flat = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: same });
+  check(flat.length === 0 && games <= SEARCH.games, `no mistakes to find: ${flat.length} found in ${games} games`);
   // The cards' part: the real cards against the world's.
   const luck = await measureLuck({ st: stretches[0], job: {}, roll: job => Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 4 ? 1 : 3))) });
   check(luck.n === SEARCH.luck && Math.abs(luck.mean + 0.75) < 1e-12 && luck.a === 1 && luck.b === 0.25, 'the cards\' part');

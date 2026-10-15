@@ -92,9 +92,10 @@ the better move and `S` for what it sets up, `Esc` to go back).
     each (from its start and from its end); then, round by round, the six
     that look worst and are not settled get as many again, up to 512. A
     candidate is settled when it is surely a mistake (256 shuffles or more, a
-    loss of at least three points and at least 2.5 standard errors) or
+    loss of at least five points and at least 2.5 standard errors) or
     cannot well become one. This goes on until all are settled or 4,400
-    games are played. What is not surely a mistake by then is not listed: a
+    games are played, and for up to 1,600 more while a candidate is close
+    (a loss of five points, one and a half standard errors, 64 shuffles). What is not surely a mistake by then is not listed: a
     game may have none, and the page then says so.
   * *Which move.* A stretch with several departures is cut in two at one in
     its middle, games are played from there in 256 of the same shuffles, and
@@ -121,8 +122,8 @@ the better move and `S` for what it sets up, `Esc` to go back).
   `analysis.js`, to be raised when they change). The GPU is not used: valuing
   a game's 300 to 500 positions takes about two seconds on eight workers, and nine tenths of
   the time goes to playing games out, which is a search and not arithmetic.
-  The mistakes take at most some 5,500 games played out (4,400 to find
-  them, the rest to put them to their moves and for the luck).
+  The mistakes take at most some 7,000 games played out (4,400 to 6,000 to
+  find them, the rest to put them to their moves and for the luck).
 * `cargo test` in the repository root compares the port of the player with
   the Rust on 48 deals (`GAMES=250` in the environment for 1,000: moves and
   positions searched are the same), the network's values with PyTorch's

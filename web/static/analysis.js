@@ -116,7 +116,7 @@ export function open(ctx) {
   let step = N, selected = -1, hover = -1;
   let alt = -1; // the board is on the selected mistake's better line, after this many of its moves (-1: on the game's)
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
-  const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
+  const total = data.jobs.length + (SEARCH.games + SEARCH.extra) * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
 
@@ -172,6 +172,8 @@ export function open(ctx) {
     const alt = branch(suits, seed, moves, m.move - 1, m.line), len = alt.snaps.length - 1, line = m.line.slice(0, len);
     const goal = alt.shows[len - 1] ?? { show: null }, first = line[0];
     const early = !!mine.deal && !first.deal;
+    // (The line player would have turned the same card, after other moves.)
+    const hasty = m.exact && len > 1 && data.shows[m.move - 1] === 'turn' && goal.show === 'turn' && data.snaps[m.move].faceDown[goal.col] < before.faceDown[goal.col];
     const n = len - 2, between = n > 0 ? `${n} more move${n > 1 ? 's' : ''}` : '';
     let goes = '';
     if (goal.show === 'turn') goes = len === 1 ? `, turning the card in column ${goal.col + 1}` : `, then ${between ? `${between} to ` : ''}turn the card in column ${goal.col + 1}`;
@@ -180,7 +182,7 @@ export function open(ctx) {
     const end = m.exact ? m.move : st.to, after = end - m.move;
     return {
       ...m, st, alt, len, line, goal, end,
-      title: early ? `Move ${m.move}: dealt too early` : after ? `Moves ${m.move}–${end}` : `Move ${m.move}`,
+      title: early ? `Move ${m.move}: dealt too early` : hasty ? `Move ${m.move}: a card turned too early` : after ? `Moves ${m.move}–${end}` : `Move ${m.move}`,
       mine: (mine.deal ? 'dealt' : moveText(mine, before)) + (after ? ` and the ${after > 1 ? `${after} moves` : 'move'} after` : ''),
       betterText: [first.deal ? 'deal' : moveText(first, before), goes],
     };
@@ -275,7 +277,7 @@ export function open(ctx) {
       : `Done in ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`);
     const items = shownItems();
     $('.rv-sum').textContent = failed || phase === 'net' || phase === 'value' ? '' : !found ? 'Looking for your biggest mistakes…'
-      : !found.length ? 'No clear mistakes: no move of yours surely cost three points or more.'
+      : !found.length ? `No clear mistakes: no move of yours surely cost ${Math.round(SEARCH.cost * 100)} points or more.`
       : `Your ${found.length > 1 ? `${found.length} biggest mistakes` : 'one clear mistake'}, and what would have been better:`;
     const html = items.map((m, i) => {
       const pm = `<span class="pm">±${Math.max(1, Math.round(196 * m.cost.se))}</span>`;

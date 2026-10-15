@@ -126,15 +126,17 @@ export function stretchValues(st, values, won, last, suits = 0) {
 // out. Only what is then surely a loss is called a mistake.
 //
 // The numbers are in games played out, since the time is theirs: `games` for
-// finding the mistakes, at most `most` * 2 * `pin` more for putting each to a
-// move, and 2 * `luck` for the cards' biggest swing.
+// finding the mistakes (and `extra` where some are nearly found), at most
+// `most` * 2 * `pin` more for putting each to a move, and 2 * `luck` for the
+// cards' biggest swing.
 export const SEARCH = {
   games: 4400, // games played out to find the mistakes
+  extra: 1600, // more of them, only for candidates that are then close to being surely mistakes
   round: 16, // worlds in a piece of work, and for each candidate at first
   group: 6, // candidates given more worlds in a round (as many again as each has)
   cap: 512, // worlds for a candidate at most
   least: 256, // worlds a mistake needs behind it
-  cost: 0.03, // a mistake costs at least this much of the chance of winning
+  cost: 0.05, // a mistake costs at least this much of the chance of winning
   z: 2.5, // and is this many standard errors from costing nothing
   most: 5, // mistakes shown
   pin: 256, // worlds for putting a mistake to one move of its stretch
@@ -174,8 +176,10 @@ export function hopeless(d, opt = SEARCH) {
 // more], ...]: at first the first worlds for all, then as many again for the
 // `group` candidates that look worst (by their mean less one standard error)
 // among those not yet settled (surely a mistake, or surely not one to be
-// found); nothing when all are settled or the games are spent.
-export function nextRound(stats, left, opt = SEARCH) {
+// found); nothing when all are settled or the games are spent. With `close`
+// only those count that are nearly mistakes already: a loss of `cost`, one
+// and a half standard errors from nothing, in 64 worlds or more.
+export function nextRound(stats, left, opt = SEARCH, close = false) {
   const out = [];
   const give = (i, more) => {
     more = Math.min(more, Math.floor(left / 2 / opt.round) * opt.round);
@@ -185,6 +189,7 @@ export function nextRound(stats, left, opt = SEARCH) {
   else {
     stats.map((d, i) => [d.mean - d.se, i])
       .filter(([, i]) => !hopeless(stats[i], opt) && !isMistake(stats[i], opt) && stats[i].n < opt.cap)
+      .filter(([, i]) => !close || (stats[i].n >= 64 && stats[i].mean <= -opt.cost && stats[i].mean + 1.5 * stats[i].se <= 0))
       .sort((a, b) => a[0] - b[0] || a[1] - b[1])
       .slice(0, opt.group)
       .forEach(([, i]) => give(i, Math.min(stats[i].n, opt.cap - stats[i].n)));
@@ -233,7 +238,9 @@ export async function findMistakes({ stretches, cuts, job, roll, update = () => 
     await Promise.all(work);
   };
   for (;;) {
-    const round = nextRound(cands.map(c => c.stat), opt.games - spent, opt);
+    const stats = cands.map(c => c.stat);
+    let round = nextRound(stats, opt.games - spent, opt);
+    if (!round.length) round = nextRound(stats, opt.games + opt.extra - spent, opt, true);
     if (!round.length) break;
     await Promise.all(round.map(([i, more]) => {
       const c = cands[i];
