@@ -2,10 +2,11 @@
 //! JavaScript must pass (web/test/analysis.mjs: the stretches of a game, the
 //! shuffled worlds its games are played out in, their statistics;
 //! web/test/vnet.mjs: the network's forward pass against PyTorch), and the
-//! positions it encodes for the network must be encoded as src/vnet.rs does,
-//! which the networks were trained on.
+//! positions it encodes for the network (with the cards a deal brings not
+//! yet known, too) must be encoded as src/vnet.rs does, which the network
+//! was trained on.
 use spider::game::{parse_moves, Game};
-use spider::vnet::encode_game;
+use spider::vnet::{encode_dealt, encode_game};
 
 fn node(script: &str) -> String {
     let out = std::process::Command::new("node").arg(script).output().expect("node is needed for this test");
@@ -17,17 +18,20 @@ fn node(script: &str) -> String {
 fn analysis_checks_pass_and_encodings_match() {
     let text = node("web/test/analysis.mjs");
     let mut count = 0;
-    for line in text.lines().filter(|l| l.starts_with("enc ")) {
+    let mut dealt = 0;
+    for line in text.lines().filter(|l| l.starts_with("enc ") || l.starts_with("dealt ")) {
         let f: Vec<&str> = line.split(' ').collect();
         let mut g = Game::new(f[1].parse().unwrap(), f[2].parse().unwrap());
         for mv in parse_moves(f[3]).unwrap() {
             g.apply(mv).unwrap();
         }
-        let ours: String = encode_game(&g).iter().map(|b| format!("{b:02x}")).collect();
+        dealt += (f[0] == "dealt") as usize;
+        let enc = if f[0] == "dealt" { encode_dealt(&g) } else { encode_game(&g) };
+        let ours: String = enc.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(ours, f[4], "{}/{} after {} moves", f[1], f[2], f[3].split(',').count());
         count += 1;
     }
-    assert!(count >= 60, "only {count} encodings compared");
+    assert!(count >= 60 && dealt >= 12, "only {count} encodings compared, {dealt} of them after a deal");
     assert!(text.ends_with("ok\n"));
 }
 

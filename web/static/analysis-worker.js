@@ -3,7 +3,7 @@
 // the line player (lineplayer.js), neither of which sees a face-down card.
 //
 // Messages to it:
-//   {net: ArrayBuffer}               the network's file, first
+//   {net: ArrayBuffer, suits}        the network's file and the game's number of suits, first
 //   {id, value: [enc, ...]}          positions, encoded (vnet.js); answers {id, values: [p, ...]}
 //   {id, roll: {...}}                games played out in some worlds; answers         {id, rolls: [...]}
 //   {id, track: [{suits, columns, faceDown, completed, stock, moves}, ...]}
@@ -24,7 +24,7 @@
 // games (common random numbers) make the differences between them far less
 // noisy than the rates. The answer has a byte per world, a bit for each game.
 import { Net } from './vnet.js';
-import { NUM_COLS, MAXC, LEN, DOWN, DONE, fastConfig, makeState, applyMove, removeIfComplete, playOut } from './lineplayer.js';
+import { NUM_COLS, MAXC, LEN, DOWN, DONE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut } from './lineplayer.js';
 
 let net = null;
 
@@ -120,7 +120,7 @@ function play(s, stock, left, mv) {
 // the world's cards coming up), and, with `reveal`, the next bit whether it
 // won after all the moves with the cards that really came up.
 export function roll(job) {
-  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false } = job, cfg = fastConfig(suits);
+  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false } = job, cfg = rolloutConfig(suits);
   const { real, shown, game } = setup(job);
   const won = g => (g && playOut(g.s, g.stock, cfg).won ? 1 : 0);
   const out = new Uint8Array(to - from);
@@ -159,7 +159,7 @@ export function roll(job) {
 // player's own line from the position.
 export function track({ suits, columns, faceDown, completed, stock, moves }, whole = false) {
   if (columns.some(c => c.length > MAXC)) return null;
-  const cfg = fastConfig(suits), cards = Uint8Array.from(stock), cur = makeState(columns, faceDown, completed);
+  const cfg = rolloutConfig(suits), cards = Uint8Array.from(stock), cur = makeState(columns, faceDown, completed);
   let left = cards.length;
   const hidden = s => { let n = 0; for (let c = 0; c < NUM_COLS; c++) n += s[DOWN + c]; return n; };
   const lineFrom = () => {
@@ -195,7 +195,7 @@ export function track({ suits, columns, faceDown, completed, stock, moves }, who
 
 if (typeof WorkerGlobalScope !== 'undefined') {
   onmessage = ({ data }) => {
-    if (data.net) net = new Net(data.net);
+    if (data.net) net = new Net(data.net, data.suits);
     else if (data.value) postMessage({ id: data.id, values: data.value.map(enc => net.winProb(enc)) });
     else if (data.track) postMessage({ id: data.id, tracks: data.track.map(job => track(job)) });
     else if (data.ask) postMessage({ id: data.id, asked: track(data.ask, true) });

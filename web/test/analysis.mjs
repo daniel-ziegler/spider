@@ -1,11 +1,12 @@
 // Checks of the analysis's parts that are not the page (static/analysis-core.js,
 // static/analysis-worker.js); the repository root's `cargo test` runs this.
 // It fails by throwing. It also prints lines "enc suits seed moves hex": the
-// network's encoding of positions from play, which the test compares with
-// what src/vnet.rs encodes.
+// network's encoding of positions from play, and "dealt ...": that of the
+// position after the moves and a deal with the cards dealt not yet known,
+// which the test compares with what src/vnet.rs encodes.
 import { Game, encodeMoves } from '../static/game.js';
-import { fastConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
-import { prepare, stretchValues, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, SEARCH, DEAL_SAMPLES } from '../static/analysis-core.js';
+import { rolloutConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
+import { prepare, stretchValues, committed, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, SEARCH, BIAS } from '../static/analysis-core.js';
 import { random, shuffled, showReal, setup, roll, track } from '../static/analysis-worker.js';
 
 const check = (ok, what) => { if (!ok) throw new Error(what); };
@@ -13,7 +14,7 @@ const check = (ok, what) => { if (!ok) throw new Error(what); };
 // A game of the line player's, analysed.
 function played(suits, seed) {
   const g = new Game(suits, seed), moves = [];
-  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), fastConfig(suits), moves);
+  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), rolloutConfig(suits), moves);
   return moves;
 }
 
@@ -29,19 +30,22 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   }
   check(at === moves.length && data.snaps.length === moves.length + 1, 'stretches do not cover the game');
   const turns = data.shows.filter(s => s === 'turn').length, deals = data.shows.filter(s => s === 'deal').length;
-  check(data.jobs.length === moves.length + 1 + turns + deals * DEAL_SAMPLES, 'the wrong number of positions to value');
+  check(data.jobs.length === moves.length + 1 + turns + deals, 'the wrong number of positions to value');
   check(new Set(data.jobs.map(j => j.key)).size === data.jobs.length, 'a position is valued twice');
   // A position with a turned card unknown has a 2 there and is otherwise the position.
+  // After a deal the ten cards dealt are 2s (but for one that completed a suit), and nothing else differs.
   for (const job of data.jobs.filter(j => j.key[0] === 'u')) {
-    const known = data.jobs.find(j => j.key === `p${job.key.slice(1)}`).enc;
+    const t = +job.key.slice(1), known = data.jobs.find(j => j.key === `p${t}`).enc;
     const diff = [...job.enc].flatMap((v, i) => (v !== known[i] ? [[v, known[i]]] : []));
-    check(diff.length >= 1 && diff.every(([v, k]) => v === 2 && k >= 3), 'an unknown card is not what differs');
+    if (data.shows[t - 1] === 'turn') check(diff.length >= 1 && diff.every(([v, k]) => v === 2 && k >= 3), 'an unknown card is not what differs');
+    else if (data.snaps[t].completed.length === data.snaps[t - 1].completed.length) check(diff.length === 10 && diff.every(([v, k]) => v === 2 && k >= 3), 'the cards dealt are not what differs');
   }
   // The encodings, for the Rust to compare (every seventh position).
   const g = new Game(suits, seed);
   moves.forEach((mv, i) => {
     g.apply(mv);
     if (i % 7 === 0) console.log(`enc ${suits} ${seed} ${encodeMoves(moves.slice(0, i + 1))} ${Buffer.from(data.jobs.find(j => j.key === `p${i + 1}`).enc).toString('hex')}`);
+    if (moves[i + 1]?.deal) console.log(`dealt ${suits} ${seed} ${encodeMoves(moves.slice(0, i + 1))} ${Buffer.from(data.jobs.find(j => j.key === `u${i + 2}`).enc).toString('hex')}`);
   });
 
   // The line player's own moves leave its line nowhere. A deal in place of a
@@ -57,6 +61,9 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
       check(cuts.length === 1 && cuts[0].at === 1 && encodeMoves(cuts[0].line) === encodeMoves(own), 'a deal too early is not seen, or not with what was better');
       const alt = branch(suits, seed, moves, st.from, cuts[0].line), last = alt.shows[alt.shows.length - 1];
       check(alt.snaps.length === own.length + 1 && last.show === 'turn' && alt.snaps[own.length].faceDown[last.col] === start.faceDown[last.col] - 1, 'the better line does not end with its card turned');
+      // What the network is asked of the line player's line then is the game's own position there, its card not yet known.
+      const asks = screenJobs(suits, seed, [...moves.slice(0, st.from), { deal: true }], [{ from: st.from, to: st.from + 1, shows: 'deal' }], [cuts]);
+      check(asks.length === 1 && asks[0].at === 0 && asks[0].shows === 'turn' && asks[0].enc.join() === data.jobs.find(j => j.key === `u${st.to}`).enc.join(), 'the position to compare a departure with');
     }
   });
   // Worlds: in every stretch that shows cards, a world made to show the real
@@ -120,15 +127,18 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   check(d.n === 100 && Math.abs(d.a - 0.6) < 1e-12 && Math.abs(d.b - 0.3) < 1e-12 && Math.abs(d.mean + 0.3) < 1e-12 && Math.abs(d.se - Math.sqrt(0.3 * 0.7 / 99)) < 1e-12, 'a paired difference');
   check(paired(a, b, 30).mean === 0 && paired(a, b, 30).se === 1 / 30 && paired([], []).n === 0, 'a paired difference of few worlds');
   const s = (mean, se, n) => ({ n, mean, se });
-  check(isMistake(s(-0.1, 0.03, 256)) && !isMistake(s(-0.1, 0.03, 128)) && !isMistake(s(-0.1, 0.05, 512)) && !isMistake(s(-0.02, 0.001, 512)), 'what a mistake is');
+  check(paired(a, b, Infinity, 60).mean === 0 && paired(a, b, Infinity, 60).n === 40 && paired(a, b, 60, 20).n === 40, 'a paired difference of some worlds');
+  check(isMistake(s(-0.1, 0.03, 128)) && !isMistake(s(-0.1, 0.03, 64)) && !isMistake(s(-0.1, 0.05, 512)) && !isMistake(s(-0.02, 0.001, 512)), 'what a mistake is');
   check(!hopeless(s(0, 0.0625, 16)) && !hopeless(s(-0.05, 0.04, 128)) && hopeless(s(0.01, 0.02, 256)) && hopeless(s(-0.04, 0.02, 512)) && !hopeless(s(-0.06, 0.02, 512)), 'what is given up');
-  // Rounds: all first, then the worst-looking that are not settled, doubled, within the games left.
+  // Rounds: the first candidates in their order first; then the worst-looking that are not settled, doubled, and the next to come in where those are few; within the games left.
   const none = s(0, Infinity, 0);
-  check(nextRound([none, none, none], 1000).join() === '0,16,1,16,2,16' && nextRound([none, none, none], 70).join() === '0,16,1,16', 'the first round');
-  const stats = [s(0, 0.06, 16), s(-0.2, 0.1, 16), s(-0.1, 0.03, 256), s(0.02, 0.02, 256), s(-0.06, 0.04, 128)];
-  check(nextRound(stats, 10000, { ...SEARCH, group: 2 }).join() === '1,16,4,128' && nextRound(stats, 100, { ...SEARCH, group: 2 }).join() === '1,16,4,32', 'a later round');
-  check(nextRound([s(-0.1, 0.03, 256), s(0.02, 0.02, 256)], 10000).length === 0, 'rounds do not end');
-  check(nextRound(stats, 10000, SEARCH, true).join() === '4,128' && nextRound([s(-0.06, 0.05, 128), s(-0.2, 0.1, 32)], 10000, SEARCH, true).length === 0, 'a round for those close to mistakes');
+  check(nextRound([none, none, none], [0, 1, 2], 1000).join() === '0,32,1,32,2,32' && nextRound([none, none, none], [0, 1, 2], 70).join() === '0,32', 'the first round');
+  check(nextRound([none, none, none], [2, 0, 1], 1000, { ...SEARCH, start: 2 }).join() === '2,32,0,32', 'the first round is not in the order given');
+  const stats = [s(0, 0.06, 32), s(-0.2, 0.1, 32), s(-0.1, 0.03, 256), s(0.02, 0.02, 256), s(-0.06, 0.04, 128), none];
+  const order = [0, 1, 2, 3, 4, 5];
+  check(nextRound(stats, order, 10000, { ...SEARCH, group: 2 }).join() === '1,32,4,128' && nextRound(stats, order, 100, { ...SEARCH, group: 2 }).join() === '1,32,4,16', 'a later round');
+  check(nextRound([s(-0.1, 0.03, 256), s(0.02, 0.02, 256), s(-0.2, 0.1, 32), none, none], [4, 0, 1, 2, 3], 10000, { ...SEARCH, group: 2 }).join() === '2,32,4,32', 'the next does not come in');
+  check(nextRound([s(-0.1, 0.03, 256), s(0.02, 0.02, 256)], [0, 1], 10000).length === 0, 'rounds do not end');
 }
 
 // The search for mistakes, with games that are won by chance: stretch i is
@@ -138,11 +148,12 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   // [the chance after 0, 1, ... moves, the departures from the line player's line]
   const made = [
     [[0.5, 0.5, 0.5], [1]], // a departure that costs nothing
-    [[0.6, 0.6, 0.6, 0.35, 0.35], [1, 3, 4]], // the second of three is a mistake
+    [[0.7, 0.7, 0.7, 0.35, 0.35], [1, 3, 4]], // the second of three is a mistake
     [[0.4, 0.4], []], // the line player's own moves
-    [[0.5, 0.1], [1]], // one move, a mistake
+    [[0.6, 0.05], [1]], // one move, a mistake
     [[0.5, 0.49, 0.48, 0.47], [1, 2, 3]], // too little to be one
-    [[0.7, 0.69, 0.68, 0.67, 0.66, 0.65, 0.64, 0.63, 0.62, 0.61, 0.6], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], // a loss of ten moves, none surely one by itself
+    [[0.7, 0.68, 0.66, 0.64, 0.62, 0.6, 0.58, 0.56, 0.54, 0.52, 0.5], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], // a large loss of ten moves, none surely one by itself
+    [[0.6, 0.58, 0.56, 0.53], [1, 2, 3]], // a small loss of three moves: nothing to show
     ...Array.from({ length: 30 }, () => [[0.3, 0.31, 0.3], [1, 2]]),
   ];
   let at = 0, games = 0;
@@ -155,13 +166,18 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   };
   let seen = 0;
   const found = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: fake, update: (c, n) => { check(n >= seen && c.length === made.length - 1, 'the search goes backwards'); seen = n; } });
-  check(seen === games && games <= SEARCH.games + SEARCH.extra + 2 * SEARCH.most * SEARCH.pin, `the search plays ${games} games`);
+  check(seen === games && games <= SEARCH.games + SEARCH.most * (8 * SEARCH.pin + 2 * SEARCH.fresh), `the search plays ${games} games`);
   check(found.length === 3 && found.map(m => m.at).join() === '3,1,5', `the mistakes found: ${found.map(m => m.at)}`);
   const [one, two, three] = found;
-  check(one.exact && one.move === stretches[3].from + 1 && Math.abs(one.cost.mean + 0.4) < 0.08 && Math.abs(one.better - 0.5) < 0.08 && Math.abs(one.yours - 0.1) < 0.08, 'a mistake of one move');
-  check(two.exact && two.move === stretches[1].from + 3 && two.line[0].count === 3 && Math.abs(two.cost.mean + 0.25) < 0.08, 'a mistake is not put to its move');
-  check(!three.exact && three.move === stretches[5].from + 1 && Math.abs(three.cost.mean + 0.1) < 0.06, 'a loss of several moves');
-  for (const m of found) check(isMistake({ n: m.n, ...m.cost }, SEARCH, 1), 'a mistake that is not surely one');
+  check(one.exact && one.move === stretches[3].from + 1 && Math.abs(one.cost.mean + 0.55) < 0.1 && Math.abs(one.better - 0.6) < 0.1 && Math.abs(one.yours - 0.05) < 0.1, 'a mistake of one move');
+  check(two.exact && two.move === stretches[1].from + 3 && two.line[0].count === 3 && Math.abs(two.cost.mean + 0.35) < 0.1, 'a mistake is not put to its move');
+  check(!three.exact && three.move === stretches[5].from + 1 && Math.abs(three.cost.mean + 0.2) < 0.1, 'a loss of several moves');
+  for (const m of found) check(m.n === SEARCH.fresh && m.cost.mean < 0, 'a loss not measured in fresh worlds');
+  // The order the network gives says where the games go: with few of them, the one mistake it puts first is found, and without it none.
+  const few = { ...SEARCH, games: 300, start: 1, group: 1 };
+  const led = await findMistakes({ stretches, cuts, prior: made.map((_, i) => (i === 3 ? -0.3 : 0)), job: i => ({ i }), roll: fake, opt: few });
+  const blind = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: fake, opt: few });
+  check(led.length === 1 && led[0].at === 3 && blind.length === 0, `the network's order is not followed: ${led.map(m => m.at)}, ${blind.map(m => m.at)}`);
   // With every game the same there are none, and the games are not all played.
   games = 0;
   const same = job => { games += job.at.length * (job.to - job.from); return Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 5 < 2 ? (1 << job.at.length) - 1 : 0))); };
@@ -177,6 +193,15 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   const v = stretchValues({ from: 3, to: 4, shows: 'turn' }, new Map([['p3', 0.5], ['u4', 0.4], ['p4', 0.7]]), true, 4);
   check(v.end === 1 && Math.abs(v.play + 0.1) < 1e-12 && Math.abs(v.luck - 0.6) < 1e-12, 'a won game is worth 1');
   const w = stretchValues({ from: 3, to: 4, shows: 'turn' }, new Map([['p3', 0.5], ['u4', 0.4], ['p4', 0.7]]), false, 4, 4);
-  check(w.commit < 0.4 && w.commit > 0.37 && Math.abs(w.play + w.luck - 0.2) < 1e-12 && w.bias === 0, 'the bias of an unknown card');
+  check(Math.abs(w.commit - 0.4 + BIAS[4][0]) < 1e-12 && Math.abs(w.play + w.luck - 0.2) < 1e-12, 'the bias of an unknown card');
+  const d = stretchValues({ from: 3, to: 4, shows: 'deal' }, new Map([['p3', 0.5], ['u4', 0.4], ['p4', 0.7]]), false, 4, 4);
+  check(Math.abs(d.commit - 0.4 + BIAS[4][1]) < 1e-12, 'the bias of a deal not yet known');
+}
+// What the network makes a stretch cost: its end against the line player's, cards unknown on both sides.
+{
+  const sts = [{ from: 0, to: 2, shows: 'turn' }, { from: 2, to: 3, shows: 'deal' }, { from: 3, to: 5, shows: null }];
+  const vals = new Map([['u2', 0.5], ['u3', 0.4], ['p5', 0.3]]), theirs = new Map([[0, { value: 0.6, shows: 'turn' }], [1, { value: 0.45, shows: 'turn' }]]);
+  const lost = screen(sts, vals, theirs, false, 5, 4), won = screen(sts, vals, theirs, true, 5, 4);
+  check(Math.abs(lost[0] + 0.1) < 1e-12 && Math.abs(lost[1] - (0.4 - BIAS[4][1] - 0.45 + BIAS[4][0])) < 1e-12 && lost[2] === -1 && won[2] === 0, 'the network\'s order');
 }
 console.log('ok');

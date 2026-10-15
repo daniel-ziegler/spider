@@ -656,7 +656,8 @@ const DEAL = 'deal', STUCK = 'stuck';
 // What to do in the position `root` with this many deals left
 // (decide_steps in lines.rs): a line's moves, DEAL or STUCK. `visited` has
 // the keys of the positions never to return to, `tempo.dealing` says that the
-// player is about to deal, `tempo.work` counts the positions looked at (those
+// player is about to deal (and tempo.turns comes to say whether the line
+// chosen turns a card), `tempo.work` counts the positions looked at (those
 // of the expectimax apart, as in the Rust). `unseen` is asked for the cards
 // not seen (see expectFlips) if they are needed.
 function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
@@ -672,7 +673,7 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
       const sc = scored(k, 0, cfg.empty);
       if (sc > bestScore && fresh(k)) { best = k; bestScore = sc; }
     }
-    if (best) return lineTo(best);
+    if (best) { tempo.turns = leaf[best] === 1; return lineTo(best); }
   }
   // About to deal or, with the stock gone, to give up.
   const dealValue = k => { const v = scored(k, 1, empty); return v > LOST && leaf[k] ? v + cfg.dealFlip : v; };
@@ -683,6 +684,7 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
   }
   if (best) {
     tempo.dealing = true;
+    tempo.turns = leaf[best] === 1;
     return lineTo(best);
   }
   if (dealsLeft === 0) return STUCK;
@@ -700,11 +702,24 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
     return at && most > LOST ? at : 0;
   };
   let k = fill();
-  if (k) return lineTo(k);
+  if (k) { tempo.turns = leaf[k] === 1; return lineTo(k); }
   search(root, cfg, 3, Math.max(cfg.beam, 100));
   tempo.work += count;
   k = fill();
-  return k ? lineTo(k) : STUCK;
+  if (!k) return STUCK;
+  tempo.turns = leaf[k] === 1;
+  return lineTo(k);
+}
+
+// What the player would do next in the position `s`, in which every face-up
+// card is known, with this many deals left, starting afresh there (next_kind
+// in ../../src/vnet.rs, for the analysis's network): 1 a line that raises the
+// score, 2 one that turns a card, 3 and 4 the same about to deal (or, with
+// the stock gone, to give up), 5 a deal, 6 nothing.
+export function nextKind(s, dealsLeft, cfg) {
+  const tempo = { dealing: false, turns: false, work: 0 };
+  const d = decide(s, dealsLeft, new Set(), tempo, cfg, null);
+  return d === STUCK ? 6 : d === DEAL ? 5 : 1 + (tempo.turns ? 1 : 0) + (tempo.dealing ? 2 : 0);
 }
 
 // Play the game on from the position `s`, changing it, with the stock (dealt

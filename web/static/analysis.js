@@ -18,31 +18,31 @@
 //      up, also before they were known): the curve.
 //   2. The mistakes are found by playing games out in shuffles of the cards
 //      the player had not seen, from before the player's moves (the line
-//      player choosing its own) and from after them: see findMistakes in
+//      player choosing its own) and from after them, in the order the
+//      network gives the stretches (screen): see findMistakes in
 //      analysis-core.js, which has what is computed; this file has the
 //      workers and the page.
-import { prepare, stretchValues, findMistakes, measureLuck, branch, SEARCH } from './analysis-core.js';
+import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, SEARCH } from './analysis-core.js';
 
-const NET_VERSION = 1; // in the networks' address, which is cached for good: change it with them
+const NET_VERSION = 2; // in the network's address, which is cached for good: change it with the network
 const VALUES = 6; // positions valued in one piece of work
 const ROLL_WEIGHT = 3; // a game played out against a position's valuing, for the progress bar
 
-const nets = new Map(); // suits -> the promise of the network's bytes
-function fetchNet(suits) {
-  if (!nets.has(suits)) {
-    const p = fetch(`/nets/v${suits}.bin?${NET_VERSION}`).then(res => {
+let fetched = null; // the promise of the network's bytes (one network for every number of suits)
+function fetchNet() {
+  if (!fetched) {
+    fetched = fetch(`/nets/value.bin?${NET_VERSION}`).then(res => {
       if (!res.ok) throw new Error(res.statusText);
       return res.arrayBuffer();
     });
-    p.catch(() => nets.delete(suits));
-    nets.set(suits, p);
+    fetched.catch(() => { fetched = null; });
   }
-  return nets.get(suits);
+  return fetched;
 }
 
 // Workers that take one piece of work at a time, in the order given.
 class Pool {
-  constructor(n, net, onError) {
+  constructor(n, net, suits, onError) {
     this.queue = [];
     this.jobs = new Map();
     this.nextId = 1;
@@ -50,7 +50,7 @@ class Pool {
     this.workers = Array.from({ length: n }, () => {
       const w = new Worker('/analysis-worker.js', { type: 'module' });
       const copy = net.slice(0);
-      w.postMessage({ net: copy }, [copy]);
+      w.postMessage({ net: copy, suits }, [copy]);
       w.onmessage = ({ data }) => {
         const resolve = this.jobs.get(data.id);
         this.jobs.delete(data.id);
@@ -121,7 +121,7 @@ export function open(ctx) {
   let pooled; // (called when the workers are there)
   const workers = new Promise(resolve => { pooled = resolve; });
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
-  const total = data.jobs.length + (SEARCH.games + SEARCH.extra) * ROLL_WEIGHT;
+  const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
 
@@ -517,10 +517,10 @@ export function open(ctx) {
     await style();
     ctx.render(); // the board has less room now
     redraw();
-    const net = await fetchNet(suits);
+    const net = await fetchNet();
     if (closed) return;
     const cores = navigator.hardwareConcurrency || 4;
-    pool = new Pool(Math.max(1, Math.min(12, cores - 1)), net, e => { failed = `The analysis failed: ${e.message || 'a worker stopped'}`; redraw(); });
+    pool = new Pool(Math.max(1, Math.min(12, cores - 1)), net, suits, e => { failed = `The analysis failed: ${e.message || 'a worker stopped'}`; redraw(); });
     pooled();
     phase = 'value';
     redraw();
@@ -559,8 +559,16 @@ export function open(ctx) {
       const st = data.stretches[swing[1]];
       if (Math.abs(d.mean) >= 0.05 && Math.abs(d.mean) >= 2 * d.se) luck = { t: st.to, show: st.shows, mean: d.mean, se: d.se };
     }) : null;
+    // Where to look first: what the network makes each candidate cost (see screen).
+    const theirs = new Map(), asks = screenJobs(suits, seed, moves, data.stretches, cuts);
+    await Promise.all(Array.from({ length: Math.ceil(asks.length / VALUES) }, async (_, i) => {
+      const batch = asks.slice(VALUES * i, VALUES * i + VALUES);
+      const { values: out } = await pool.run({ value: batch.map(j => j.enc) });
+      batch.forEach((j, k) => theirs.set(j.at, { value: out[k], shows: j.shows }));
+    }));
+    if (closed) return;
     const mistakes = await findMistakes({
-      stretches: data.stretches, cuts, job, roll,
+      stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits),
       update: (c, n) => { cands = c; spent = n; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
     });
     await lucky;

@@ -49,12 +49,15 @@ drag on the plot, `←` `→`, `↑` `↓` or the digits for the mistakes, `B` f
 the better move and `S` for what it sets up, `Esc` to go back).
 
 * **Whose chance.** That of a computer player that sees only the cards face
-  up and takes nothing back: the line player of the main README in a cheap
-  configuration (`LineConfig::fast`: six-step lines, a beam of 50, no
-  expectimax; it wins 87%, 63%, 44% and 26% of deals with one to four suits,
-  the full player 88%, 70%, 54% and 39%, at a thirtieth of the work with four
-  suits). `static/lineplayer.js` is a port of it that plays move for move as
-  the Rust does and about as fast (some 50 ms a game).
+  up and takes nothing back: the line player of the main README in a
+  configuration made for this (`LineConfig::rollout`: lines of up to
+  fourteen steps, two with one suit; a beam of 100; and the four best lines
+  that turn a card valued by expectimax one step deep). It wins 89%, 68%, 50%
+  and 31% of deals with one to four suits; the full player 88%, 70%, 54% and
+  39%, at nine times the work with two suits and more with four; the cheap
+  one the analysis began with (`LineConfig::fast`) 86%, 63%, 42% and 25%, at
+  a sixth of the work. `static/lineplayer.js` is a port of it that plays move
+  for move as the Rust does (65 ms a four-suit game from the deal on one core, 17 ms a one-suit game).
 * **What is analysed.** The line of moves on the board, as if it had been
   played straight through. Moves taken back are not looked at: the tree of
   moves does not say when they were played, so what the player had seen of
@@ -64,21 +67,23 @@ the better move and `S` for what it sets up, `Esc` to go back).
   moves. Within a stretch the player learns nothing, so what its moves change
   is the player's doing and what the cards it shows change is luck.
 * **The curve** comes from a network (`static/vnet.js`, a forward pass in
-  plain typed arrays; `static/nets/vN.bin`, 320 kB for each number of suits,
-  float16): the value network of the main README (a transformer over the
-  cards, 160,000 weights) trained anew on games of that cheap player, one for
-  each number of suits, since the existing one was for four suits and
-  another player. It values every position, each position where a card was
-  turned with that card unknown (as it was trained to), and sixteen sampled
-  deals for each deal.
+  plain typed arrays; `static/nets/value.bin`, 650 kB, float16): the value
+  network of the main README (a transformer over the cards, here of 325,000
+  weights: 80 wide, four layers) trained on games of that player, one
+  network for all four numbers of suits. Besides the cards it is told the
+  number of suits and what the cheap line player would do next in the
+  position (a line, one that turns a card, the same about to deal, a deal, or
+  nothing: a search of a millisecond, `nextKind` in `lineplayer.js`), which
+  it cannot see for itself and which says most of what it used to get wrong:
+  that nothing is left to do before a deal, or at all. It values every
+  position, and each position where cards were shown with those cards not
+  yet known: a turned card as an unknown card in its place, a deal as an
+  unknown card on every column (it is trained on both).
 * **A mistake** is a move after which the computer player wins less often
   than from the position before it, where it would have chosen its own. That
   is measured by playing games out, in shuffles of the cards the player had
   not seen: the same shuffles from both positions, which makes the difference
-  much less noisy than the two rates. The network is not asked (its error
-  from one position to the next is as large as most mistakes, and the
-  moments it used to pick were mostly not consequential), and what the cards
-  did is no part of it.
+  much less noisy than the two rates. What the cards did is no part of it.
   * *Candidates.* Every stretch whose moves are not in effect the computer
     player's own (`track` in `analysis-worker.js`): its own line from the
     stretch's start goes up to its first move that shows cards, a move played
@@ -87,34 +92,44 @@ the better move and `S` for what it sets up, `Esc` to go back).
     (moves can often be played in another order, or taken back). A deal or a
     turned card where it would first have made other moves is a departure
     like any other: the commonest mistake, dealing too early, is found so.
-  * *Sharing out the games* (`findMistakes` in `analysis-core.js`, `SEARCH`
-    for the numbers). Each candidate first gets 16 shuffles, two games in
-    each (from its start and from its end); then, round by round, the six
-    that look worst and are not settled get as many again, up to 512. A
-    candidate is settled when it is surely a mistake (256 shuffles or more, a
-    loss of at least five points and at least 2.5 standard errors) or
-    cannot well become one. This goes on until all are settled or 4,400
-    games are played, and for up to 1,600 more while a candidate is close
-    (a loss of five points, one and a half standard errors, 64 shuffles). What is not surely a mistake by then is not listed: a
-    game may have none, and the page then says so.
+    A real game of fifty stretches has thirty to forty candidates.
+  * *Where to look first* (`screen` in `analysis-core.js`). That is too many
+    to play each out as far as it takes to be sure, so the network orders
+    them: for each candidate it values the position the player's moves came
+    to and the one the computer player's own line would have come to, both
+    just before their cards show (a turned card or a deal not yet known, on
+    either side), and the candidates are taken by that difference. Whatever
+    the network gets wrong about such positions is on both sides, which the
+    fall of the curve over a stretch does not have. The end of a game not
+    won always comes first. See below for how good the order is.
+  * *Sharing out the games* (`findMistakes`, `SEARCH` for the numbers). The
+    first six candidates get 32 shuffles each, two games in each (from the
+    stretch's start and from its end); then, round by round, the three that
+    look worst and are not settled get as many again, up to 512, and when
+    fewer than three are open the next by the network's order come in. A
+    candidate is settled when it is surely a mistake (128 shuffles or more, a
+    loss of at least five points and at least 2.5 standard errors) or cannot
+    well become one. This goes on until all are settled or 2,400 games are
+    played.
   * *Which move.* A stretch with several departures is cut in two at one in
-    its middle, games are played from there in 256 of the same shuffles, and
+    its middle, games are played from there in 128 of the same shuffles, and
     the half that lost more is cut again, until one move is left. If that
     move by itself is surely a mistake it is the one shown; if not (the loss
-    is spread over several) the stretch is shown from its first departure on.
-  * *What is shown*, for at most five, the costliest first: the move played;
+    is spread over several) the stretch is shown from its first departure on,
+    but only if it lost ten points or more: a small loss over a dozen moves
+    is nothing a player can use.
+  * *What it cost.* The games that found a mistake make it look worse than
+    it is (it was picked because they went badly, and the search stops when
+    they do; the losses listed ran some 30% high). So each mistake is played once more, in
+    128 shuffles not used before, and the loss shown and its interval are of
+    those games alone; one that then loses less than half of five points is
+    dropped.
+  * *What is shown*, for at most four, the costliest first: the move played;
     the computer player's next move in its place and what that is for (the
     card it then turns, or the deal, and how many moves on); the chances of
     winning after each; and on the board the two moves as arrows, red and
     green. One click shows the position the better line reaches just before
     its card is turned or its deal is made, and `→` steps along it.
-  * *At any position* the same can be asked for (**?** beside the arrows, or
-    the `?` or `C` key): the computer player's line from the position on the
-    board, shown as a mistake's better line is, with its first move, what
-    that is for and what it sets up, and whether the move played there was
-    the same or came to the same. Nothing is played out for it; it is worked
-    out in a worker ahead of the games waiting (some 10 to 100 ms, a second
-    at most) and kept, and the workers stay for it when the search is done.
   * *Luck* is one line: the stretch where the network has the cards doing
     most is played out (128 shuffles, after its moves with the shuffle's
     cards and with the real ones, the shuffle's others as they were but for
@@ -124,50 +139,155 @@ the better move and `S` for what it sets up, `Esc` to go back).
   less one, at most twelve), and shown as it arrives. `analysis.js` (the
   page), `analysis-core.js`, `analysis-worker.js`, `lineplayer.js`, `vnet.js`,
   `analysis.css` and the network are fetched only when an analysis is first
-  asked for; the networks are served to be kept for good (`/nets`,
+  asked for; the network is served to be kept for good (`/nets`,
   `Cache-Control: immutable`) and asked for by version (`NET_VERSION` in
-  `analysis.js`, to be raised when they change). The GPU is not used: valuing
-  a game's 300 to 500 positions takes about two seconds on eight workers, and nine tenths of
-  the time goes to playing games out, which is a search and not arithmetic.
-  The mistakes take at most some 7,000 games played out (4,400 to 6,000 to
-  find them, the rest to put them to their moves and for the luck).
+  `analysis.js`, to be raised when it changes). The GPU is not used:
+  valuing a game's 150 to 450 positions takes about a second on twelve
+  workers (14 ms a position, a millisecond of it the search for what the
+  cheap player does next), and the rest of the time goes to playing games
+  out, which is a search and not arithmetic. An analysis plays 2,400 to
+  3,700 games out (2,400 to find the mistakes, then for each found some 250
+  to 500 for its move and 256 for its loss, and 256 for the luck). In
+  headless Chrome on a laptop with eight cores (twelve workers), with nothing
+  else running, the owner's eight games below took 8 s (one suit), 40 to 50 s
+  (two and three suits) and 47 to 74 s (four suits; the longest is a game
+  of 353 moves won, whose games played out are long); a desktop that ran
+  the analysis before this one (2,300 games of the cheap player, 21 s on
+  that laptop) in 5 s should take a quarter of that.
 * `cargo test` in the repository root compares the port of the player with
-  the Rust on 48 deals (`GAMES=250` in the environment for 1,000: moves and
-  positions searched are the same), the network's values with PyTorch's
-  (`test/vnet.mjs`: they agree to 1e-6), the positions' encoding with
-  `src/vnet.rs`, and checks the shuffles, the departures and the search for
-  mistakes, the last with games won by chance (`test/analysis.mjs`).
+  the Rust on 48 deals for each of the two configurations (`GAMES=250` in
+  the environment for 1,000: moves and positions searched are the same), the
+  network's values with PyTorch's and what it is told the line player does
+  next with the Rust's (`test/vnet.mjs`: the values agree to 1e-6), the
+  positions' encoding with `src/vnet.rs`, and checks the shuffles, the
+  departures and the search for mistakes, the last with games won by chance
+  (`test/analysis.mjs`).
 
-To make the networks again (the data is some 1.3 GB for each):
+### The player
+
+`runs/analysis2/sweep.sh` (not in the repository; `SPIDER_L_*` on
+`target/release/lines`) tried what lies between the cheap player and the
+full one, on seeds 62001 to 66000, with the CPU time as a multiple of the
+cheap player's:
+
+| setting (steps/beam, lines by one-step expectimax) | four suits | three suits |
+|-----------------------------------------------------|------------|-------------|
+| `fast`: 6/50                                        | 25.4%      | 42.1%       |
+| 14/100                                              | 30.0% (4.6×) | 45.8% (4.5×) |
+| 14/100, 2 lines                                     | 30.7% (5.2×) | 49.0% (5.0×) |
+| **14/100, 4 lines** (`rollout`)                     | 31.4% (6.3×) | 49.8% (6.3×) |
+| 14/100, 8 lines                                     | 31.8% (8.2×) | 49.5% (7.1×) |
+| 14/100, 16 lines                                    | 32.0% (10.3×) | 50.0% (9.7×) |
+| 14/150, 2 lines                                     | 31.1% (7.1×) | 49.9% (6.8×) |
+| 14/75, 4 lines                                      | 30.6% (5.1×) | 48.3% (5.3×) |
+| 10/100, 4 lines                                     | 29.2% (4.8×) | 47.3% (5.1×) |
+
+With two suits (3,000 seeds) the cheap player wins 62.6%, 14/100 64.5%,
+`rollout` 68.1% (6.1×) and the full player 69.5% (54×); with one suit 86.2%,
+88.8% (5.7×), and with four-step lines besides 90.0% (14×). What the full
+player has beyond this is its expectimax four steps deep with replanning: on
+seeds 60001 to 61600 with four suits, 14/50 wins 29.8% and with those 35.1%,
+at 18 times the CPU time (and the full beam of 300 makes that 39%). Less of
+it bought nothing: one line four steps deep, or two or four lines two steps
+deep, were no better than one step, replanning alone doubled the work for
+nothing, and so did the wider search before a deal. The port to JavaScript
+was then made to play the same games in six tenths of the time (the places
+a sequence can go looked up by rank, a position a step on evaluated and
+hashed from its two changed columns, the beam picked by a sort of numbers).
+
+### The network
 
 ```
 cargo build --release
-SPIDER_L_FAST=1 target/release/vdata 4 1000001 200000 runs/analysis/d4.bin 0.05 0.25
-.venv/bin/python vnet/train.py train --data runs/analysis/d4.bin --out runs/analysis/w4.pt
-.venv/bin/python web/tools/analysis/export.py --ckpt runs/analysis/w4.pt --suits 4 --data runs/analysis/d4.bin
+target/release/adata 4 1000001 320000 runs/analysis2/a4.bin    # games of the player, positions with their outcomes
+target/release/afeat runs/analysis2/a4.bin runs/analysis2/a4.feat   # what the cheap player does next in each
+.venv/bin/python web/tools/analysis/train.py train --data runs/analysis2/a?.bin --out runs/analysis2/net.pt
+.venv/bin/python web/tools/analysis/train.py report --data runs/analysis2/a?.bin --ckpt runs/analysis2/net.pt
+.venv/bin/python web/tools/analysis/export.py --ckpt runs/analysis2/net.pt --data runs/analysis2/a?.bin
 ```
 
-| suits | games (records)     | the line player won | log loss, held out (knowing nothing) |
-|-------|---------------------|---------------------|--------------------------------------|
-| 1     | 120,000 (2.9M)      | 86%                 | 0.163 (0.262)                        |
-| 2     | 130,000 (3.4M)      | 63%                 | 0.363 (0.533)                        |
-| 3     | 130,000 (3.7M)      | 42%                 | 0.452 (0.677)                        |
-| 4     | 200,000 (4.3M)      | 24%                 | 0.449 (0.668)                        |
+The data (3.6 GB; some five hours of ten threads):
 
-(The games have a random line among the best eight one decision in twenty,
-as the value network's did. One, two and three suits were trained for two
-epochs, four for three.) The network is right on average but not about
-what the player will do next. On the line player's own games, where the
-moves should cost nothing and luck be fair, its value climbs between deals
-and falls at each (by 5, 10, 11 and 7 points on average with one to four
-suits): it cannot tell that nothing is left to do, so a position about to
-be dealt from is too high. And a position with a turned card unknown is one
-to two points higher than it is on average with the card known. The second
-is taken off (`BIAS` in `analysis-core.js`); the first is left in the
-curve, and is one reason why the mistakes are not chosen by it: they are
-found by games played out alone, and the curve is to be read as rough.
-`node tools/analysis/calib.mjs SUITS` measures this on the line player's
-own games.
+| suits | games   | positions | with those dealt, not yet known | won (noisy starts and all) |
+|-------|---------|-----------|---------------------------------|----------------|
+| 1     | 80,000  | 1.34M     | 1.66M                           | 88%            |
+| 2     | 100,800 | 1.69M     | 2.10M                           | 66%            |
+| 3     | 180,500 | 2.94M     | 3.68M                           | 48%            |
+| 4     | 320,300 | 4.96M     | 6.27M                           | 31%            |
+
+(The networks before had 120,000, 130,000, 130,000 and 200,000 games of the
+cheap player, 2.9M to 4.3M positions; this player costs six times as much a
+game.) Half the games start with a noisy stretch that is not recorded (a
+random line among the best eight one decision in four, now and then a deal
+too early), so that there are positions the player would not get into
+itself; from there on the player plays alone, so that a position's outcome
+is what games played out from it measure. Recorded are an eighth of the
+decisions with the end of the line played (a turned card unknown), some
+positions between a line's moves, every position dealt from (of which the
+trainer makes the position after the deal with its ten cards unknown), half
+of those after a deal, and the position a game not won ends in.
+
+The one network (80 wide, four layers, 325,000 weights; an epoch and a half
+on the four-suit games, then an epoch and a half on all) against a network
+of the old size (64 wide, three layers, 160,000 weights) for each number of
+suits alone, trained on the same data for two epochs, by log loss on the
+games held out (a twentieth):
+
+| suits | one network | one for each | knowing nothing | calibration error |
+|-------|-------------|--------------|-----------------|-------------------|
+| 1     | 0.1637      | 0.1644       | 0.277           | 0.002             |
+| 2     | 0.3404      | 0.3426       | 0.566           | 0.006             |
+| 3     | 0.4108      | 0.4124       | 0.678           | 0.003             |
+| 4     | 0.4047      | 0.4050       | 0.676           | 0.004             |
+
+(The calibration error is the mean distance, over tenths of the value,
+between the value and the share won; the largest in any tenth with a
+thousand positions is 1.7 points.) Being told what the cheap player does
+next is worth more than the size: on 885,000 four-suit positions the same
+network had 0.4214 with it and 0.4351 without, and without it valued the
+positions a game is given up in at 12% (with: 0.3%), those dealt from at 39%
+where 33% were won (with: 34%) and those between a line's moves at 56% where
+61% were won (with: 61%).
+
+`node tools/analysis/calib.mjs SUITS FIRST GAMES` measures what is left on
+the line player's own games, where the moves should cost nothing and luck
+be fair (40 games for each number of suits; in brackets the networks
+before, on 24):
+
+| suits | where a lost game stops | fall over a stretch that ends in a deal | a turned card unknown is high by | a deal unknown is high by | dips inside a stretch: mean, over 3 points |
+|-------|------------|------------|-------------|-----------|---------------------|
+| 1     | 0.2% (46%) | 1.2 (4.9)  | 0.3 (1.0)   | 0.3       | 0.3, 3% (1.1, 13%)  |
+| 2     | 0.1% (43%) | 1.6 (10.3) | −0.6 (1.8)  | 0.2       | 0.7, 7% (3.0, 28%)  |
+| 3     | 0.1% (9%)  | 1.9 (10.7) | −0.5 (1.6)  | 0.3       | 1.3, 14% (3.0, 29%) |
+| 4     | 0.1% (6%)  | 1.8 (6.9)  | −0.6 (1.6)  | 0.3       | 1.1, 11% (2.6, 24%) |
+
+(Points of the chance of winning. A dip is how far the value falls inside a
+stretch below both its start and its end before the cards show.) Nothing is
+taken out any more (`BIAS` in `analysis-core.js` is zero): a deal's cards
+not yet known are valued as a position of its own and not as the mean over
+sixteen sampled deals, and that position is 0.2 to 0.3 points above that
+mean.
+
+### How good the network's order is
+
+The owner's eight games (one to four suits, 110 to 353 moves, 226 candidates)
+were played out for every candidate in 512 shuffles, which puts each
+candidate's cost to two points or so. Seven candidates cost eight points or
+more and surely something (all in the two- and three-suit games; the three
+four-suit games have none). By the network's difference three of the seven
+are among the first three candidates of their games, four among the first
+five and six among the first eight (at random: 0.9, 1.5 and 2.4); counting
+in six games of the computer player's with mistakes put in (256 shuffles),
+7, 8 and 10 of 11 (at random 2.8, 4.2, 5.6). The mistakes of twelve points and more are
+nearly always at the top; those of eight are not told from the noise, which
+is some four points (the standard deviation of the difference where the
+cost is under three points), and over all candidates the difference and the
+cost correlate at only 0.2. So the order is used as an order and not as a
+filter: the games go to the first candidates first and down the list as
+they are settled. What the analysis then lists for the eight games (2,400
+to 3,700 games each): six of the seven, nothing else, and nothing in the
+four-suit games. The seventh (nine points over six moves) was seventh by
+the network in its game, and the games ran out before it came in.
 
 ## FreeCell
 

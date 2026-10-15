@@ -1,16 +1,21 @@
 // The value network of the analysis (analysis-worker.js): the chance that the line
-// player (lineplayer.js) goes on to win from a position, given only the
-// cards that are face up. A small transformer over the cards, trained on that
-// player's games (../../vnet/train.py, one network for each number of suits)
-// and exported by ../tools/analysis/export.py; this is its forward pass, in
-// plain typed arrays: the network is small enough (160,000 weights, about
-// 15 ms a position) that nothing more is needed. test/vnet.mjs compares it
-// with PyTorch.
+// player (lineplayer.js, rolloutConfig) goes on to win from a position, given
+// only the cards that are face up. A small transformer over the cards, trained
+// on that player's games (../tools/analysis/train.py: one network for all
+// four numbers of suits, which it is told) and exported by
+// ../tools/analysis/export.py; this is its forward pass, in plain typed
+// arrays: the network is small enough (325,000 weights, about 14 ms a
+// position) that nothing more is needed. test/vnet.mjs compares it with
+// PyTorch.
 //
 // A position is encoded as in ../../src/vnet.rs: for each column ROWS codes
 // from the bottom (0: no card, 1: face down, 2: face up but unknown, 3 +
 // card), keeping the top ROWS cards of a longer column; then the deals left
-// and the suits completed.
+// and the suits completed. Besides that the network is told the number of
+// suits and what the cheap line player would do next in the position (see
+// next below).
+
+import { MAXC, LEN, DOWN, DONE, SIZE, fastConfig, nextKind } from './lineplayer.js';
 
 export const ROWS = 32, COLS = 10, ENC = COLS * ROWS + 2;
 const EMPTY_ID = 55, GLOBAL_ID = 56, UNKNOWN = 255;
@@ -39,19 +44,27 @@ function float16(bytes, at, n) {
 }
 
 // out[t] = W in[t] + b for each of T rows; W is rows of `from` weights.
+// Eight outputs at a time, each input read once for the eight: some three
+// times as fast as an output at a time.
 function linear(inp, T, from, W, b, to, out) {
+  const to8 = to - to % 8;
   for (let t = 0; t < T; t++) {
     const xi = t * from, yo = t * to;
-    for (let o = 0; o < to; o++) {
-      let s0 = b[o], s1 = 0, s2 = 0, s3 = 0;
-      const w = o * from;
-      for (let k = 0; k < from; k += 4) {
-        s0 += W[w + k] * inp[xi + k];
-        s1 += W[w + k + 1] * inp[xi + k + 1];
-        s2 += W[w + k + 2] * inp[xi + k + 2];
-        s3 += W[w + k + 3] * inp[xi + k + 3];
+    for (let o = 0; o < to8; o += 8) {
+      let s0 = b[o], s1 = b[o + 1], s2 = b[o + 2], s3 = b[o + 3], s4 = b[o + 4], s5 = b[o + 5], s6 = b[o + 6], s7 = b[o + 7];
+      const w0 = o * from, w1 = w0 + from, w2 = w1 + from, w3 = w2 + from, w4 = w3 + from, w5 = w4 + from, w6 = w5 + from, w7 = w6 + from;
+      for (let k = 0; k < from; k++) {
+        const x = inp[xi + k];
+        s0 += W[w0 + k] * x; s1 += W[w1 + k] * x; s2 += W[w2 + k] * x; s3 += W[w3 + k] * x;
+        s4 += W[w4 + k] * x; s5 += W[w5 + k] * x; s6 += W[w6 + k] * x; s7 += W[w7 + k] * x;
       }
-      out[yo + o] = s0 + s1 + s2 + s3;
+      out[yo + o] = s0; out[yo + o + 1] = s1; out[yo + o + 2] = s2; out[yo + o + 3] = s3;
+      out[yo + o + 4] = s4; out[yo + o + 5] = s5; out[yo + o + 6] = s6; out[yo + o + 7] = s7;
+    }
+    for (let o = to8; o < to; o++) {
+      let s = b[o];
+      for (let k = 0, w = o * from; k < from; k++) s += W[w + k] * inp[xi + k];
+      out[yo + o] = s;
     }
   }
 }
@@ -69,16 +82,18 @@ function layerNorm(inp, T, d, w, b, out) {
 }
 
 export class Net {
-  // From the bytes of a file written by export.py.
-  constructor(buffer) {
+  // From the bytes of a file written by export.py, for games of this many suits.
+  constructor(buffer, suits) {
     const head = new DataView(buffer, 0, 20);
-    if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'SPV1') throw new Error('not a network');
+    if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'SPV2') throw new Error('not a network');
+    if (!(suits >= 1 && suits <= 4)) throw new Error('a network for how many suits?');
+    this.suits = suits;
     const d = this.d = head.getUint32(4, true), ff = this.ff = head.getUint32(16, true);
     this.heads = head.getUint32(12, true);
     let at = 20;
     const take = n => { const a = float16(buffer, at, n); at += 2 * n; return a; };
     this.emb = {};
-    for (const [name, n] of [['code', 57], ['row', ROWS], ['col', COLS], ['relAbove', 6], ['relBelow', 6], ['runAbove', 13], ['runBelow', 13], ['whole', 2], ['deals', 6], ['completed', 9]]) {
+    for (const [name, n] of [['code', 57], ['row', ROWS], ['col', COLS], ['relAbove', 6], ['relBelow', 6], ['runAbove', 13], ['runBelow', 13], ['whole', 2], ['deals', 6], ['completed', 9], ['suits', 5], ['next', 7]]) {
       this.emb[name] = take(n * d);
     }
     this.layers = Array.from({ length: head.getUint32(8, true) }, () => ({
@@ -101,6 +116,28 @@ export class Net {
     this.score = new Float32Array(T);
   }
 
+  // What the cheap line player would do next in an encoded position (see
+  // nextKind in lineplayer.js; 0 if a face-up card is unknown or the game
+  // is won): the network is told, since it cannot see it. As next_kind in
+  // ../../src/vnet.rs, which the network was trained with.
+  next(enc) {
+    const s = this.state ??= new Uint8Array(SIZE);
+    if (enc[COLS * ROWS + 1] >= 8) return 0;
+    for (let c = 0; c < COLS; c++) {
+      let n = 0, down = 0;
+      for (; n < ROWS && enc[c * ROWS + n]; n++) {
+        const code = enc[c * ROWS + n];
+        if (code === 2) return 0;
+        if (code === 1) down++;
+        else s[c * MAXC + n] = code - 3;
+      }
+      s[LEN + c] = n;
+      s[DOWN + c] = down;
+    }
+    s[DONE] = enc[COLS * ROWS + 1];
+    return nextKind(s, enc[COLS * ROWS], this.cheap ??= fastConfig(this.suits));
+  }
+
   // The tokens of an encoded position, into this.x; returns how many. (As
   // card_features and Net.forward in train.py.)
   tokens(enc) {
@@ -110,6 +147,8 @@ export class Net {
     add(0, emb.code, GLOBAL_ID);
     add(0, emb.deals, Math.min(enc[COLS * ROWS], 5));
     add(0, emb.completed, Math.min(enc[COLS * ROWS + 1], 8));
+    add(0, emb.suits, this.suits);
+    add(0, emb.next, this.next(enc));
     let T = 1;
     const rel = new Uint8Array(ROWS + 1), above = new Uint8Array(ROWS + 1), below = new Uint8Array(ROWS + 1);
     for (let c = 0; c < COLS; c++) {
@@ -156,27 +195,33 @@ export class Net {
   // One layer over the T tokens in this.x, for the first Q of them only
   // (the last layer is wanted for the first token alone).
   layer(L, T, Q) {
-    const { d, ff, heads, x, n, qkv, att, proj, hid, score } = this, dh = d / heads, scale = 1 / Math.sqrt(dh);
+    const { d, ff, heads, x, n, qkv, att, proj, hid, score } = this, dh = d / heads, dh2 = dh - dh % 2, scale = 1 / Math.sqrt(dh), mix = this.mix ??= new Float64Array(dh);
     layerNorm(x, T, d, L.n1w, L.n1b, n);
     linear(n, T, d, L.inW, L.inB, 3 * d, qkv);
     for (let h = 0; h < heads; h++) {
       const qo = h * dh, ko = d + h * dh, vo = 2 * d + h * dh;
       for (let i = 0; i < Q; i++) {
+        const q = i * 3 * d + qo;
         let max = -Infinity;
         for (let j = 0; j < T; j++) {
-          let s = 0;
-          for (let k = 0; k < dh; k++) s += qkv[i * 3 * d + qo + k] * qkv[j * 3 * d + ko + k];
-          score[j] = s *= scale;
+          const key = j * 3 * d + ko;
+          let s = 0, r = 0;
+          for (let k = 0; k < dh2; k += 2) {
+            s += qkv[q + k] * qkv[key + k];
+            r += qkv[q + k + 1] * qkv[key + k + 1];
+          }
+          if (dh2 < dh) s += qkv[q + dh2] * qkv[key + dh2];
+          score[j] = s = (s + r) * scale;
           if (s > max) max = s;
         }
         let sum = 0;
         for (let j = 0; j < T; j++) sum += score[j] = Math.exp(score[j] - max);
-        const o = i * d + qo;
-        att.fill(0, o, o + dh);
+        mix.fill(0, 0, dh);
         for (let j = 0; j < T; j++) {
           const a = score[j] / sum, v = j * 3 * d + vo;
-          for (let k = 0; k < dh; k++) att[o + k] += a * qkv[v + k];
+          for (let k = 0; k < dh; k++) mix[k] += a * qkv[v + k];
         }
+        att.set(mix, i * d + qo);
       }
     }
     linear(att, Q, d, L.outW, L.outB, d, proj);
