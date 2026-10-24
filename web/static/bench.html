@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analysis Benchmark</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #14211d; color: #e8e6df; font: 15px/1.45 system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 6px 0; color: #b9b6ad; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  button, select { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #ffffff33; background: #2b3834; color: inherit; }
+  button.go { background: #ffd54a; color: #222; border: 0; font-weight: 600; }
+  button:disabled { opacity: 0.5; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0008; padding: 12px; border-radius: 8px; font: 12px/1.45 ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<h1>Analysis benchmark</h1>
+<p>Times the analysis's work on this device: on the page, in one worker, in several at once, then a whole analysis. Keep the screen on and this tab in front until it says done (a minute or two), then copy the report.</p>
+<div class="row">
+  <label>Suits <select id="suits"><option>1</option><option>2</option><option>3</option><option selected>4</option></select></label>
+  <button class="go" id="go">Run</button>
+  <button id="quick">Quick (no full analysis)</button>
+  <button id="copy">Copy report</button>
+</div>
+<pre id="out"></pre>
+<script type="module">
+import { suite, played, stretchJob } from '/bench-worker.js';
+import { prepare, stretchValues, screenJobs, screen, findMistakes } from '/analysis-core.js';
+
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+const cores = navigator.hardwareConcurrency || 0;
+const SEED = 70018;
+let hidden = 0;
+document.addEventListener('visibilitychange', () => { if (document.hidden) hidden++; });
+
+function env() {
+  const lines = [
+    `when      ${new Date().toISOString()}`,
+    `agent     ${navigator.userAgent}`,
+    `platform  ${navigator.userAgentData ? JSON.stringify({ platform: navigator.userAgentData.platform, mobile: navigator.userAgentData.mobile, brands: navigator.userAgentData.brands.map(b => `${b.brand} ${b.version}`).join(', ') }) : navigator.platform}`,
+    `cores     ${cores || '(not said)'}   memory ${navigator.deviceMemory ?? '?'} GB   isolated ${self.crossOriginIsolated}`,
+    `screen    ${window.screen.width}x${window.screen.height} @${devicePixelRatio}`,
+  ];
+  if (navigator.getBattery) navigator.getBattery().then(b => log(`battery   ${Math.round(b.level * 100)}% ${b.charging ? 'charging' : 'not charging'}`)).catch(() => {});
+  return lines.join('\n');
+}
+
+let netBytes = null;
+async function net() {
+  netBytes ??= await fetch('/nets/value.bin?2').then(r => { if (!r.ok) throw new Error(r.statusText); return r.arrayBuffer(); });
+  return netBytes;
+}
+
+const fmt = t => Object.entries(t).filter(([k]) => k !== 'sink').map(([k, v]) => `  ${k.padEnd(22)}${v.toFixed(1).padStart(9)} ms`).join('\n');
+
+function worker(suits) {
+  const w = new Worker('/bench-worker.js', { type: 'module' });
+  const copy = netBytes.slice(0);
+  w.postMessage({ net: copy, suits }, [copy]);
+  let next = 1;
+  const waiting = new Map();
+  w.onmessage = ({ data }) => { waiting.get(data.id)(data); waiting.delete(data.id); };
+  w.onerror = e => { log(`worker error: ${e.message}`); };
+  w.ask = msg => new Promise(resolve => { const id = next++; waiting.set(id, resolve); w.postMessage({ id, ...msg }); });
+  return w;
+}
+
+// A pool as analysis.js's: one piece of work per worker at a time, in order.
+function pool(n, suits) {
+  const ws = Array.from({ length: n }, () => worker(suits)), idle = [...ws], queue = [];
+  const pump = () => {
+    while (idle.length && queue.length) {
+      const w = idle.pop(), { msg, resolve } = queue.shift();
+      w.ask(msg).then(d => { idle.push(w); resolve(d); pump(); });
+    }
+  };
+  return { run: msg => new Promise(resolve => { queue.push({ msg, resolve }); pump(); }), close: () => ws.forEach(w => w.terminate()) };
+}
+
+// The whole analysis of a game of the line player's, as analysis.js runs it
+// (but for the cards' biggest swing), each phase timed.
+// `split`: each request for games is sent as pieces of this many worlds (the
+// results are the same; only how the work is shared out between the workers changes).
+async function whole(suits, n, split = 0) {
+  const moves = played(suits, SEED), data = prepare(suits, SEED, moves), N = moves.length;
+  const p = pool(n, suits), t = { start: performance.now() };
+  const mark = name => { t[name] = performance.now(); };
+  // A first piece of work, so that the workers have started.
+  await Promise.all(Array.from({ length: n }, () => p.run({ value: [data.jobs[0].enc] })));
+  mark('workers up');
+  const values = new Map(), batches = [];
+  for (let i = 0; i < data.jobs.length; i += 6) batches.push(data.jobs.slice(i, i + 6));
+  await Promise.all(batches.map(async b => { const { values: v } = await p.run({ value: b.map(j => j.enc) }); b.forEach((j, i) => values.set(j.key, v[i])); }));
+  mark(`value ${data.jobs.length} positions`);
+  const job = at => ({ ...stretchJob(suits, SEED, moves, data, at), seed: (SEED % 1000003) * 131 + at });
+  const asked = data.stretches.map((_, at) => job(at));
+  const answers = await Promise.all(Array.from({ length: Math.ceil(asked.length / 4) }, (_, i) => p.run({ track: asked.slice(4 * i, 4 * i + 4) })));
+  const cuts = answers.flatMap(a => a.tracks);
+  mark(`track ${asked.length} stretches`);
+  const theirs = new Map(), asks = screenJobs(suits, SEED, moves, data.stretches, cuts);
+  await Promise.all(Array.from({ length: Math.ceil(asks.length / 6) }, async (_, i) => {
+    const b = asks.slice(6 * i, 6 * i + 6), { values: v } = await p.run({ value: b.map(j => j.enc) });
+    b.forEach((j, k) => theirs.set(j.at, { value: v[k], shows: j.shows }));
+  }));
+  mark('screen');
+  let spent = 0, rolls = 0, rollMs = 0;
+  const one = r => { const s = performance.now(); rolls++; return p.run({ roll: r }).then(a => { rollMs += performance.now() - s; return a.rolls; }); };
+  const roll = r => {
+    if (!split || r.to - r.from <= split) return one(r);
+    const parts = [];
+    for (let w = r.from; w < r.to; w += split) parts.push(one({ ...r, from: w, to: Math.min(r.to, w + split) }));
+    return Promise.all(parts).then(bs => { const out = new Uint8Array(r.to - r.from); let k = 0; for (const b of bs) { out.set(b, k); k += b.length; } return out; });
+  };
+  const found = await findMistakes({ stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits), update: (c, k) => { spent = k; } });
+  mark(`play out ${spent} games`);
+  p.close();
+  const names = Object.keys(t);
+  const lines = names.slice(1).map((k, i) => `  ${k.padEnd(28)}${((t[k] - t[names[i]]) / 1000).toFixed(2).padStart(8)} s`);
+  lines.push(`  ${'total'.padEnd(28)}${((t[names.at(-1)] - t.start) / 1000).toFixed(2).padStart(8)} s`);
+  lines.push(`  (${rolls} roll jobs, ${(rollMs / rolls).toFixed(0)} ms each from asking to answer; ${found.length} mistakes found: ${found.map(m => `move ${m.move} ${(m.cost.mean * 100).toFixed(1)}`).join(', ') || 'none'})`);
+  return lines.join('\n');
+}
+
+async function run(full) {
+  for (const b of document.querySelectorAll('button')) b.disabled = b.id !== 'copy';
+  out.textContent = '';
+  hidden = 0;
+  const suits = +document.getElementById('suits').value;
+  try {
+    log(env());
+    log(`suits     ${suits}   seed ${SEED}\n`);
+    const t0 = performance.now();
+    await net();
+    log(`network fetched in ${(performance.now() - t0).toFixed(0)} ms (${netBytes.byteLength} bytes)\n`);
+    await new Promise(r => setTimeout(r, 50));
+    log('ON THE PAGE (best of 2)');
+    log(fmt(suite(netBytes, { suits, seed: SEED, reps: 2 })));
+    await new Promise(r => setTimeout(r, 50));
+    const one = worker(suits);
+    log('\nONE WORKER (best of 2)');
+    log(fmt((await one.ask({ suite: { suits, seed: SEED, reps: 2 } })).times));
+    one.terminate();
+    const counts = [...new Set([2, 4, Math.max(1, Math.min(12, cores - 1)), cores].filter(n => n >= 2 && n <= 16))].sort((a, b) => a - b);
+    for (const n of counts) {
+      const ws = Array.from({ length: n }, () => worker(suits));
+      await Promise.all(ws.map(w => w.ask({ suite: { suits, seed: SEED, reps: 1 } }))); // warm up
+      const s = performance.now();
+      const res = await Promise.all(ws.map(w => w.ask({ suite: { suits, seed: SEED, reps: 1 } })));
+      const wall = performance.now() - s;
+      ws.forEach(w => w.terminate());
+      const col = k => res.map(r => r.times[k]).sort((a, b) => a - b);
+      const span = k => { const v = col(k); return `${v[0].toFixed(0)}–${v.at(-1).toFixed(0)} ms (median ${v[v.length >> 1].toFixed(0)})`; };
+      log(`\n${n} WORKERS AT ONCE: ${wall.toFixed(0)} ms in all`);
+      for (const k of ['int loop', 'net 24 positions', 'play a game', 'roll 4 worlds']) log(`  ${k.padEnd(22)}${span(k)}`);
+    }
+    if (full) {
+      const n = Math.max(1, Math.min(12, cores - 1) || 3);
+      log(`\nWHOLE ANALYSIS (${n} workers, as the page uses: 16 worlds a job)`);
+      log(await whole(suits, n));
+      log(`\nWHOLE ANALYSIS (${n} workers, 4 worlds a job)`);
+      log(await whole(suits, n, 4));
+    }
+    log(`\nDONE${hidden ? `  (the page was hidden ${hidden} time(s) during the run: the times may be off)` : ''}`);
+  } catch (e) {
+    log(`\nFAILED: ${e.stack || e}`);
+  }
+  for (const b of document.querySelectorAll('button')) b.disabled = false;
+}
+
+document.getElementById('go').onclick = () => run(true);
+document.getElementById('quick').onclick = () => run(false);
+document.getElementById('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(out.textContent); document.getElementById('copy').textContent = 'Copied'; }
+  catch { getSelection().selectAllChildren(out); }
+};
+out.textContent = env();
+</script>
+</body>
+</html>
