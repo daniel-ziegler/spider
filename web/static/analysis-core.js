@@ -113,7 +113,7 @@ export function stretchValues(st, values, won, last, suits = 0) {
 export const SEARCH = {
   games: 2400, // games played out to find the mistakes
   round: 16, // worlds a candidate is given more in at least
-  piece: 4, // worlds in a piece of work
+  piece: 4, // worlds in a piece of work (small, so that a round's last games are shared out over the workers)
   first: 32, // worlds for a candidate when it comes in
   start: 6, // candidates that come in at once: the worst by the network
   group: 3, // candidates given more worlds in a round (as many again as each has)
@@ -231,10 +231,9 @@ export function nextRound(stats, order, left, opt = SEARCH) {
 // what the worker's track says of stretch i (null: not to be played out),
 // `prior[i]` what the network makes stretch i cost (screen; without it the
 // candidates come in as they are in the game), `job(i)` the roll's position
-// and moves for stretch i (see the worker), and roll(job, rank) plays games
-// out: a promise of the bytes (or of null for work dropped, see below).
-// `update` is called as results come in, with the candidates so far and the
-// games played for them.
+// and moves for stretch i (see the worker), and roll(job) plays games out: a
+// promise of the bytes. `update` is called as results come in, with the
+// candidates so far.
 //
 // Returns the mistakes, the costliest first, each
 //   {at, move, line, exact, unsure, n, better, yours, cost: {mean, se}}
@@ -255,123 +254,40 @@ export function nextRound(stats, order, left, opt = SEARCH) {
 // lost more is cut again. A loss that cannot be put to one move so is shown
 // only if it is large (`spread`): a small one over many moves says nothing
 // the player can use.
-//
-// The search waits for each round's games before it decides the next, and
-// with `spare` the workers it would leave idle meanwhile play the games it
-// will likely ask for next (those of the next round as it would be if the
-// games still to come went as those so far, and those of a mistake's first
-// cuts), at a lower `rank` than what is asked for: roll's rank() is 0 for
-// work wanted now, 1 for a guess, and below 0 for a guess no longer made,
-// which the worker pool may drop. What is so played is kept for when it is
-// asked for, but the search sees only the games it asked for, so it finds
-// the same however the work goes. Games played are counted when asked for.
-export async function findMistakes({ stretches, cuts, prior = null, job, roll, update = () => {}, opt = SEARCH, spare = 0 }) {
-  const cands = stretches.flatMap((st, at) => (cuts[at]?.length ? [{ at, st, cuts: cuts[at], prior: prior?.[at] ?? 0, wins: new Map(), units: new Map(), n: 0, stat: paired([], []), state: 'wait' }] : []));
+export async function findMistakes({ stretches, cuts, prior = null, job, roll, update = () => {}, opt = SEARCH }) {
+  const cands = stretches.flatMap((st, at) => (cuts[at]?.length ? [{ at, st, cuts: cuts[at], prior: prior?.[at] ?? 0, wins: new Map(), n: 0, stat: paired([], []), state: 'wait' }] : []));
   const order = cands.map((c, i) => i).sort((a, b) => cands[a].prior - cands[b].prior || a - b);
-  const P = opt.piece, len = c => c.st.to - c.st.from;
-  let spent = 0, played = 0, gen = 0, guessing = 0, round = null;
-  // The games from after `upto` moves of a candidate's stretch in its worlds
-  // k * P up to (k + 1) * P, played or being played: a unit {got, need,
-  // guess, keep}, `got` the promise of the wins (null if dropped). One piece
-  // of work plays the units of several uptos at once. `how`: 'need', or a
-  // guess: the generation of guesses it is in, or keep(), whether a guess
-  // made otherwise still holds. A guess is made only while fewer than
-  // `spare` are being played.
-  const unitsOf = (c, u) => { if (!c.units.has(u)) c.units.set(u, []); return c.units.get(u); };
-  function request(c, uptos, k, how) {
-    const mark = m => {
-      if (how === 'need') m.need = true;
-      else if (typeof how === 'function') m.keep ??= how;
-      else m.guess = how;
-    };
-    for (const u of uptos) { const m = unitsOf(c, u)[k]; if (m) mark(m); }
-    const missing = uptos.filter(u => !unitsOf(c, u)[k]);
-    if (missing.length && (how === 'need' || guessing < spare)) {
-      const made = missing.map(() => ({ need: false, guess: -1, keep: null }));
-      made.forEach(mark); // (before the pool sees the work)
-      const rank = () => (made.some(m => m.need) ? 0 : made.some(m => m.guess === gen || m.keep?.()) ? 1 : -1);
-      const spec = how !== 'need';
-      if (spec) guessing++;
-      const got = roll({ ...job(c.at), from: k * P, to: (k + 1) * P, at: missing }, rank);
-      got.then(() => { if (spec) guessing--; });
-      missing.forEach((u, i) => {
-        const m = made[i], units = unitsOf(c, u);
-        m.got = got.then(bytes => bytes && Uint8Array.from(bytes, b => (b >> i) & 1));
-        m.got.then(r => { if (!r && units[k] === m) units[k] = undefined; });
-        units[k] = m;
-      });
-    }
-  }
-  // The wins of a unit that is needed (asked for again if it was dropped).
-  const wins = async (c, u, k) => {
-    for (;;) {
-      request(c, [u], k, 'need');
-      const r = await unitsOf(c, u)[k].got;
-      if (r) return r;
-    }
-  };
+  let spent = 0;
   // Games from after `upto` moves of a candidate's stretch, in its worlds from `from` up to n.
   const play = async (c, uptos, n, from = 0) => {
     for (const u of uptos) if (!c.wins.has(u)) c.wins.set(u, new Int8Array(opt.cap + opt.fresh).fill(-1));
     from = Math.min(...uptos.map(u => { const w = c.wins.get(u); let k = from; while (k < n && w[k] >= 0) k++; return k; }));
-    if (from >= n) return;
-    spent += uptos.length * (n - from);
     const work = [];
-    for (let k = Math.floor(from / P); k * P < n; k++) {
-      request(c, uptos, k, 'need');
-      work.push(Promise.all(uptos.map(u => wins(c, u, k))).then(rs => {
-        const lo = Math.max(from, k * P), hi = Math.min(n, (k + 1) * P);
-        uptos.forEach((u, i) => { const w = c.wins.get(u); for (let x = lo; x < hi; x++) w[x] = rs[i][x - k * P]; });
-        played += uptos.length * (hi - lo);
-        c.stat = paired(c.wins.get(0), c.wins.get(len(c)) ?? [], opt.cap);
-        update(cands, played);
-        guess();
+    for (let w = from; w < n; w += opt.piece) {
+      const to = Math.min(n, w + opt.piece);
+      work.push(roll({ ...job(c.at), from: w, to, at: uptos }).then(bytes => {
+        uptos.forEach((u, i) => { const wins = c.wins.get(u); bytes.forEach((b, k) => { wins[w + k] = (b >> i) & 1; }); });
+        spent += uptos.length * (to - w);
+        c.stat = paired(c.wins.get(0), c.wins.get(c.st.to - c.st.from) ?? [], opt.cap);
+        update(cands, spent);
       }));
     }
     await Promise.all(work);
   };
-  // The guesses while a round is played: the next round, were the
-  // candidates' games still to come to go as those so far, and for each
-  // that would then be a mistake the first cut (see cut below).
-  function guess() {
-    if (!spare) return;
-    gen++;
-    if (!round) return;
-    const stats = cands.map(c => {
-      const d = c.stat;
-      if (!c.n || d.n === c.n) return d;
-      return d.n ? { ...d, n: c.n, se: d.se * Math.sqrt(d.n / c.n) } : { n: c.n, a: NaN, b: NaN, mean: 0, se: 0.5 / Math.sqrt(c.n) };
-    });
-    const want = [];
-    for (const [i, more] of nextRound(stats, order, opt.games - spent, opt)) {
-      const c = cands[i];
-      for (let k = Math.floor(c.n / P); k * P < c.n + more; k++) want.push([c, [0, len(c)], k]);
-    }
-    cands.forEach((c, i) => {
-      if (c.cuts.length < 2 || !isMistake(stats[i], opt)) return;
-      const ends = [0, ...c.cuts.slice(0, -1).map(x => x.at), len(c)], u = ends[c.cuts.length >> 1];
-      for (let k = 0; k * P < Math.min(c.n, opt.pin); k++) want.push([c, [u], k]);
-    });
-    for (const [c, uptos, k] of want) request(c, uptos, k, gen);
-  }
   for (;;) {
-    round = nextRound(cands.map(c => c.stat), order, opt.games - spent, opt);
+    const round = nextRound(cands.map(c => c.stat), order, opt.games - spent, opt);
     if (!round.length) break;
-    const work = round.map(([i, more]) => {
+    await Promise.all(round.map(([i, more]) => {
       const c = cands[i];
       c.n += more;
-      return play(c, [0, len(c)], c.n);
-    });
-    guess();
-    await Promise.all(work);
+      return play(c, [0, c.st.to - c.st.from], c.n);
+    }));
     for (const c of cands) c.state = !c.n ? 'wait' : isMistake(c.stat, opt) ? 'mistake' : hopeless(c.stat, opt) ? 'out' : 'open';
-    update(cands, played);
+    update(cands, spent);
   }
-  round = null;
-  guess(); // (none now)
   const found = cands.filter(c => isMistake(c.stat, opt)).sort((a, b) => a.stat.mean - b.stat.mean).slice(0, opt.most);
   for (const c of cands) if (!found.includes(c)) c.state = 'out';
-  update(cands, played);
+  update(cands, spent);
   // The departure of a candidate's stretch that lost most, by cutting in two:
   // {ends, lo, hi}, the games from after ends[lo] and ends[hi] moves being those before and after it.
   const cut = async (c, n) => {
@@ -380,13 +296,6 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
     let lo = 0, hi = c.cuts.length;
     while (hi - lo > 1) {
       const mid = (lo + hi) >> 1;
-      // The next cut either way, guessed while this one is played.
-      if (spare) {
-        const at = lo, to = hi, still = () => lo === at && hi === to;
-        for (const u of [mid - lo > 1 && ends[(lo + mid) >> 1], hi - mid > 1 && ends[(mid + hi) >> 1]]) {
-          if (u !== false) for (let k = 0; k * P < n; k++) request(c, [u], k, still);
-        }
-      }
       await play(c, [ends[mid]], n);
       const w = k => c.wins.get(ends[k]);
       if (paired(w(lo), w(mid), n).mean <= paired(w(mid), w(hi), n).mean) hi = mid;
@@ -406,11 +315,11 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
     const d = paired(c.wins.get(ends[lo]), c.wins.get(ends[hi]), Infinity, opt.cap);
     if (d.mean > -(exact ? opt.cost / 2 : opt.spread)) {
       c.state = 'out';
-      update(cands, played);
+      update(cands, spent);
       return null;
     }
     c.found = record(c, lo, exact, d, false);
-    update(cands, played);
+    update(cands, spent);
     return c.found;
   }))).filter(m => m?.line.length).sort((a, b) => a.cost.mean - b.cost.mean);
   return [...sure, ...await likeliest(opt.shown - sure.length)];
@@ -438,7 +347,7 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
       const exact = c.cuts.length === 1 || (d.mean <= -opt.maybe && d.mean <= 0.6 * all.mean);
       c.state = 'maybe';
       c.found = exact ? record(c, lo, true, d, true) : record(c, 0, false, all, true);
-      update(cands, played);
+      update(cands, spent);
       return c.found;
     }));
     return out.sort((a, b) => a.cost.mean - b.cost.mean);

@@ -70,33 +70,23 @@ function worker(suits) {
   return w;
 }
 
-// A pool as analysis.js's: one piece of work per worker at a time, in order,
-// work with a rank() only when nothing of rank 0 waits (see findMistakes).
+// A pool as analysis.js's: one piece of work per worker at a time, in order.
 function pool(n, suits) {
   const ws = Array.from({ length: n }, () => worker(suits)), idle = [...ws], queue = [], busy = { ms: 0 };
   const pump = () => {
     while (idle.length && queue.length) {
-      let pick = -1;
-      for (let i = 0; i < queue.length; i++) {
-        const r = queue[i].rank?.() ?? 0;
-        if (r < 0) { queue.splice(i--, 1)[0].resolve(null); continue; }
-        if (r === 0) { pick = i; break; }
-        if (pick < 0) pick = i;
-      }
-      if (pick < 0) break;
-      const w = idle.pop(), { msg, resolve } = queue.splice(pick, 1)[0];
+      const w = idle.pop(), { msg, resolve } = queue.shift();
       const t = performance.now();
       w.ask(msg).then(d => { busy.ms += performance.now() - t; idle.push(w); resolve(d); pump(); });
     }
   };
-  return { run: (msg, rank) => new Promise(resolve => { queue.push({ msg, resolve, rank }); pump(); }), close: () => ws.forEach(w => w.terminate()), busy };
+  return { run: msg => new Promise(resolve => { queue.push({ msg, resolve }); pump(); }), close: () => ws.forEach(w => w.terminate()), busy };
 }
 
 // The whole analysis of a game of the cheap line player's (which has some
 // mistakes to find), as analysis.js runs it (but for the cards' biggest
-// swing), each phase timed. `spare`: as findMistakes takes it (0: idle
-// workers play no guesses).
-async function whole(suits, n, spare) {
+// swing), each phase timed.
+async function whole(suits, n) {
   const moves = played(suits, SEED, fastConfig(suits)), data = prepare(suits, SEED, moves), N = moves.length;
   const p = pool(n, suits), t = { start: performance.now() };
   const mark = name => { t[name] = performance.now(); };
@@ -119,16 +109,16 @@ async function whole(suits, n, spare) {
   }));
   mark('screen');
   const busy0 = p.busy.ms;
-  let spent = 0, rolls = 0, dropped = 0;
-  const roll = (r, rank) => p.run({ roll: r }, rank).then(a => { if (a) rolls++; else dropped++; return a && a.rolls; });
-  const found = await findMistakes({ stretches: data.stretches, cuts, job, roll, spare, prior: screen(data.stretches, values, theirs, data.won, N, suits), update: (c, k) => { spent = k; } });
+  let spent = 0, rolls = 0;
+  const roll = r => p.run({ roll: r }).then(a => { rolls++; return a.rolls; });
+  const found = await findMistakes({ stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits), update: (c, k) => { spent = k; } });
   mark(`play out ${spent} games`);
   const use = (p.busy.ms - busy0) / (n * (t[`play out ${spent} games`] - t.screen));
   p.close();
   const names = Object.keys(t);
   const lines = names.slice(1).map((k, i) => `  ${k.padEnd(28)}${((t[k] - t[names[i]]) / 1000).toFixed(2).padStart(8)} s`);
   lines.push(`  ${'total'.padEnd(28)}${((t[names.at(-1)] - t.start) / 1000).toFixed(2).padStart(8)} s`);
-  lines.push(`  (${rolls} roll jobs played, ${dropped} dropped; the workers busy ${Math.round(use * 100)}% of the time playing out; ${found.length} mistakes found: ${found.map(m => `move ${m.move} ${(m.cost.mean * 100).toFixed(1)}`).join(', ') || 'none'})`);
+  lines.push(`  (${rolls} roll jobs; the workers busy ${Math.round(use * 100)}% of the time playing out; ${found.length} mistakes found: ${found.map(m => `move ${m.move} ${(m.cost.mean * 100).toFixed(1)}`).join(', ') || 'none'})`);
   return lines.join('\n');
 }
 
@@ -269,10 +259,8 @@ async function run(full) {
     }
     if (full) {
       const n = Math.max(1, Math.min(12, cores - 1) || 3);
-      log(`\nWHOLE ANALYSIS (${n} workers, as the page uses: idle workers play guesses)`);
-      log(await whole(suits, n, 2 * n));
-      log(`\nWHOLE ANALYSIS (${n} workers, no guesses)`);
-      log(await whole(suits, n, 0));
+      log(`\nWHOLE ANALYSIS (${n} workers, as the page uses)`);
+      log(await whole(suits, n));
     }
     log(`\nDONE${hidden ? `  (the page was hidden ${hidden} time(s) during the run: the times may be off)` : ''}`);
   } catch (e) {

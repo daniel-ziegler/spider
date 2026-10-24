@@ -40,10 +40,7 @@ function fetchNet() {
   return fetched;
 }
 
-// Workers that take one piece of work at a time, in the order given, but
-// that work with a rank() (see findMistakes) is taken only when there is
-// none of rank 0 waiting, and is dropped (answered null) if its rank has
-// gone below 0 by the time a worker is free for it.
+// Workers that take one piece of work at a time, in the order given.
 class Pool {
   constructor(n, net, suits, onError) {
     this.queue = [];
@@ -68,24 +65,16 @@ class Pool {
   }
 
   // (`first`: before the work that is waiting.)
-  run(msg, first = false, rank = null) {
+  run(msg, first = false) {
     return new Promise(resolve => {
-      this.queue[first ? 'unshift' : 'push']({ msg, resolve, rank });
+      this.queue[first ? 'unshift' : 'push']({ msg, resolve });
       this.pump();
     });
   }
 
   pump() {
     while (this.idle.length && this.queue.length) {
-      let pick = -1;
-      for (let i = 0; i < this.queue.length; i++) {
-        const r = this.queue[i].rank?.() ?? 0;
-        if (r < 0) { this.queue.splice(i--, 1)[0].resolve(null); continue; }
-        if (r === 0) { pick = i; break; }
-        if (pick < 0) pick = i;
-      }
-      if (pick < 0) break;
-      const { msg, resolve } = this.queue.splice(pick, 1)[0], id = this.nextId++;
+      const { msg, resolve } = this.queue.shift(), id = this.nextId++;
       this.jobs.set(id, resolve);
       this.idle.pop().postMessage({ id, ...msg });
     }
@@ -133,7 +122,7 @@ export function open(ctx) {
   const advice = new Map(), advised = new Map(); // those worked out: move -> promise, and -> what it gave
   let pooled; // (called when the workers are there)
   const workers = new Promise(resolve => { pooled = resolve; });
-  let pool = null, workerCount = 0, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
+  let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
   const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
@@ -565,7 +554,7 @@ export function open(ctx) {
     const net = await fetchNet();
     if (closed) return;
     const cores = navigator.hardwareConcurrency || 4;
-    pool = new Pool(workerCount = Math.max(1, Math.min(12, cores - 1)), net, suits, e => { failed = `The analysis failed: ${e.message || 'a worker stopped'}`; redraw(); });
+    pool = new Pool(Math.max(1, Math.min(12, cores - 1)), net, suits, e => { failed = `The analysis failed: ${e.message || 'a worker stopped'}`; redraw(); });
     pooled();
     phase = 'value';
     redraw();
@@ -597,7 +586,7 @@ export function open(ctx) {
     const answers = await Promise.all(Array.from({ length: Math.ceil(asked.length / 4) }, (_, i) => pool.run({ track: asked.slice(4 * i, 4 * i + 4) })));
     if (closed) return;
     const cuts = answers.flatMap(a => a.tracks);
-    const roll = (r, rank) => pool.run({ roll: r }, false, rank).then(a => a && a.rolls);
+    const roll = r => pool.run({ roll: r }).then(a => a.rolls);
     // The cards' biggest swing by the network, measured alongside.
     const swing = vals.map((v, at) => [cuts[at] && data.stretches[at].shows ? Math.abs(v.luck) : 0, at]).sort((a, b) => b[0] - a[0])[0];
     const lucky = swing && swing[0] >= 0.05 ? measureLuck({ st: data.stretches[swing[1]], job: job(swing[1]), roll }).then(d => {
@@ -613,7 +602,7 @@ export function open(ctx) {
     }));
     if (closed) return;
     const mistakes = await findMistakes({
-      stretches: data.stretches, cuts, job, roll, spare: 2 * workerCount, prior: screen(data.stretches, values, theirs, data.won, N, suits),
+      stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits),
       update: (c, n) => { cands = c; spent = n; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
     });
     await lucky;

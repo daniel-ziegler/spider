@@ -113,12 +113,8 @@ the better line; `?` or `C` has the computer's move shown at every position;
     candidate is settled when it is surely a mistake (128 shuffles or more, a
     loss of at least five points and at least 2.5 standard errors) or cannot
     well become one. This goes on until all are settled or 2,400 games are
-    played. The games go to the workers four shuffles at a time, and while
-    a round waits for its last games the idle workers play, at a lower
-    priority, those the next round would ask for if the games still to come
-    went as those so far (and a mistake's first cuts); they are kept for when
-    they are asked for. The search sees only the games it asks for, so what
-    it finds does not depend on how the work went.
+    played. The games go to the workers four shuffles at a time, so that
+    a round's last games are spread over them.
   * *Which move.* A stretch with several departures is cut in two at one in
     its middle, games are played from there in 128 of the same shuffles, and
     the half that lost more is cut again, until one move is left. If that
