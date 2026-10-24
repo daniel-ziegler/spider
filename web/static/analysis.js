@@ -103,7 +103,8 @@ const points = x => `${x < -0.005 ? '−' : x > 0.005 ? '+' : ''}${Math.abs(Math
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 // Open the analysis of the moves of a deal: ctx is {suits, seed, moves,
-// undos, cardName, render, close}. Returns what app.js draws and asks of it:
+// undos, lost, cardName, render, close} (lost: the game is over and not won:
+// it can no longer be won, or nothing is left to play). Returns what app.js draws and asks of it:
 // shown (the position on the board), mark (cards to outline), info (the
 // header's line), key(event), destroy().
 export function open(ctx) {
@@ -114,7 +115,14 @@ export function open(ctx) {
   let cands = []; // the stretches games are being played out for (see findMistakes)
   let found = null; // the mistakes, once they are known: see mistake() for what each has
   let luck = null; // the cards' biggest swing: {t, show, mean}
+  // How the game ended, if it has: the plot then ends with that, which is what
+  // happened and nothing the network says. A game won is so at its last
+  // move; a game lost has a place of its own after it (E, with the last
+  // position still on the board), since its last position has a value like
+  // any other: by the cards face up it may well look as if it could be won.
+  const over = data.won ? 'won' : ctx.lost ? 'lost' : '', E = over === 'lost' ? N + 1 : N;
   let step = N, selected = -1, hover = -1;
+  let ended = E > N; // the board is at the end of a game lost, after its last move: step is N
   let alt = -1; // the board is on the selected mistake's better line, after this many of its moves (-1: on the game's)
   let adv = null; // what the line player would play at the position on the board, while that is asked for (see settle): {from, wait} or as a mistake is, with `advice`
   let asking = false; // whether it is asked for: at every position the board comes to
@@ -147,6 +155,7 @@ export function open(ctx) {
   // ---- what is known so far
 
   const value = t => (data.won && t === N ? 1 : values.get(`p${t}`));
+  const place = () => step + (ended ? 1 : 0); // where the board is on the plot: 0..E
   // The value after move t before the cards it showed were known.
   const commitAt = t => {
     const st = { from: t - 1, to: t, shows: data.shows[t - 1] };
@@ -239,6 +248,9 @@ export function open(ctx) {
     show();
   }
 
+  // The end of a game in words.
+  const outcome = () => `The game is ${over}`;
+
   // What the line player would play is shown for the position the board is
   // at, while it is asked for: but not where a mistake picked out begins,
   // since the mistake says it there. (Called whenever the board has moved.)
@@ -268,10 +280,11 @@ export function open(ctx) {
   let frame = 0;
   const redraw = () => { frame ||= requestAnimationFrame(() => { frame = 0; if (!closed) draw(); }); };
 
+  // (The end of a game lost is `gap` to the right of its last move, however many the moves.)
   function geometry() {
     const W = plot.clientWidth, H = plot.clientHeight, ml = 40, mr = 14, mt = 24, mb = 20;
-    const w = Math.max(10, W - ml - mr), h = Math.max(10, H - mt - mb);
-    return { W, H, ml, mt, w, h, X: t => ml + (N ? t / N : 0) * w, Y: p => mt + (1 - p) * h };
+    const w = Math.max(10, W - ml - mr), h = Math.max(10, H - mt - mb), gap = E > N ? 18 : 0;
+    return { W, H, ml, mt, w, h, gap, X: t => (t > N ? ml + w : ml + (N ? t / N : 0) * (w - gap)), Y: p => mt + (1 - p) * h };
   }
 
   function draw() {
@@ -285,11 +298,12 @@ export function open(ctx) {
       if (p !== 0.25 && p !== 0.75) s += `<text class="axis" x="${ml - 6}" y="${f(Y(p) + 4)}" text-anchor="end">${pct(p)}</text>`;
     }
     let labelled = -99;
+    if (over) s += `<text class="axis end ${over}" x="${f(X(E) + 8)}" y="${H - 5}" text-anchor="end">${over}</text>`;
     data.shows.forEach((show, i) => {
       if (show !== 'deal') return;
       const x = X(i + 1);
       s += `<line class="deal" x1="${f(x)}" x2="${f(x)}" y1="${mt}" y2="${mt + h + 4}"/>`;
-      if (x - labelled < 30) return; // no room for the word
+      if (x - labelled < 30 || (over && X(E) - x < 36)) return; // no room for the word
       s += `<text class="axis" x="${f(x)}" y="${H - 5}" text-anchor="middle">deal</text>`;
       labelled = x;
     });
@@ -312,6 +326,9 @@ export function open(ctx) {
     }
     if (last > 0) s += `<path class="area" d="${area}L${f(X(last))},${f(Y(0))}L${f(X(0))},${f(Y(0))}Z"/>`;
     s += `<path class="play" d="${play}"/><path class="luck" d="${jumps}"/>`;
+    // How it ended: a game lost falls from its last position to nothing, by no move and no card.
+    if (E > N && last === N) s += `<line class="fall" x1="${f(X(N))}" y1="${f(Y(value(N)))}" x2="${f(X(E))}" y2="${f(Y(0))}"/>`;
+    if (over) s += `<circle class="end ${over}" cx="${f(X(E))}" cy="${f(Y(E > N ? 0 : 1))}" r="4.5"/>`;
     // The mistakes: a numbered mark above each (side by side where they are close), and the cards' biggest swing.
     let marked = -99;
     shownItems().map((m, i) => [m, i]).sort((a, b) => a[0].at - b[0].at).forEach(([m, i]) => {
@@ -321,18 +338,21 @@ export function open(ctx) {
     });
     if (luck && value(luck.t) !== undefined) s += `<circle class="swing" data-luck cx="${f(X(luck.t))}" cy="${f(Y(value(luck.t)))}" r="4.5"/>`;
     // Where the board is, and where the pointer is.
-    const p = value(step);
-    s += `<line class="cursor" x1="${f(X(step))}" x2="${f(X(step))}" y1="${mt - 4}" y2="${mt + h + 4}"/>`;
-    if (p !== undefined) s += `<circle class="here" cx="${f(X(step))}" cy="${f(Y(p))}" r="5"/>`;
-    if (hover >= 0 && hover !== step) s += `<line class="cross" x1="${f(X(hover))}" x2="${f(X(hover))}" y1="${mt}" y2="${mt + h}"/>`;
+    const p = ended ? 0 : value(step), at = place();
+    s += `<line class="cursor" x1="${f(X(at))}" x2="${f(X(at))}" y1="${mt - 4}" y2="${mt + h + 4}"/>`;
+    if (p !== undefined) s += `<circle class="here" cx="${f(X(at))}" cy="${f(Y(p))}" r="5"/>`;
+    if (hover >= 0 && hover !== at) s += `<line class="cross" x1="${f(X(hover))}" x2="${f(X(hover))}" y1="${mt}" y2="${mt + h}"/>`;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     svg.innerHTML = s;
 
     // The tooltip.
     tip.hidden = hover < 0;
-    if (hover >= 0) {
+    if (hover > N) {
+      tip.innerHTML = `<b>${outcome()}</b>`;
+      tip.style.left = `${Math.max(60, Math.min(W - 60, X(hover)))}px`;
+    } else if (hover >= 0) {
       const v = value(hover), c = hover > 0 && data.shows[hover - 1] ? commitAt(hover) : undefined, b = value(hover - 1);
-      tip.innerHTML = `<b>${hover ? `Move ${hover}` : 'The deal'}</b>${v === undefined ? '' : ` · ${pct(v)}`}`
+      tip.innerHTML = `<b>${hover ? `Move ${hover}` : 'The deal'}</b>${v === undefined ? '' : ` · ${pct(v)}`}${over && hover === E ? ` · ${over}` : ''}`
         + (c !== undefined && b !== undefined && v !== undefined ? `<br>${data.shows[hover - 1] === 'deal' ? 'the deal' : 'the card'} ${points(v - c)}` : '');
       tip.style.left = `${Math.max(60, Math.min(W - 60, X(hover)))}px`;
     }
@@ -342,7 +362,7 @@ export function open(ctx) {
     document.querySelector('#info').innerHTML = review.info;
     const m = alt >= 0 && cur();
     $('.rv-move').textContent = m ? `${m.advice ? 'The computer\'s' : 'The better'} line, move ${alt} of ${m.len}: ${moveText(m.line[alt - 1], m.alt.snaps[alt - 1])}${alt === m.len && m.goal.show === 'turn' ? ', turning a card' : ''}`
-      : describe(step) + (p === undefined ? '' : ` · ${pct(p)}`);
+      : ended ? `${outcome()} · ${pct(0)}` : describe(step) + (p === undefined ? '' : ` · ${pct(p)}`) + (over && step === E ? ` · ${over}` : '');
     const frac = Math.min(1, done / total);
     $('.rv-bar').hidden = phase === 'done' || !!failed;
     $('.rv-bar i').style.width = `${(frac * 100).toFixed(1)}%`;
@@ -405,7 +425,7 @@ export function open(ctx) {
   }
 
   function note() {
-    let text = '<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt</span> ';
+    let text = `<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt${over ? ` <i class="l-end ${over}"></i>the game ${over}` : ''}</span> `;
     if (found?.length) text += 'Each mistake is measured by playing some hundreds of games out both ways, with the cards you had not seen reshuffled. ';
     text += '<span class="keys">Keys: ← → the game\'s moves · ↑ ↓ or 1–9 the mistakes · A Y B S their views · , . along the other line · ? the computer\'s move everywhere</span> ';
     if (ctx.undos) text += 'Moves that were taken back are left out: the game is read as if it had been played straight through.';
@@ -421,7 +441,9 @@ export function open(ctx) {
     requestAnimationFrame(() => el.querySelector('.rv-key.sel')?.scrollIntoView({ block: 'nearest' }));
   }
 
+  // To a place on the plot: a move of the game, or the end of a game lost.
   function setStep(t) {
+    ended = t > N && E > N;
     t = Math.max(0, Math.min(N, t));
     // The mistake picked out stays so while the board is within it.
     const items = shownItems(), within = m => m && t >= m.from && t <= m.end;
@@ -434,7 +456,7 @@ export function open(ctx) {
   // Along the game by d moves: always the game's own moves, from the
   // position in it that another line on the board began at.
   function go(d) {
-    setStep((alt >= 0 ? cur().from : step) + d);
+    setStep((alt >= 0 ? cur().from : place()) + d);
   }
 
   // Along the other line (the better line of the mistake picked out, or the
@@ -445,6 +467,7 @@ export function open(ctx) {
     if (alt < 0 && (step !== m.from || d < 0)) return;
     alt = Math.min(m.len, Math.max(alt, 0) + d);
     if (alt <= 0) { alt = -1; step = m.from; }
+    ended = false;
     show();
   }
 
@@ -454,6 +477,7 @@ export function open(ctx) {
     step = selected === i && alt < 0 && step === m.from && m.sure ? m.move : m.from; // again: the move
     selected = i;
     alt = -1;
+    ended = false;
     show();
   }
 
@@ -463,6 +487,7 @@ export function open(ctx) {
     if (!m) return;
     step = m.from;
     alt = -1;
+    ended = false;
     if (name === 'mine') step = Math.min(N, m.move);
     else if (name === 'better') alt = 1;
     else if (name === 'setup') alt = Math.max(1, m.len - 1);
@@ -470,8 +495,8 @@ export function open(ctx) {
   }
 
   const stepAt = e => {
-    const { ml, w } = geometry();
-    return Math.max(0, Math.min(N, Math.round((e.clientX - plot.getBoundingClientRect().left - ml) / w * N)));
+    const { ml, w, gap } = geometry(), x = e.clientX - plot.getBoundingClientRect().left - ml;
+    return x > w - gap / 2 ? E : Math.max(0, Math.min(N, Math.round(x / (w - gap) * N)));
   };
   let dragging = false;
   plot.addEventListener('pointerdown', e => {
@@ -502,7 +527,7 @@ export function open(ctx) {
     else if ('ask' in b.dataset) ask();
     else if ('luck' in b.dataset) setStep(luck.t);
     else if (b.dataset.go === 'start') setStep(0);
-    else if (b.dataset.go === 'end') setStep(N);
+    else if (b.dataset.go === 'end') setStep(E);
     else if (b.dataset.go) go(+b.dataset.go);
   });
   el.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); }); // keep the keys with the page
@@ -515,7 +540,7 @@ export function open(ctx) {
       if (items[i]) { selected = -1; pick(i); }
       return;
     }
-    let t = step + d;
+    let t = place() + d;
     while (t > 0 && t < N && !data.shows[t - 1]) t += d;
     setStep(t);
   }
@@ -528,7 +553,7 @@ export function open(ctx) {
     else if (k === 'ArrowUp' || k === '[') jump(-1);
     else if (k === 'ArrowDown' || k === ']') jump(1);
     else if (k === 'Home') setStep(0);
-    else if (k === 'End') setStep(N);
+    else if (k === 'End') setStep(E);
     else if (k === 'Escape') ctx.close();
     else if (k === ',' || k === '<') along(-1);
     else if (k === '.' || k === '>') along(1);
@@ -636,13 +661,14 @@ export function open(ctx) {
     get info() {
       const p = value(step);
       if (alt >= 0) return `Analysis · the ${cur().advice ? 'computer\'s' : 'better'} line at move <b>${cur().move}</b>, ${alt} of ${cur().len} played`;
+      if (ended) return `Analysis · ${suits === 1 ? '1 suit' : `${suits} suits`} · the end, after move ${N} · <b>lost</b>`;
       return `Analysis · ${suits === 1 ? '1 suit' : `${suits} suits`} · move <b>${step}</b> of ${N}${p === undefined ? '' : ` · chance of winning <b>${pct(p)}</b>`}`;
     },
     key,
     // For tests and the curious: where the work stands.
     get state() {
       return {
-        phase, failed, seconds, done, total, step, alt, selected, spent, values: values.size, luck,
+        phase, failed, seconds, done, total, step, alt, selected, spent, over, ended, values: values.size, luck,
         cands: cands.map(c => ({ from: c.st.from, to: c.st.to, n: c.stat.n, mean: c.stat.mean, se: c.stat.se, state: c.state })),
         found: found?.map(m => ({ move: m.move, end: m.end, exact: m.exact, n: m.n, yours: m.yours, better: m.better, cost: m.cost, line: m.line, title: m.title, mine: m.mine, betterText: m.betterText })),
       };

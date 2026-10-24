@@ -576,7 +576,9 @@ async function analyze() {
   press = sel = hint = null;
   clearFlash();
   $('#dangler').hidden = true;
-  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), cardName, render, close: closeReview });
+  // (Over and not won: marked as no longer to be won, or with nothing left to play.)
+  const lost = !g.isWon() && (!$('#fate').hidden || !g.hintMoves().length);
+  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview });
   document.body.dataset.review = '';
   render();
 }

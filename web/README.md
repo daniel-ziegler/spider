@@ -93,7 +93,13 @@ the better line; `?` or `C` has the computer's move shown at every position;
   that nothing is left to do before a deal, or at all. It values every
   position, and each position where cards were shown with those cards not
   yet known: a turned card as an unknown card in its place, a deal as an
-  unknown card on every column (it is trained on both).
+  unknown card on every column (it is trained on both). Where the game is
+  over the plot ends with how it ended, a ring that is no estimate of the
+  network's: at 100% on the last move of a game won, and for a game lost
+  (marked as no longer to be won when the analysis is opened, or with
+  nothing left to play) a place of its own after the last move, at 0%, since
+  the last position by its cards face up may still look worth something; the
+  board there is the last position. A game still going has none.
 * **A mistake** is a move after which the computer player wins less often
   than from the position before it, where it would have chosen its own. That
   is measured by playing games out, in shuffles of the cards the player had
