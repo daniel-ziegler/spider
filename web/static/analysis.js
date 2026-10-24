@@ -303,6 +303,8 @@ export function open(ctx) {
     // The mistake picked out.
     const sel = shownItems()[selected];
     if (sel) s += `<rect class="band" x="${f(X(sel.from))}" width="${f(Math.max(2, X(sel.end) - X(sel.from)))}" y="${mt}" height="${h}"/>`;
+    // Where the board is: a thin line behind the curve, so that what the cards did there still shows.
+    s += `<line class="cursor" x1="${f(X(step))}" x2="${f(X(step))}" y1="${mt - 4}" y2="${mt + h + 4}"/>`;
     // The curve: what the moves did slopes, what the cards did is upright.
     let area = '', play = '', jumps = '', last = -1;
     for (let t = 0; t <= N; t++) {
@@ -327,9 +329,8 @@ export function open(ctx) {
       s += `<g class="badge${i === selected ? ' sel' : ''}${m.sure && !m.maybe ? '' : ' unsure'}" data-key="${i}"><circle cx="${f(bx)}" cy="11" r="9"/><text x="${f(bx)}" y="15" text-anchor="middle">${i + 1}</text></g>`;
     });
     if (luck && value(luck.t) !== undefined) s += `<circle class="swing" data-luck cx="${f(X(luck.t))}" cy="${f(Y(value(luck.t)))}" r="4.5"/>`;
-    // Where the board is, and where the pointer is.
+    // Where the board is (its line is drawn before the curve), and where the pointer is.
     const p = value(step);
-    s += `<line class="cursor" x1="${f(X(step))}" x2="${f(X(step))}" y1="${mt - 4}" y2="${mt + h + 4}"/>`;
     if (p !== undefined) s += `<circle class="here" cx="${f(X(step))}" cy="${f(Y(p))}" r="5"/>`;
     if (hover >= 0 && hover !== step) s += `<line class="cross" x1="${f(X(hover))}" x2="${f(X(hover))}" y1="${mt}" y2="${mt + h}"/>`;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);

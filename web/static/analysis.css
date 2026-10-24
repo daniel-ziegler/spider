@@ -46,7 +46,7 @@ body[data-review] .card.up { cursor: default; }
 .rv-plot .badge text { fill: var(--ink); font: 600 11px system-ui, sans-serif; pointer-events: none; }
 .rv-plot .badge.sel circle { fill: var(--accent); stroke: none; }
 .rv-plot .badge.sel text { fill: #222; }
-.rv-plot .cursor { stroke: var(--accent); stroke-width: 1.5; }
+.rv-plot .cursor { stroke: #ffffff73; stroke-width: 1; }
 .rv-plot .here { fill: var(--accent); stroke: #14211d; stroke-width: 2; }
 .rv-plot .cross { stroke: #ffffff59; stroke-width: 1; }
 .rv-tip { position: absolute; top: 26px; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; background: #000c; color: var(--ink); font-size: 12px; line-height: 1.35; white-space: nowrap; pointer-events: none; text-align: center; }
