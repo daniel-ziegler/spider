@@ -11,7 +11,7 @@ import { Net } from './vnet.js';
 import { Game } from './game.js';
 import { makeState, playOut as jsPlayOut, rolloutConfig } from './lineplayer.js';
 import { prepare } from './analysis-core.js';
-import { roll, track, useEngine, interpreted } from './analysis-worker.js';
+import { roll, track, useEngine } from './analysis-worker.js';
 import { loadWasm } from './wasm.js';
 
 // A game of the line player's from a deal (in the configuration `cfg`, with this playOut).
@@ -54,7 +54,7 @@ export function suite(bytes, { suits = 4, seed = 70018, reps = 1 } = {}, wasm = 
       keep(`roll 4 worlds, ${name}`, time(() => roll({ ...stretchJob(suits, seed, moves, data, mid), from: 0, to: 4 }))[0]);
     }
   }
-  useEngine(wasm, interpreted()); // (as the analysis has it)
+  useEngine(wasm); // (as the analysis has it)
   out.sink = sink === 12345.678 ? 1 : 0; // (so that nothing is optimised away)
   return out;
 }

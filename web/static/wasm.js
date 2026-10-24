@@ -1,10 +1,10 @@
 // The analysis's line player and network in WebAssembly (spider.wasm, built
 // from ../wasm): what analysis-worker.js plays games out and values
 // positions with where it loads, in place of lineplayer.js's playOut and
-// vnet.js's Net, which give the same (test/wasm.mjs compares them). Where
-// JavaScript runs interpreted (Chrome with its optimizer off, as under
-// Android's Advanced Protection) this is some ten times as fast, and some
-// four times where it does not.
+// vnet.js's Net, which give the same (test/wasm.mjs compares them): the
+// games in less than half the time, the network in some two thirds of it,
+// and where JavaScript runs interpreted (Chrome with its optimizer off, as
+// under Android's Advanced Protection) both in a small fraction.
 import { playOut as jsPlayOut, fastConfig, rolloutConfig, SIZE } from './lineplayer.js';
 import { ENC } from './vnet.js';
 

@@ -93,10 +93,8 @@ async function whole(suits, n) {
   const mark = name => { t[name] = performance.now(); };
   // A first piece of work, so that the workers have started.
   await Promise.all(Array.from({ length: n }, () => p.run({ value: [data.jobs[0].enc] })));
-  const engines = await Promise.all(Array.from({ length: n }, () => p.run({ engine: true })));
-  const { engine } = engines[0];
-  mark(`workers up (network in ${engine.net}, games in ${engine.games})`);
-  log(`  (each worker's probe, ms: ${engines.map(e => `${e.engine.games} ${e.engine.probe.join('/')}`).join('; ')})`);
+  const { engine } = await p.run({ engine: true });
+  mark(`workers up (games and network in ${engine})`);
   const values = new Map(), batches = [];
   for (let i = 0; i < data.jobs.length; i += 6) batches.push(data.jobs.slice(i, i + 6));
   await Promise.all(batches.map(async b => { const { values: v } = await p.run({ value: b.map(j => j.enc) }); b.forEach((j, i) => values.set(j.key, v[i])); }));
