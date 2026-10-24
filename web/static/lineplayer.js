@@ -29,9 +29,10 @@ const LOST = -1073741824;
 const imul = Math.imul;
 
 // LineConfig::fast in lines.rs: six-step lines, a beam of 50, no expectimax.
+// (`name` and `suits` say which of lines.rs's it is, for wasm.js.)
 export function fastConfig(suits) {
   const base = {
-    maxSteps: 6, touch: true, beam: 0, expectTop: 0, expectSteps: 4, expectBeam: 20, splits: suits === 1 ? 2 : 1,
+    name: 'fast', suits, maxSteps: 6, touch: true, beam: 0, expectTop: 0, expectSteps: 4, expectBeam: 20, splits: suits === 1 ? 2 : 1,
     completed: 1000, hidden: 47, empty: 53, dealEmpty: -72, dealFlip: 0, endEmpty: 3, same: 0, off: -6, offRank: 3,
     king: 0, ranks: 9, runSq: 13, wrong: 0, clear: 0, hiddenSq: 0, dig: 0, turnable: 0,
   };
@@ -86,7 +87,7 @@ const keyOf = (a, b) => (b & 0x1FFFFF) * 4294967296 + (a >>> 0);
 // 50% and 31% of deals with one to four suits, at six times the work of
 // fastConfig (86%, 63%, 42%, 25%).
 export function rolloutConfig(suits) {
-  return { ...fastConfig(suits), ...ROLLOUT[suits] };
+  return { ...fastConfig(suits), ...ROLLOUT[suits], name: 'rollout' };
 }
 
 const STRONGER = { maxSteps: 14, beam: 100, expectTop: 4, expectSteps: 1 };

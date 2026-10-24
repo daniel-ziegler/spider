@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal Spider Solitaire with a perfect-information peeking solver"
 
-[dependencies]
+# (Only the terminal game, src/main.rs, uses crossterm: the web analysis
+# builds the library for WebAssembly, web/wasm, without it.)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crossterm = "0.28"
 
 [profile.release]

@@ -28,6 +28,7 @@
 <pre id="out"></pre>
 <script type="module">
 import { suite, played, stretchJob } from '/bench-worker.js';
+import { loadWasm } from '/wasm.js';
 import { fastConfig } from '/lineplayer.js';
 import { prepare, stretchValues, screenJobs, screen, findMistakes } from '/analysis-core.js';
 
@@ -56,7 +57,7 @@ async function net() {
   return netBytes;
 }
 
-const fmt = t => Object.entries(t).filter(([k]) => k !== 'sink').map(([k, v]) => `  ${k.padEnd(22)}${v.toFixed(1).padStart(9)} ms`).join('\n');
+const fmt = t => Object.entries(t).filter(([k]) => k !== 'sink').map(([k, v]) => `  ${k.padEnd(28)}${v.toFixed(1).padStart(9)} ms`).join('\n');
 
 function worker(suits) {
   const w = new Worker('/bench-worker.js', { type: 'module' });
@@ -92,7 +93,10 @@ async function whole(suits, n) {
   const mark = name => { t[name] = performance.now(); };
   // A first piece of work, so that the workers have started.
   await Promise.all(Array.from({ length: n }, () => p.run({ value: [data.jobs[0].enc] })));
-  mark('workers up');
+  const engines = await Promise.all(Array.from({ length: n }, () => p.run({ engine: true })));
+  const { engine } = engines[0];
+  mark(`workers up (network in ${engine.net}, games in ${engine.games})`);
+  log(`  (each worker's probe, ms: ${engines.map(e => `${e.engine.games} ${e.engine.probe.join('/')}`).join('; ')})`);
   const values = new Map(), batches = [];
   for (let i = 0; i < data.jobs.length; i += 6) batches.push(data.jobs.slice(i, i + 6));
   await Promise.all(batches.map(async b => { const { values: v } = await p.run({ value: b.map(j => j.enc) }); b.forEach((j, i) => values.set(j.key, v[i])); }));
@@ -231,7 +235,8 @@ async function run(full) {
     log(`network fetched in ${(performance.now() - t0).toFixed(0)} ms (${netBytes.byteLength} bytes)\n`);
     await new Promise(r => setTimeout(r, 50));
     log('ON THE PAGE (best of 2)');
-    const page = suite(netBytes, { suits, seed: SEED, reps: 2 });
+    const wasm = await loadWasm().catch(e => { log(`WebAssembly did not load: ${e.message}`); return null; });
+    const page = suite(netBytes, { suits, seed: SEED, reps: 2 }, wasm);
     log(fmt(page));
     // Compiled, the integer loop takes about a nanosecond a turn and the
     // float loop's Math.exp several; interpreted, both take some twenty.
@@ -255,7 +260,7 @@ async function run(full) {
       const col = k => res.map(r => r.times[k]).sort((a, b) => a - b);
       const span = k => { const v = col(k); return `${v[0].toFixed(0)}–${v.at(-1).toFixed(0)} ms (median ${v[v.length >> 1].toFixed(0)})`; };
       log(`\n${n} WORKERS AT ONCE: ${wall.toFixed(0)} ms in all`);
-      for (const k of ['int loop', 'net 24 positions', 'play a game', 'roll 4 worlds']) log(`  ${k.padEnd(22)}${span(k)}`);
+      for (const k of ['int loop', 'net 24 positions, js', 'net 24 positions, wasm', 'play a game, js', 'play a game, wasm', 'roll 4 worlds, js', 'roll 4 worlds, wasm']) if (res[0].times[k] !== undefined) log(`  ${k.padEnd(28)}${span(k)}`);
     }
     if (full) {
       const n = Math.max(1, Math.min(12, cores - 1) || 3);

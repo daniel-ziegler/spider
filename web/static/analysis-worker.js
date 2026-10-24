@@ -23,10 +23,46 @@
 // are, but for those swapped to make room). The same worlds for all the
 // games (common random numbers) make the differences between them far less
 // noisy than the rates. The answer has a byte per world, a bit for each game.
+//
+// The positions are valued in WebAssembly (wasm.js) where it loads, else in
+// JavaScript (vnet.js), and the games played in WebAssembly where JavaScript
+// runs interpreted (where it is compiled, lineplayer.js is the faster): the
+// two give the same.
 import { Net } from './vnet.js';
-import { NUM_COLS, MAXC, LEN, DOWN, DONE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut } from './lineplayer.js';
+import { NUM_COLS, MAXC, LEN, DOWN, DONE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
+import { loadWasm } from './wasm.js';
 
 let net = null;
+let playOut = jsPlayOut, engine = null;
+
+// Play and value with this engine of wasm.js's (null: in JavaScript; games:
+// whether to play the games with it too).
+export function useEngine(e, games = true) {
+  engine = e;
+  playOut = e && games ? e.playOut : jsPlayOut;
+}
+
+// Whether JavaScript runs interpreted here (Chrome with its optimizer off,
+// as under Android's Advanced Protection): a loop that takes a nanosecond
+// or so a turn compiled takes some twenty.
+// Half a million turns take some half a millisecond compiled and 6 to 10
+// interpreted; the fastest of up to eight runs is taken, which stops at
+// the first fast one, so that a busy start (every worker at once, the
+// compiler not yet done) does not look like it.
+export let probe = 1;
+export const probeMs = [];
+export function interpreted() {
+  probeMs.length = 0;
+  for (let run = 0; run < 8; run++) {
+    const t = performance.now();
+    let a = probe;
+    for (let i = 0; i < 5e5; i++) a = (Math.imul(a, 1103515245) + 12345) | 0;
+    probe = a;
+    probeMs.push(performance.now() - t);
+    if (probeMs.at(-1) < 1.5) return false;
+  }
+  return Math.min(...probeMs) > 3;
+}
 
 // A small seeded generator (mulberry32).
 export function random(seed) {
@@ -194,11 +230,16 @@ export function track({ suits, columns, faceDown, completed, stock, moves }, who
 }
 
 if (typeof WorkerGlobalScope !== 'undefined') {
-  onmessage = ({ data }) => {
-    if (data.net) net = new Net(data.net, data.suits);
+  // (Messages wait for the engine; they are still taken in order.)
+  // (The probe first: the WebAssembly's compiling would hold up the loop's.)
+  const slow = interpreted(), ready = loadWasm().then(e => useEngine(e, slow), () => {});
+  onmessage = async ({ data }) => {
+    await ready;
+    if (data.net) net = engine ? engine.net(data.net, data.suits) : new Net(data.net, data.suits);
     else if (data.value) postMessage({ id: data.id, values: data.value.map(enc => net.winProb(enc)) });
     else if (data.track) postMessage({ id: data.id, tracks: data.track.map(job => track(job)) });
     else if (data.ask) postMessage({ id: data.id, asked: track(data.ask, true) });
     else if (data.roll) postMessage({ id: data.id, rolls: roll(data.roll) });
+    else if (data.engine) postMessage({ id: data.id, engine: { net: engine ? 'wasm' : 'js', games: playOut === jsPlayOut ? 'js' : 'wasm', probe: probeMs.map(ms => +ms.toFixed(1)) } });
   };
 }

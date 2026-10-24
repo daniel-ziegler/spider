@@ -1,7 +1,9 @@
 //! The web game's analysis (web/static/analysis*.js, vnet.js): its checks in
 //! JavaScript must pass (web/test/analysis.mjs: the stretches of a game, the
 //! shuffled worlds its games are played out in, their statistics;
-//! web/test/vnet.mjs: the network's forward pass against PyTorch), and the
+//! web/test/vnet.mjs: the network's forward pass against PyTorch;
+//! web/test/wasm.mjs: the WebAssembly build, web/static/spider.wasm, plays
+//! and values as the JavaScript does), and the
 //! positions it encodes for the network (with the cards a deal brings not
 //! yet known, too) must be encoded as src/vnet.rs does, which the network
 //! was trained on.
@@ -39,4 +41,10 @@ fn analysis_checks_pass_and_encodings_match() {
 fn network_matches_pytorch() {
     let text = node("web/test/vnet.mjs");
     assert_eq!(text.lines().count(), 4, "{text}");
+}
+
+#[test]
+fn webassembly_matches_javascript() {
+    let text = node("web/test/wasm.mjs");
+    assert_eq!(text.lines().count(), 1, "{text}");
 }
