@@ -73,6 +73,15 @@ pub struct PimcConfig {
     /// The network overrules the line player once at most until a card
     /// turns, a deal or a suit completes.
     pub net_once: bool,
+    /// With the stock gone, a guessed world is also given to the
+    /// full-information solver after the candidate, with this much work
+    /// (0: not), and the candidate's value there is `solve_weight` times
+    /// whether it found a win and the rest the rollout's result (all of it
+    /// if the solver does not know; a world it proves lost is not played
+    /// out, nor is any with a weight of 1). `SPIDER_P_SOLVE`,
+    /// `SPIDER_P_SOLVE_WEIGHT`.
+    pub solve: u64,
+    pub solve_weight: f64,
 }
 
 impl PimcConfig {
@@ -97,6 +106,8 @@ impl PimcConfig {
             net: None,
             net_margin: 0.0,
             net_once: false,
+            solve: 0,
+            solve_weight: 0.5,
         }
     }
 
@@ -139,6 +150,8 @@ impl PimcConfig {
             }),
             net_margin: get("NET_MARGIN", d.net_margin),
             net_once: get::<u8>("NET_ONCE", d.net_once as u8) != 0,
+            solve: get("SOLVE", d.solve),
+            solve_weight: get("SOLVE_WEIGHT", d.solve_weight),
         }
     }
 }
@@ -256,6 +269,20 @@ fn rollout(obs: &Game, c: &Cand, visited: &HashSet<u64>, world_seed: u64, cfg: &
     let mut seen = visited.clone();
     seen.insert(State::from_game(&mask(&world)).hash());
     let level = obs.deals_remaining();
+    let mut solved = None;
+    if cfg.solve > 0 && level == 0 && !world.is_won() {
+        use crate::solver::{Solver, Verdict};
+        solved = match Solver::new(&world, cfg.solve).solve(&world).verdict {
+            Verdict::Solvable => Some(1.0),
+            Verdict::Unsolvable => Some(0.0),
+            Verdict::Unknown => None,
+        };
+        if cfg.solve_weight >= 1.0 || solved == Some(0.0) {
+            if let Some(v) = solved {
+                return (v * if cfg.stage { 1.0 } else { 8.0 + cfg.win_bonus }, 0);
+            }
+        }
+    }
     let stop = if cfg.stage { (level > 0).then_some(level) } else { (cfg.horizon > 0 && level >= cfg.horizon).then(|| level - cfg.horizon) };
     let (work, stopped) = play_until(&mut world, &cfg.rollout, seen, stop);
     let v = if cfg.stage {
@@ -271,6 +298,10 @@ fn rollout(obs: &Game, c: &Cand, visited: &HashSet<u64>, world_seed: u64, cfg: &
         cfg.base.eval(&s, world.deals_remaining(), cfg.base.empty) as f64 / cfg.base.completed as f64
     } else {
         world.completed.len() as f64 + if world.is_won() { cfg.win_bonus } else { 0.0 }
+    };
+    let v = match solved {
+        Some(sv) => cfg.solve_weight * sv * if cfg.stage { 1.0 } else { 8.0 + cfg.win_bonus } + (1.0 - cfg.solve_weight) * v,
+        None => v,
     };
     (v, work)
 }

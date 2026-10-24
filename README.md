@@ -657,6 +657,129 @@ margin by which a line must beat dealing (`SPIDER_V_DEAL_MARGIN`, best at
 0.1); dealing as soon as the line player stops raising its normal value
 does as well (628).
 
+### What is left to gain
+
+A day on a rented machine (thirty cores and a GPU, October 2026) went into
+asking how much stronger a player that does not peek can be, with every
+number of suits. In short: nothing found plays much better than the line
+player, and nothing that sees only the face-up cards will win nine games in
+ten of two suits or more; but replanning is worth far more to the cheap
+player of the web game's analysis than was thought, and with four suits
+the default player spends two thirds of its time on an expectimax that buys
+nothing.
+
+**Where games are lost.** `--bin winnable` with one, two and three suits
+(200, 160 and 200 games; four suits are above):
+
+| suits | line player won | winnable at the start | before the last deal | after the last deal |
+|-------|-----------------|-----------------------|----------------------|---------------------|
+| 1     | 87.5%           | 100%                  | 96.5% (1% unknown)   | 95.5%               |
+| 2     | 70%             | 100%                  | 92.5% (6% unknown)   | 90% (2.5% unknown)  |
+| 3     | 52%             | 100%                  | 71% (18% unknown)    | 68.5% (13% unknown) |
+
+So with fewer suits most lost games can still be won after the last deal by
+a player who sees every card. But they are the games that come to the last
+deal with many cards face down, and what is under them decides:
+
+| face down right after the last deal (seeds 10001-11000) | 0-4     | 5-9   | 10-14 | 15-19  | 20-24  | 25-29 | 30 or more |
+|---------------------------------------------------------|---------|-------|-------|--------|--------|-------|------------|
+| one suit, games won                                     | 629/630 | 51/52 | 64/69 | 68/82  | 39/73  | 21/51 | 10/43      |
+| two suits                                               | 441/442 | 45/45 | 79/99 | 69/110 | 52/122 | 21/97 | 9/85       |
+
+**Rollouts with fewer suits** (`--bin pimc`, which had only been measured
+with four; wins of 1,000, seeds 10001-11000, with three suits 40001-41000):
+
+| suits | line player | rollouts after the last deal | the solver on the guessed worlds | rollouts at every decision |
+|-------|-------------|------------------------------|----------------------------------|----------------------------|
+| 1     | 882         | 911 (64 rollouts)            | 900                              | 918 (43 s a game)          |
+| 2     | 716         | 732 (128)                    | 748                              | 410 of 600 (line player: 438) |
+| 3     | 537         | 560 (128)                    | 563                              |                            |
+
+Two to three points, as with four suits, and again only after the last
+deal. `SPIDER_P_SOLVE=<work>` (new) gives each guessed world, after the
+candidate, to the full-information solver instead of playing it out
+(`SPIDER_P_SOLVE_WEIGHT`: how much of the value is the solver's verdict, 1
+for no rollouts): with two suits that is a point and a half better than
+rollouts and no dearer, with one and three suits no better. A deeper last
+search before giving up (up to thirty steps, any split, a beam of up to
+3,000, for any line that turns a card or completes a suit; not kept) finds
+nothing: when the line player stops with one suit there is nothing more
+within reach.
+
+**The networks.** The AlphaZero search (`az/`) with a network imitating
+8,000 games (64 simulations, seeds 20001-20600) wins 148 of 600 where the
+line player wins 248: no better than the player its imitation games are of
+(26%: they are played without replanning), so no self-play was run from it.
+The value network player with one suit (`vnet/`, 400,000 games of the line
+player, 19 million positions, 93% of them of games won) wins none of 2,000
+games choosing every line and 979 deciding only about dealing, where the
+line player wins 1,761: with almost every position a won one it has nothing
+to tell lines apart by.
+
+**Weights for the last stage** (`stage/coord.py`: a coordinate search on
+whole games' wins, for one stage's weights if asked; 20,000 and 8,000
+tuning games, changes kept at two standard errors). With one suit `HIDDEN`
+26, `KING` 8 and `TURNABLE` 2 after the last deal are worth +0.29 ± 0.13
+points on 10,000 other seeds to the analysis's player; with two suits
+`HIDDEN` 15 and `SAME` 3 +0.70 ± 0.28 on 6,000. The rest of the weights are
+where they should be for the last stage too.
+
+**Replanning and the beam, for the analysis's player.** `web/README.md`
+has replanning as doubling the work for nothing; with the one-step
+expectimax of `LineConfig::rollout` it is the cheapest strength there is,
+and a wider beam then pays too. Seeds 700001-706000, differences paired,
+milliseconds on the rented machine with all its cores busy:
+
+| `SPIDER_L_ROLLOUT=1` and           | four suits            | ms a game | three suits      | two suits             |
+|------------------------------------|-----------------------|------|-----------------------|-----------------------|
+| nothing (the analysis's player)    | 31.92%                | 107  | 49.12%                | 67.75%                |
+| `BEAM=150`                         | +1.23 ± 0.42          | 137  | +0.67 ± 0.39          |                       |
+| `REPLAN=6`                         | +2.13 ± 0.48          | 160  | +2.13 ± 0.48          |                       |
+| `REPLAN=4 BEAM=50`                 | +1.62 ± 0.56          | 129  | +1.27 ± 0.55          |                       |
+| `REPLAN=4 BEAM=75`                 | +2.93 ± 0.55          | 167  | +1.53 ± 0.53          |                       |
+| `REPLAN=4`                         | +3.55 ± 0.54          | 208  | +2.23 ± 0.51          | +1.32 ± 0.44          |
+| `REPLAN=4 BEAM=150`                | +4.88 ± 0.54          | 278  | +2.57 ± 0.53          | +2.00 ± 0.47          |
+| `REPLAN=4 BEAM=300`                | +5.60 ± 0.56          | 464  | +3.67 ± 0.53          | +2.43 ± 0.50          |
+| the default player                 | +5.13 ± 0.66 (37.05%) | 1338 | +4.43 ± 0.67 (53.55%) | +2.73 ± 0.60 (70.48%) |
+
+Also with four suits, on `REPLAN=4`: replanning after three steps is the
+same and after five a point less (with a beam of 150); only with one or no
+deals left +1.72 ± 0.42, with two or fewer +2.37 ± 0.47, with three or more
++1.00 ± 0.36; lines of ten steps +1.88 ± 0.55; and with a beam of 150,
+expectimax over two lines +4.13 ± 0.64, over eight +4.55 ± 0.60, over none
+-1.40 ± 0.67 (replanning needs the expectimax: this is what the earlier
+trial lacked). Expectimax two steps deep is worse than one at every beam
+(-1.07 ± 0.64 at 300).
+
+So with four suits the analysis's player at twice its time wins three and a
+half points more, and at four times its time what the default player wins
+at twelve and a half. On top of `REPLAN=4 BEAM=300` (37.52%), still with four suits:
+the wider search before a deal (`DEAL_SPLITS=3`) +0.57 ± 0.21, lines of
+twenty steps +0.63 ± 0.39, a beam of 600 +0.52 ± 0.37, expectimax over
+eight lines +0.27 ± 0.49, replanning after two steps +0.10 ± 0.44. The first two together
+(`REPLAN=4 BEAM=300 DEAL_SPLITS=3 MAX_STEPS=20`) win 38.42% at 0.9 s a
+game and with a beam of 600 38.97% at 1.8 s, +1.37 ± 0.66 and +1.92 ± 0.66
+on the default player (1.3 s), whose expectimax four steps deep is what
+they do without. With three and two suits the same settings are no better
+than the default (53.02% against 53.55%, 70.33% against 70.48%), at two
+thirds of its time and at half.
+
+**One suit.** The analysis's player (two-step lines, one-step expectimax)
+wins 89.15% of seeds 700001-710000 and the default 86.40%. Longer lines by
+themselves lose, at every stage or after the last deal only, and so does
+expectimax two steps deep at every stage (-0.8); but after the last deal
+only, four-step lines with expectimax two steps deep
+(`SPIDER_L_K0_MAX_STEPS=4 SPIDER_L_K0_EXPECT_STEPS=2`) are worth +1.38 ±
+0.23 at half as much time again (+1.50 with the last stage's weights
+above), and nothing more was found: expectimax over eight lines or three
+steps deep, the same in the stage before, replanning (-0.7) and a beam do
+no more.
+
+None of this is in the players' defaults or the web game yet: the port
+(`web/static/lineplayer.js`, `web/wasm`) has neither replanning nor
+settings by stage, and the analysis's network is of the games of the player
+it has.
+
 ### Superhint: following the solver's line
 
 `H` shows the winning line's next move on the solver line, marks its next
