@@ -11,10 +11,10 @@ import { makeState, playOut, rolloutConfig } from './lineplayer.js';
 import { prepare } from './analysis-core.js';
 import { roll, track } from './analysis-worker.js';
 
-// A game of the line player's from a deal.
-export function played(suits, seed) {
+// A game of the line player's from a deal (in the configuration `cfg`).
+export function played(suits, seed, cfg = rolloutConfig(suits)) {
   const g = new Game(suits, seed), moves = [];
-  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), rolloutConfig(suits), moves);
+  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), cfg, moves);
   return moves;
 }
 

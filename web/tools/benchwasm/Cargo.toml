@@ -1,0 +1,12 @@
+[package]
+name = "benchwasm"
+version = "0.1.0"
+edition = "2021"
+description = "The WebAssembly loop of the analysis benchmark (static/bench.html)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+panic = "abort"
