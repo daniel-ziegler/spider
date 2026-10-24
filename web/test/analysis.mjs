@@ -173,6 +173,39 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   check(two.exact && two.move === stretches[1].from + 3 && two.line[0].count === 3 && Math.abs(two.cost.mean + 0.35) < 0.1, 'a mistake is not put to its move');
   check(!three.exact && three.move === stretches[5].from + 1 && Math.abs(three.cost.mean + 0.2) < 0.1, 'a loss of several moves');
   for (const m of found) check(m.n === SEARCH.fresh && m.cost.mean < 0, 'a loss not measured in fresh worlds');
+  // With guesses played by idle workers (a pool of four that takes the work
+  // ranked first and drops guesses no longer made, each piece taking a random
+  // time) the same is found, from the same games asked for.
+  const pool = (play, n, seed) => {
+    const queue = [], delay = random(seed);
+    let idle = n, dropped = 0, guessed = 0;
+    const pump = () => {
+      while (idle && queue.length) {
+        let pick = -1;
+        for (let i = 0; i < queue.length; i++) {
+          const r = queue[i].rank?.() ?? 0;
+          if (r < 0) { queue.splice(i--, 1)[0].resolve(null); dropped++; continue; }
+          if (r === 0) { pick = i; break; }
+          if (pick < 0) pick = i;
+        }
+        if (pick < 0) break;
+        const { job, rank, resolve } = queue.splice(pick, 1)[0];
+        if (rank && rank() > 0) guessed++;
+        idle--;
+        setTimeout(() => { idle++; play(job).then(resolve); pump(); }, delay(4));
+      }
+    };
+    const roll = (job, rank) => new Promise(resolve => { queue.push({ job, rank, resolve }); pump(); });
+    roll.stats = () => ({ dropped, guessed });
+    return roll;
+  };
+  for (const seed of [1, 2]) {
+    let asked = 0;
+    const roll = pool(fake, 4, seed);
+    const again = await findMistakes({ stretches, cuts, job: i => ({ i }), roll, spare: 8, update: (c, n) => { asked = n; } });
+    check(JSON.stringify(again) === JSON.stringify(found) && asked === seen, `guesses change what is found: ${again.map(m => m.at)}`);
+    check(roll.stats().guessed > 0, 'nothing is guessed');
+  }
   // The order the network gives says where the games go: with few of them, the one mistake it puts first is found, and without it none.
   const few = { ...SEARCH, games: 300, start: 1, group: 1 };
   const led = await findMistakes({ stretches, cuts, prior: made.map((_, i) => (i === 3 ? -0.3 : 0)), job: i => ({ i }), roll: fake, opt: few });
