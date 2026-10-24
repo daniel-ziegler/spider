@@ -61,18 +61,25 @@ the better line; `?` or `C` has the computer's move shown at every position;
   one the analysis began with (`LineConfig::fast`) 86%, 63%, 42% and 25%, at
   a sixth of the work. `static/lineplayer.js` is a port of it that plays move
   for move as the Rust does (65 ms a four-suit game from the deal on one core, 17 ms a one-suit game).
-* **WebAssembly.** The workers value positions with the network, and where
-  JavaScript runs interpreted (Chrome with its optimizer off, as under
-  Android's Advanced Protection: a short loop at a worker's start tells)
-  also play the games, in WebAssembly (`static/spider.wasm`, built from
-  `wasm/`: the line player of `src/lines.rs` itself and a port of
-  `vnet.js`'s forward pass; `static/wasm.js` loads it). It gives what the
-  JavaScript gives, to the bit (`test/wasm.mjs`). The network is some 30%
-  faster in it than in compiled JavaScript, the games some 30% slower;
-  where JavaScript is interpreted both are several times faster in it,
-  so a whole analysis takes about as long there as anywhere. `bench.html`
-  times all this on a device. After a change to the line player or the
-  network, rebuild it (see `wasm/src/lib.rs`).
+* **WebAssembly.** The workers play the games and value the positions in
+  WebAssembly where it loads (`static/spider.wasm`, built from `wasm/`:
+  `lineplayer.js` and `vnet.js`'s forward pass over again in Rust;
+  `static/wasm.js` loads it), else in JavaScript. It gives what the
+  JavaScript gives, to the bit (`test/wasm.mjs`, and 2,000 more deals played
+  the same by both), in less than half the time for the games (28 ms a
+  four-suit game from the deal on one core against 63) and two thirds of it
+  for the network; where JavaScript runs interpreted (Chrome with its
+  optimizer off, as under Android's Advanced Protection) the games take a
+  seventeenth of the JavaScript's time and the network a twentieth, so a
+  whole analysis takes about as long there as anywhere: the cheap player's
+  game of `bench.html` (3,552 games played out) 22 s on twelve workers of a
+  laptop, where it took 42 s with the games in JavaScript. (The Rust of
+  `src/lines.rs` itself, which this first used for the games, took half as
+  long again as the JavaScript: it copies and allocates for every position,
+  and several workers at once got in each other's way in the cache.)
+  `bench.html` times all this on a device. After a change to the line
+  player or the network, change `wasm/src` to match and rebuild it (see
+  `wasm/src/lib.rs`).
 * **What is analysed.** The line of moves on the board, as if it had been
   played straight through. Moves taken back are not looked at: the tree of
   moves does not say when they were played, so what the player had seen of
