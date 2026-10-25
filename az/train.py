@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AZPLAY = os.environ.get("AZPLAY", os.path.join(ROOT, "target", "release", "azplay"))
 NUM_COLS = 10
 C = 20
-G = 16
+G = 29
 POS = NUM_COLS * C + G
 
 # Column fields (see `features` in src/az.rs): ranks (rank+1, 0 for none)
@@ -38,7 +38,7 @@ SUIT_FIELDS = [4, 7, 9]
 NUM_FIELDS = [i for i in range(C) if i not in RANK_FIELDS + SUIT_FIELDS]
 NUM_SCALE = np.array([{1: 5, 2: 13, 10: 13, 11: 13, 12: 4, 13: 8, 14: 8, 15: 8, 16: 13}.get(i, 1) for i in NUM_FIELDS], np.float32)
 GLOB_SCALE = np.ones(G, np.float32)
-for i, s in {6: 8, 7: 4, 8: 44, 9: 104, 12: 10}.items():
+for i, s in {6: 8, 7: 4, 8: 44, 9: 104, 12: 10, **{i: 8 for i in range(16, 29)}}.items():
     GLOB_SCALE[i] = s
 
 
@@ -132,9 +132,12 @@ class Buffer:
         return x, torch.from_numpy(pi).to(dev), torch.from_numpy(mask).to(dev), z, h, played, h_next, q, q_next, torch.from_numpy(starts).to(dev), ks
 
     def calibrate(self):
-        """Least-squares fit z ~ a h + b over the buffer."""
+        """Least-squares fit z ~ a h + b over the buffer (nothing to fit
+        where the records have no lookahead value)."""
         h = np.array([r[3] for r in self.recs], np.float64)
         z = np.array([r[2] for r in self.recs], np.float64)
+        if np.isnan(h).any():
+            return 0.0, 0.0, 0.0
         a, b = np.polyfit(h, z, 1)
         r = np.corrcoef(h, z)[0, 1]
         return float(a), float(b), float(r)
@@ -210,8 +213,8 @@ class Azplay:
                 pi = np.frombuffer(self.read(4 * k), np.float32)
                 yield "R", (feats, pi, z, h, played, h_next, q, q_next)
             elif t == b"G":
-                seed, completed, won, decisions = struct.unpack("<QBBI", self.read(14))
-                yield "G", (seed, completed, won, decisions)
+                seed, completed, won, decisions, overrides = struct.unpack("<QBBII", self.read(18))
+                yield "G", (seed, completed, won, decisions, overrides)
             elif t == b"Q":
                 return
             else:
@@ -243,6 +246,43 @@ def evaluate(net, x, dev, chunk=32768):
     return np.concatenate(vs), np.concatenate(ps)
 
 
+class Stream(Azplay):
+    """The messages of an azplay run kept in a file (`azplay imitate ... > file`)."""
+
+    def __init__(self, path):
+        self.out = open(path, "rb", buffering=1 << 22)
+
+    def close(self):
+        self.out.close()
+
+
+@torch.no_grad()
+def validate(net, buf, dev, n=20000):
+    """On records held out: the value's log loss against the outcome (and
+    what a constant would get), how often the policy's first move is the
+    one played, and the mean outcome by tenths of the value."""
+    net.eval()
+    recs = buf.recs[:n]
+    vs, zs, hit = [], [], 0
+    for i in range(0, len(recs), 512):
+        rs = recs[i : i + 512]
+        x = torch.from_numpy(np.concatenate([r[0] for r in rs]).reshape(-1, POS)).to(dev)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            v, p = net(x)
+        v, p = torch.sigmoid(v.float()).cpu().numpy(), p.float().cpu().numpy()
+        at = 0
+        for r in rs:
+            k = len(r[1])
+            vs.append(v[at])
+            zs.append(r[2])
+            hit += int(np.argmax(p[at + 1 : at + 1 + k]) == r[4])
+            at += k + 1
+    vs, zs = np.clip(np.array(vs, np.float64), 1e-6, 1 - 1e-6), np.array(zs, np.float64)
+    ll = lambda q: float(-(zs * np.log(q) + (1 - zs) * np.log(1 - q)).mean())
+    bins = [[round(float(zs[(vs >= a / 10) & (vs < (a + 1) / 10)].mean()), 3), int(((vs >= a / 10) & (vs < (a + 1) / 10)).sum())] for a in range(10) if ((vs >= a / 10) & (vs < (a + 1) / 10)).any()]
+    return dict(n=len(recs), vloss=round(ll(vs), 4), vloss_const=round(ll(np.full_like(zs, zs.mean())), 4), corr=round(float(np.corrcoef(vs, zs)[0, 1]), 3), top1=round(hit / len(recs), 4), calib=bins)
+
+
 class Log:
     def __init__(self, path):
         self.f = open(path, "a")
@@ -272,23 +312,35 @@ def az_env(a):
 def cmd_imitate(a, dev):
     os.makedirs(a.out, exist_ok=True)
     log = Log(os.path.join(a.out, "log.jsonl"))
-    net = Net(a.d, a.layers, a.heads).to(dev)
+    if a.init:
+        net, _ = load(a.init, dev)
+    else:
+        net = Net(a.d, a.layers, a.heads).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
-    buf = Buffer(10**9)
-    games, suits_done, wins = 0, 0, 0
-    proc = Azplay("imitate", a.suits, a.first, a.games, az_env(a))
-    for kind, m in proc.messages():
-        if kind == "R":
-            buf.add(*m)
-        elif kind == "G":
-            games += 1
-            suits_done += m[1]
-            wins += m[2]
-    proc.close()
+    buf, val = Buffer(10**9), Buffer(10**9)
+    games, suits_done, wins, missed, decisions = 0, 0, 0, 0, 0
+    # Games of the line player: played now, or kept in files by `azplay
+    # imitate ... > file`. One game in fifty is held out.
+    procs = [Stream(f) for f in a.data] if a.data else [Azplay("imitate", a.suits, a.first, a.games, az_env(a))]
+    for proc in procs:
+        recs = []
+        for kind, m in proc.messages():
+            if kind == "R":
+                recs.append(m)
+            elif kind == "G":
+                for r in recs:
+                    (val if m[0] % 50 == 0 else buf).add(*r)
+                recs = []
+                games += 1
+                suits_done += m[1]
+                wins += m[2]
+                decisions += m[3]
+                missed += m[4]
+        proc.close()
     a_, b_, r_ = buf.calibrate()
     calib = (a_, b_)
-    log(phase="imitate-data", games=games, records=len(buf), suits=suits_done / max(games, 1), wins=wins / max(games, 1), calib=[round(a_, 4), round(b_, 4)], corr=round(r_, 3))
-    steps = a.epochs * len(buf) // a.batch
+    log(phase="imitate-data", games=games, records=len(buf), held_out=len(val), decisions=decisions, missed=missed, suits=suits_done / max(games, 1), wins=wins / max(games, 1), calib=[round(a_, 4), round(b_, 4)], corr=round(r_, 3))
+    steps = int(a.epochs * len(buf)) // a.batch
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=steps)
     t0 = time.time()
     vl = pl = 0.0
@@ -296,8 +348,10 @@ def cmd_imitate(a, dev):
         v, p = train_step(net, opt, buf, a.batch, dev, calib, a.lam)
         sched.step()
         vl, pl = 0.98 * vl + 0.02 * v, 0.98 * pl + 0.02 * p
-        if s % 200 == 0 or s == steps:
+        if s % 500 == 0 or s == steps:
             log(phase="imitate", step=s, of=steps, vloss=round(vl, 4), pkl=round(pl, 4), secs=round(time.time() - t0))
+        if (s % 5000 == 0 or s == steps) and len(val):
+            log(phase="held-out", step=s, **validate(net, val, dev))
     save(net, opt, os.path.join(a.out, "imitate.pt"), {"suits": a.suits, "calib": calib})
     save(net, opt, os.path.join(a.out, "latest.pt"), {"suits": a.suits, "games": 0, "calib": calib})
 
@@ -320,6 +374,17 @@ def cmd_selfplay(a, dev):
     calib = tuple(ck.get("calib", (0.0, 0.0)))
     lam = a.lam if "calib" in ck else 1.0
     buf = Buffer(a.buffer)
+    if a.prefill:
+        # Games of the line player to begin with (kept in a file by `azplay
+        # imitate`), which the games played here push out as they come.
+        st = Stream(a.prefill)
+        for kind, m in st.messages():
+            if kind == "R":
+                buf.add(*m)
+                if len(buf) >= a.prefill_n:
+                    break
+        st.close()
+        buf.trained_at = buf.added
     first = a.first + games_total
     proc = Azplay("selfplay", a.suits, first, 10**9, az_env(a))
     since, it = 0, 0
@@ -355,6 +420,7 @@ def cmd_selfplay(a, dev):
                     suits=round(float(np.mean(comp)), 3),
                     wins=round(float(np.mean([s[2] for s in stats])), 4),
                     decisions=round(float(np.mean([s[3] for s in stats])), 1),
+                    overrides=round(float(np.mean([s[4] for s in stats])), 2),
                     buffer=len(buf),
                     steps=n_steps,
                     vloss=round(vl, 4),
@@ -383,6 +449,10 @@ def cmd_eval(a, dev):
         elif kind == "G":
             res.append(m)
     proc.close()
+    if a.results:
+        with open(a.results, "w") as f:
+            for seed, completed, won, decisions, overrides in sorted(res):
+                f.write(f"seed {seed:>5}: {'WIN' if won else 'loss'} suits {completed} decisions {decisions} overrides {overrides}\n")
     comp = [r[1] for r in res]
     print(
         json.dumps(
@@ -394,6 +464,7 @@ def cmd_eval(a, dev):
                 wins=sum(r[2] for r in res),
                 win_rate=round(float(np.mean([r[2] for r in res])), 4),
                 completed=round(float(np.mean(comp)), 3),
+                overrides=round(float(np.mean([r[4] for r in res])), 2),
                 secs_per_game=round((time.time() - t0) / max(len(res), 1), 2),
             )
         ),
@@ -408,10 +479,14 @@ def main():
     ap.add_argument("--out", default="runs/s4")
     ap.add_argument("--init")
     ap.add_argument("--ckpt")
+    ap.add_argument("--data", nargs="*", help="imitate: files of `azplay imitate` output instead of playing")
+    ap.add_argument("--prefill", help="selfplay: a file of `azplay imitate` output to fill the buffer from first")
+    ap.add_argument("--prefill-n", type=int, default=500_000)
+    ap.add_argument("--results", help="eval: write every seed's result here")
     ap.add_argument("--first", type=int, default=1_000_001)
     ap.add_argument("--count", type=int, default=200)
     ap.add_argument("--games", type=int, default=2000)
-    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--epochs", type=float, default=3)
     ap.add_argument("--d", type=int, default=128)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)

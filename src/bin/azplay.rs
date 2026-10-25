@@ -5,6 +5,12 @@
 //! Settings from the environment: AZ_CONCURRENT (games in lockstep),
 //! AZ_SIMS, AZ_CPUCT, AZ_ALPHA, AZ_EPS, AZ_TEMP_MOVES, AZ_MAX_MOVES,
 //! AZ_MAX_DEPTH, AZ_MAX_LINES, AZ_DEAL_SAMPLES, AZ_THREADS, AZ_SEED;
+//! AZ_TREE_BEAM, AZ_TREE_STEPS (the line search below a search's root),
+//! AZ_REPLAN (steps of the chosen line played before searching again),
+//! AZ_ANCHOR=1 with AZ_MARGIN and AZ_ANCHOR_PRIOR (the line player's move
+//! unless the search's is worth more by the margin), AZ_H=0 (no lookahead
+//! values in the records), AZ_IMIT_SAMPLE and AZ_IMIT_SOFT (imitation: the
+//! share of decisions recorded, the soft share of the policy target);
 //! SPIDER_L_* for the line search (and the line player imitated);
 //! AZ_IMIT_TAU for the softness of imitation's policy targets.
 //!
@@ -16,7 +22,10 @@
 //!       player's lookahead value, move played, next position's lookahead
 //!       value, search value and the next position's (NaN without search),
 //!       position, afterstates of its k moves, visit distribution)
-//!   'G' seed:u64, completed:u8, won:u8, decisions:u32: a finished game
+//!   'G' seed:u64, completed:u8, won:u8, decisions:u32, overrides:u32: a
+//!       finished game (overrides: decisions where the anchored search
+//!       overruled the line player; in imitation, decisions whose move was
+//!       not among those offered)
 //!   'Q': all games done
 use spider::az::{imitate, AzParams, Driver, Eval, GameResult, Record, C, G, POS};
 use spider::lines::LineConfig;
@@ -45,6 +54,7 @@ fn send_game(out: &mut impl Write, r: &GameResult, recs: &[Record]) -> std::io::
     out.write_all(&r.seed.to_le_bytes())?;
     out.write_all(&[r.completed, r.won as u8])?;
     out.write_all(&(r.decisions as u32).to_le_bytes())?;
+    out.write_all(&r.overrides.to_le_bytes())?;
     Ok(())
 }
 
@@ -71,26 +81,38 @@ fn main() -> std::io::Result<()> {
     p.deal_samples = env("AZ_DEAL_SAMPLES", p.deal_samples);
     p.seed = env("AZ_SEED", p.seed);
     p.lines = LineConfig::from_env(suits);
+    p.tree = LineConfig { beam: env("AZ_TREE_BEAM", p.lines.beam), max_steps: env("AZ_TREE_STEPS", p.lines.max_steps), replan: 0, ..p.lines };
+    p.replan = env("AZ_REPLAN", 0);
+    p.anchor = env("AZ_ANCHOR", 0) != 0;
+    p.margin = env("AZ_MARGIN", 0.0);
+    p.anchor_prior = env("AZ_ANCHOR_PRIOR", p.anchor_prior);
+    p.imit_sample = env("AZ_IMIT_SAMPLE", 1.0);
+    p.imit_soft = env("AZ_IMIT_SOFT", 0.5);
+    p.use_h = env("AZ_H", 1) != 0;
 
     if mode == "imitate" {
         let tau: f32 = env("AZ_IMIT_TAU", 10.0);
         let next = std::sync::atomic::AtomicU64::new(first);
-        let results = std::sync::Mutex::new(Vec::new());
-        std::thread::scope(|sc| {
+        // Games are written as they finish (a long run's would not fit in
+        // memory).
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        std::thread::scope(|sc| -> std::io::Result<()> {
             for _ in 0..threads {
-                sc.spawn(|| loop {
+                let tx = tx.clone();
+                let (next, p) = (&next, &p);
+                sc.spawn(move || loop {
                     let seed = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if seed >= first + count {
+                    if seed >= first + count || tx.send(imitate(p, seed, tau)).is_err() {
                         break;
                     }
-                    let r = imitate(&p, seed, tau);
-                    results.lock().unwrap().push(r);
                 });
             }
-        });
-        for (r, recs) in results.into_inner().unwrap() {
-            send_game(&mut out, &r, &recs)?;
-        }
+            drop(tx);
+            for (r, recs) in rx {
+                send_game(&mut out, &r, &recs)?;
+            }
+            Ok(())
+        })?;
         out.write_all(b"Q")?;
         out.flush()?;
         return Ok(());

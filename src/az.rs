@@ -29,7 +29,7 @@
 
 use crate::game::{Game, Move, NUM_COLS};
 use crate::human::{mask, BLANK};
-use crate::lines::{decide_steps, line_to, lookahead_value, search_state, Choice, LineConfig, LOST};
+use crate::lines::{decide, line_to, lookahead_value, progress, search_state, Decision, LineConfig, Tempo, LOST};
 use crate::solver::{mix, State, MAXC};
 use std::cmp::Reverse;
 use std::collections::HashSet;
@@ -37,7 +37,7 @@ use std::collections::HashSet;
 /// Features per column (bytes; ranks and suits as indices, 0 for none).
 pub const C: usize = 20;
 /// Global features.
-pub const G: usize = 16;
+pub const G: usize = 29;
 /// Bytes describing one position.
 pub const POS: usize = NUM_COLS * C + G;
 
@@ -62,13 +62,16 @@ fn stranded(s: &State, deals_left: usize) -> bool {
 /// same-suit run, lowest face-up card (king flag, rank+1). Globally: deals
 /// left (one-hot), completed suits, empty columns, hidden cards, cards on
 /// the table, the deal flag (the deal is scored on the position it is made
-/// from), stranded, unknown top cards, suit count (one-hot).
+/// from), stranded, unknown top cards, suit count (one-hot), and for each
+/// rank how many of its cards are not to be seen (face down, in the stock
+/// or just turned and unknown).
 pub(crate) fn features(s: &State, deals_left: usize, suits: u8, deal: bool, out: &mut [u8]) {
     debug_assert_eq!(out.len(), POS);
     out.fill(0);
     let mut empties = 0;
     let mut hidden = 0;
     let mut unknown = 0;
+    let mut seen = [0u8; 13];
     for c in 0..NUM_COLS {
         let f = &mut out[c * C..(c + 1) * C];
         let n = s.len[c] as usize;
@@ -82,6 +85,11 @@ pub(crate) fn features(s: &State, deals_left: usize, suits: u8, deal: bool, out:
         f[1] = d as u8;
         f[2] = (n - d) as u8;
         let col = &s.cols[c][..n];
+        for &card in &col[d..] {
+            if card != BLANK.0 {
+                seen[(card % 13) as usize] += 1;
+            }
+        }
         let top = col[n - 1];
         // Same-suit run and descending sequence at the top (an unknown top
         // card links to nothing).
@@ -151,6 +159,9 @@ pub(crate) fn features(s: &State, deals_left: usize, suits: u8, deal: bool, out:
         2 => 1,
         _ => 2,
     }] = 1;
+    for r in 0..13 {
+        g[16 + r] = 8u8.saturating_sub(s.completed).saturating_sub(seen[r]);
+    }
 }
 
 /// Unseen cards (face down or in the stock) by card byte.
@@ -189,6 +200,9 @@ fn unseen_of(g: &Game) -> Unseen {
 #[derive(Clone)]
 pub struct Action {
     pub moves: Vec<Move>,
+    /// How many of `moves` the line's first step, first two steps and so
+    /// on are.
+    pub cut: Vec<u16>,
     pub deal: bool,
     /// Turns a card over (or deals): leads to a chance node.
     pub reveals: bool,
@@ -229,7 +243,11 @@ pub(crate) fn actions(obs: &State, deals_left: usize, avoid: &HashSet<u64>, pass
     cands.truncate(max_lines);
     let mut out: Vec<Action> = cands
         .into_iter()
-        .map(|(Reverse(gain), k)| Action { moves: line_to(&nodes, k).concat(), deal: false, reveals: nodes[k].leaf, after: nodes[k].state.clone(), gain })
+        .map(|(Reverse(gain), k)| {
+            let steps = line_to(&nodes, k);
+            let cut = steps.iter().scan(0, |n, st| Some({ *n += st.len() as u16; *n })).collect();
+            Action { moves: steps.concat(), cut, deal: false, reveals: nodes[k].leaf, after: nodes[k].state.clone(), gain }
+        })
         .collect();
     if deals_left > 0 && obs.len.iter().all(|&l| l > 0 && (l as usize) < MAXC) {
         // After a deal every column has an unknown card on top.
@@ -240,7 +258,7 @@ pub(crate) fn actions(obs: &State, deals_left: usize, avoid: &HashSet<u64>, pass
             after.rehash(c);
         }
         after.deals_done += 1;
-        out.push(Action { moves: Vec::new(), deal: true, reveals: true, after, gain: 0 });
+        out.push(Action { moves: Vec::new(), cut: Vec::new(), deal: true, reveals: true, after, gain: 0 });
     }
     out
 }
@@ -347,8 +365,29 @@ pub struct AzParams {
     /// Sampled outcomes of a deal.
     pub deal_samples: usize,
     pub seed: u64,
-    /// The line search and the evaluation that ranks lines.
+    /// The line search and the evaluation that ranks lines (and the line
+    /// player imitated or anchored to).
     pub lines: LineConfig,
+    /// The same for the positions below a search's root (a cheaper search
+    /// there makes a simulation cheaper).
+    pub tree: LineConfig,
+    /// Play only this many steps of the line chosen, then search again
+    /// (0: the whole line), as the line player's replanning does.
+    pub replan: usize,
+    /// Play as the line player does (with what it keeps between decisions,
+    /// its plan and all) unless the search's move is worth more than the
+    /// line player's by `margin`.
+    pub anchor: bool,
+    pub margin: f32,
+    /// Anchored: this much of the root's prior is on the line player's move.
+    pub anchor_prior: f32,
+    /// Imitation: the share of decisions recorded, how much of the policy
+    /// target is the softmax of the evaluations (the rest: the move
+    /// played).
+    pub imit_sample: f32,
+    pub imit_soft: f32,
+    /// Give records the line player's lookahead value (a search more).
+    pub use_h: bool,
 }
 
 impl AzParams {
@@ -366,6 +405,14 @@ impl AzParams {
             deal_samples: 6,
             seed: 0,
             lines: LineConfig::for_suits(suits),
+            tree: LineConfig::for_suits(suits),
+            replan: 0,
+            anchor: false,
+            margin: 0.0,
+            anchor_prior: 0.5,
+            imit_sample: 1.0,
+            imit_soft: 0.5,
+            use_h: true,
         }
     }
 }
@@ -493,6 +540,9 @@ pub struct GameResult {
     pub completed: u8,
     pub won: bool,
     pub decisions: usize,
+    /// Anchored: decisions where the search overruled the line player.
+    /// Imitation: decisions whose move was not among the moves offered.
+    pub overrides: u32,
 }
 
 /// One game and its search.
@@ -517,6 +567,16 @@ struct Slot {
     /// differences between moves are small on the outcome scale.
     qmin: f32,
     qmax: f32,
+    /// What the line player keeps between decisions, its decision at the
+    /// current root and which of the root's moves that is (anchored play,
+    /// and where no move is offered).
+    tempo: Tempo,
+    lp: Option<Decision>,
+    lp_idx: Option<usize>,
+    overrides: u32,
+    /// With [`AzParams::replan`]: the steps not yet played of the line
+    /// chosen last.
+    plan: Vec<Vec<Move>>,
 }
 
 /// Runs games in lockstep, producing batches of positions to evaluate.
@@ -574,6 +634,11 @@ impl Driver {
             root_h: 0.0,
             qmin: f32::MAX,
             qmax: f32::MIN,
+            tempo: Tempo::default(),
+            lp: None,
+            lp_idx: None,
+            overrides: 0,
+            plan: Vec::new(),
         })
     }
 
@@ -683,6 +748,11 @@ impl Driver {
                     *pr = (1.0 - p.eps) * *pr + p.eps * (*nz / ns) as f32;
                 }
             }
+            if let (true, true, Some(l)) = (is_root, p.anchor, slot.lp_idx) {
+                for (i, pr) in prior.iter_mut().enumerate() {
+                    *pr = (1.0 - p.anchor_prior) * *pr + if i == l { p.anchor_prior } else { 0.0 };
+                }
+            }
             if is_root {
                 let h = slot.root_h;
                 slot.records.push(Record { features, pi: Vec::new(), z: 0.0, h, played: 0, h_next: f32::NAN, q: f32::NAN, q_next: f32::NAN });
@@ -770,7 +840,7 @@ fn expand(slot: &mut Slot, p: &AzParams, path: Vec<Hop>, state: State, unseen: U
     let acts = if state.completed == 8 || stranded(&state, deals_left) {
         Vec::new()
     } else {
-        actions(&state, deals_left, &slot.history, passed, &p.lines, p.max_lines)
+        actions(&state, deals_left, &slot.history, passed, &p.tree, p.max_lines)
     };
     if acts.is_empty() {
         let v = outcome(state.completed);
@@ -860,23 +930,44 @@ fn advance(slot: &mut Slot, p: &AzParams, train: bool) -> Option<(u64, GameResul
             let os = State::from_game(&obs);
             let deals_left = slot.game.deals_remaining();
             slot.history.insert(os.hash());
-            let acts = if slot.game.is_won() || slot.decisions >= p.max_moves {
-                Vec::new()
-            } else {
-                actions(&os, deals_left, &slot.history, &[], &p.lines, p.max_lines)
-            };
-            if acts.is_empty() {
-                if std::env::var_os("AZ_DEBUG").is_some() {
-                    eprintln!("seed {} ends after {} decisions\n{}", slot.seed, slot.decisions, crate::human::show(&slot.game));
-                }
+            if slot.game.is_won() || slot.decisions >= p.max_moves || slot.game.columns.iter().any(|c| c.len() > MAXC) {
                 return Some(finish(slot));
             }
-            slot.root_h = lookahead_value(&obs, deals_left, &slot.history, &p.lines) as f32 / 1000.0;
+            let mut acts = actions(&os, deals_left, &slot.history, &[], &p.lines, p.max_lines);
+            if !slot.plan.is_empty() {
+                // The rest of the line chosen last is always among the moves.
+                let plan = std::mem::take(&mut slot.plan);
+                offer(&os, &plan, &mut acts, deals_left, &p.lines);
+            }
+            slot.lp = None;
+            slot.lp_idx = None;
+            if p.anchor || acts.is_empty() {
+                // The line player's own decision: what is played unless
+                // the search overrules it, and where no move is offered
+                // (it may still fill an empty column at a loss to deal).
+                if !p.anchor {
+                    slot.tempo = Tempo::default();
+                }
+                let (d, _) = decide(&obs, deals_left, &slot.history, &mut slot.tempo, &p.lines);
+                if d == Decision::Stuck {
+                    if std::env::var_os("AZ_DEBUG").is_some() {
+                        eprintln!("seed {} ends after {} decisions\n{}", slot.seed, slot.decisions, crate::human::show(&slot.game));
+                    }
+                    return Some(finish(slot));
+                }
+                slot.lp_idx = planned(&os, &d, &slot.tempo, &mut acts, deals_left, &p.lines);
+                slot.lp = Some(d);
+                if acts.len() < 2 || slot.lp_idx.is_none() {
+                    play_lp(slot);
+                    continue;
+                }
+            }
+            slot.root_h = if p.use_h { lookahead_value(&obs, deals_left, &slot.history, &p.lines) as f32 / 1000.0 } else { f32::NAN };
             if acts.len() == 1 {
                 // Nothing to choose.
                 let features = decision_features(&os, &acts, deals_left, p.suits);
                 slot.records.push(Record { features, pi: vec![1.0], z: 0.0, h: slot.root_h, played: 0, h_next: f32::NAN, q: f32::NAN, q_next: f32::NAN });
-                play(slot, &acts[0]);
+                play(slot, &acts[0], p.replan);
                 continue;
             }
             slot.decs.clear();
@@ -902,16 +993,75 @@ fn advance(slot: &mut Slot, p: &AzParams, train: bool) -> Option<(u64, GameResul
     }
 }
 
-/// Play a move in the real game.
-fn play(slot: &mut Slot, act: &Action) {
+/// The line of `steps` from `os` among the moves `acts` offered there,
+/// added to them if it is not among them (the rest of a plan often is
+/// not: its steps need not touch the columns the search's would).
+fn offer(os: &State, steps: &[Vec<Move>], acts: &mut Vec<Action>, deals_left: usize, cfg: &LineConfig) -> usize {
+    let mut t = os.clone();
+    for &mv in steps.iter().flatten() {
+        t.apply(mv, &[]);
+    }
+    let h = t.hash();
+    if let Some(i) = acts.iter().position(|a| !a.deal && a.after.hash() == h) {
+        return i;
+    }
+    let end_empty = if deals_left > 0 { cfg.deal_empty } else { cfg.end_empty };
+    let gain = (cfg.eval(&t, deals_left, cfg.empty) - cfg.eval(os, deals_left, cfg.empty)).max(cfg.eval(&t, deals_left, end_empty) - cfg.eval(os, deals_left, end_empty));
+    let reveals = (0..NUM_COLS).any(|c| t.down[c] < os.down[c]);
+    let cut = steps.iter().scan(0, |n, st| Some({ *n += st.len() as u16; *n })).collect();
+    acts.push(Action { moves: steps.concat(), cut, deal: false, reveals, after: t, gain });
+    acts.len() - 1
+}
+
+/// Which of the moves `acts` offered in `os` the line player's decision
+/// `d` is: the deal, or the line that ends where its plan does (what it
+/// plays now and what `tempo` keeps for later), added if it is not offered.
+fn planned(os: &State, d: &Decision, tempo: &Tempo, acts: &mut Vec<Action>, deals_left: usize, cfg: &LineConfig) -> Option<usize> {
+    match d {
+        Decision::Deal => acts.iter().position(|a| a.deal),
+        Decision::Play(moves) => {
+            let mut steps = vec![moves.clone()];
+            steps.extend(tempo.plan.iter().cloned());
+            Some(offer(os, &steps, acts, deals_left, cfg))
+        }
+        Decision::Stuck => None,
+    }
+}
+
+/// Play a move in the real game: the deal, or a line (with `steps` not 0,
+/// only so many of its steps).
+fn play(slot: &mut Slot, act: &Action, steps: usize) {
     if act.deal {
         slot.game.apply(Move::Deal).expect("deal is legal");
     } else {
-        for &mv in &act.moves {
+        let n = if steps > 0 && steps < act.cut.len() { act.cut[steps - 1] as usize } else { act.moves.len() };
+        for &mv in &act.moves[..n] {
             slot.game.apply(mv).expect("line is legal");
+        }
+        if n < act.moves.len() {
+            slot.plan = (steps..act.cut.len()).map(|i| act.moves[act.cut[i - 1] as usize..act.cut[i] as usize].to_vec()).collect();
         }
     }
     slot.decisions += 1;
+}
+
+/// Play the line player's decision in the real game, as
+/// [`crate::lines::play_until`] does.
+fn play_lp(slot: &mut Slot) {
+    let before = progress(&slot.game);
+    match slot.lp.take() {
+        Some(Decision::Play(moves)) => {
+            for mv in moves {
+                slot.game.apply(mv).expect("planned move is legal");
+            }
+        }
+        Some(Decision::Deal) => slot.game.apply(Move::Deal).expect("deal is legal"),
+        _ => {}
+    }
+    slot.decisions += 1;
+    if progress(&slot.game) != before {
+        slot.tempo = Tempo::default();
+    }
 }
 
 /// Choose the root's move from its visits, record the decision, play it.
@@ -947,12 +1097,24 @@ fn play_decision(slot: &mut Slot, p: &AzParams, train: bool) {
             ranked.iter().take(5).map(|&i| format!("{} gain={} p={:.2} q0={:.3} q={:.3} n={}", desc(i), root.actions[i].gain, root.prior[i], root.q0[i], q(slot, root, i), root.n[i])).collect();
         eprintln!("{}\nvalue {:.3} (net {:.3}) chose {}\n  {}", crate::human::show(&slot.game), root.value, root.v0, desc(a), top.join("\n  "));
     }
+    // Anchored: the line player's move, unless the search's is worth more
+    // by the margin.
+    let over = slot.lp_idx.filter(|_| p.anchor).map(|lp| a != lp && q(slot, root, a) - q(slot, root, lp) > p.margin);
+    let played = if over == Some(false) { slot.lp_idx.unwrap() } else { a };
     if let Some(r) = slot.records.last_mut() {
         r.pi = pi;
-        r.played = a as u32;
+        r.played = played as u32;
         r.q = root.value;
     }
-    play(slot, &act);
+    match over {
+        Some(false) => play_lp(slot),
+        Some(true) => {
+            slot.overrides += 1;
+            slot.tempo = Tempo::default();
+            play(slot, &act, 0);
+        }
+        None => play(slot, &act, p.replan),
+    }
 }
 
 /// Give every record the next one's lookahead and search values.
@@ -972,79 +1134,82 @@ fn finish(slot: &mut Slot) -> (u64, GameResult, Vec<Record>) {
         r.z = z;
     }
     link_next(&mut records);
-    let result = GameResult { seed: slot.seed, completed, won: slot.game.is_won(), decisions: slot.decisions };
+    let result = GameResult { seed: slot.seed, completed, won: slot.game.is_won(), decisions: slot.decisions, overrides: slot.overrides };
     (slot.seed, result, records)
 }
 
-/// Play the line player on `seed` and record its decisions among this
-/// player's moves, for training the network to imitate it. The policy
-/// target is half the move played and half a softmax, at temperature `tau`
-/// (evaluation units), of every move's value in the mode the line player
-/// decided in (the deal valued as the position itself).
+/// Play the line player on `seed` (as [`crate::lines::play_until`] does,
+/// replanning and all) and record its decisions among this player's moves,
+/// for training the network to imitate it. The move it is taken to choose
+/// is the line that ends where its plan does, of which it may play only
+/// the first steps now. The policy target is mostly that move, the rest a
+/// softmax, at temperature `tau` (evaluation units), of every move's value
+/// in the mode the line player decided in (the deal valued as the position
+/// itself).
 pub fn imitate(p: &AzParams, seed: u64, tau: f32) -> (GameResult, Vec<Record>) {
     let cfg = &p.lines;
     let mut g = Game::new(p.suits, seed);
     let mut visited = HashSet::new();
     let mut records = Vec::new();
     let mut decisions = 0;
-    while !g.is_won() && decisions < p.max_moves {
+    let mut missed = 0;
+    let mut tempo = Tempo::default();
+    let mut rng = Rng(mix(p.seed ^ 0x1317, seed));
+    while !g.is_won() && decisions < p.max_moves && g.columns.iter().all(|c| c.len() <= MAXC) {
         let obs = mask(&g);
         let os = State::from_game(&obs);
         let deals_left = g.deals_remaining();
         visited.insert(os.hash());
-        let (choice, _) = decide_steps(&obs, deals_left, &visited, &mut Default::default(), cfg);
-        let line: Option<Vec<Move>> = match choice {
-            Choice::Line(steps) => Some(steps.concat()),
-            Choice::Deal => None,
-            Choice::Stuck => break,
-        };
-        let acts = actions(&os, deals_left, &visited, &[], cfg, p.max_lines);
-        let played = match &line {
-            None => acts.iter().position(|a| a.deal),
-            Some(moves) => {
-                let mut t = os.clone();
-                for &mv in moves {
-                    t.apply(mv, &[]);
-                }
-                let h = t.hash();
-                acts.iter().position(|a| !a.deal && a.after.hash() == h)
-            }
-        };
-        if let Some(played) = played.filter(|_| acts.len() > 1) {
-            let base = cfg.eval(&os, deals_left, cfg.empty);
-            let raises = acts.iter().any(|a| !a.deal && cfg.eval(&a.after, deals_left, cfg.empty) > base);
-            let empty = if raises {
-                cfg.empty
-            } else if deals_left > 0 {
-                cfg.deal_empty
-            } else {
-                cfg.end_empty
-            };
-            let vals: Vec<f32> = acts.iter().map(|a| cfg.eval(if a.deal { &os } else { &a.after }, deals_left, empty) as f32).collect();
-            let mx = vals.iter().copied().fold(f32::MIN, f32::max);
-            let mut pi: Vec<f32> = vals.iter().map(|v| ((v - mx) / tau).exp()).collect();
-            let s: f32 = pi.iter().sum();
-            pi.iter_mut().for_each(|x| *x *= 0.5 / s);
-            pi[played] += 0.5;
-            let h = lookahead_value(&obs, deals_left, &visited, cfg) as f32 / 1000.0;
-            records.push(Record { features: decision_features(&os, &acts, deals_left, p.suits), pi, z: 0.0, h, played: played as u32, h_next: f32::NAN, q: f32::NAN, q_next: f32::NAN });
+        let before = progress(&g);
+        let (d, _) = decide(&obs, deals_left, &visited, &mut tempo, cfg);
+        if d == Decision::Stuck {
+            break;
         }
-        match line {
-            None => g.apply(Move::Deal).expect("deal is legal"),
-            Some(moves) => {
+        if rng.unit() < p.imit_sample as f64 {
+            let mut acts = actions(&os, deals_left, &visited, &[], cfg, p.max_lines);
+            match planned(&os, &d, &tempo, &mut acts, deals_left, cfg) {
+                Some(played) if acts.len() > 1 => {
+                    let empty = if !tempo.dealing {
+                        cfg.empty
+                    } else if deals_left > 0 {
+                        cfg.deal_empty
+                    } else {
+                        cfg.end_empty
+                    };
+                    let vals: Vec<f32> = acts.iter().map(|a| cfg.eval(if a.deal { &os } else { &a.after }, deals_left, empty) as f32).collect();
+                    let mx = vals.iter().copied().fold(f32::MIN, f32::max);
+                    let mut pi: Vec<f32> = vals.iter().map(|v| ((v - mx) / tau).exp()).collect();
+                    let s: f32 = pi.iter().sum();
+                    pi.iter_mut().for_each(|x| *x *= p.imit_soft / s);
+                    pi[played] += 1.0 - p.imit_soft;
+                    let h = if p.use_h { lookahead_value(&obs, deals_left, &visited, cfg) as f32 / 1000.0 } else { f32::NAN };
+                    records.push(Record { features: decision_features(&os, &acts, deals_left, p.suits), pi, z: 0.0, h, played: played as u32, h_next: f32::NAN, q: f32::NAN, q_next: f32::NAN });
+                }
+                None => missed += 1,
+                _ => {}
+            }
+        }
+        match d {
+            Decision::Play(moves) => {
                 for mv in moves {
                     g.apply(mv).expect("line is legal");
                 }
             }
+            _ => g.apply(Move::Deal).expect("deal is legal"),
         }
         decisions += 1;
+        if progress(&g) != before {
+            tempo = Tempo::default();
+        }
     }
     let completed = g.completed.len() as u8;
     for r in records.iter_mut() {
         r.z = outcome(completed);
     }
-    link_next(&mut records);
-    (GameResult { seed, completed, won: g.is_won(), decisions }, records)
+    if p.imit_sample >= 1.0 {
+        link_next(&mut records);
+    }
+    (GameResult { seed, completed, won: g.is_won(), decisions, overrides: missed }, records)
 }
 
 #[cfg(test)]
