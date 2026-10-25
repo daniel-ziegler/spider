@@ -190,6 +190,7 @@ pub fn record_for_analysis(g: &Game, cfg: &LineConfig, noise: f64, noisy: usize,
         visited.insert(root.hash());
         let before = progress(&g);
         let deals_left = g.deals_remaining();
+        let cfg = cfg.staged.map_or(cfg, |s| &s[deals_left]);
         let mut decision = decide(&obs, deals_left, &visited, &mut tempo, cfg).0;
         if !quiet && matches!(decision, Decision::Play(_)) {
             let u = unit(&mut rng);

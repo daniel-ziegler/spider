@@ -3,8 +3,10 @@
 //! position with the outcome (see `spider::vnet::record_for_analysis`).
 //! Usage: adata suits first count out.bin [sample] [mid] [noise] [noisy]
 //! (records of `spider::vnet::ANALYSIS_RECORD` bytes; the player is
-//! `LineConfig::rollout`, SPIDER_L_* tune it; SPIDER_THREADS sets the
-//! threads, all cores by default)
+//! `LineConfig::rollout` with the environment's SPIDER_L_* and
+//! SPIDER_L_K<n>_*, so any line player's games can be had: web/README.md
+//! has the one the network is of; SPIDER_THREADS sets the threads, all
+//! cores by default)
 use spider::game::Game;
 use spider::lines::LineConfig;
 use spider::vnet::{record_for_analysis, ANALYSIS_RECORD};

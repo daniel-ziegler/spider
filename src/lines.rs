@@ -246,7 +246,7 @@ impl LineConfig {
     /// [`LineConfig::rollout`] with the `SPIDER_L_*` overrides of
     /// [`LineConfig::from_env`].
     pub fn rollout_from_env(suits: u8) -> LineConfig {
-        LineConfig::from_env_stage(LineConfig::rollout(suits), None)
+        LineConfig::from_env_staged(LineConfig::rollout(suits))
     }
 
     /// [`LineConfig::for_suits`] (with `SPIDER_L_FAST` set,
@@ -263,6 +263,11 @@ impl LineConfig {
         } else {
             LineConfig::for_suits(suits)
         };
+        LineConfig::from_env_staged(d)
+    }
+
+    /// `d` with the environment's overrides, those for one stage too.
+    fn from_env_staged(d: LineConfig) -> LineConfig {
         let mut cfg = LineConfig::from_env_stage(d, None);
         if std::env::vars().any(|(k, _)| k.starts_with("SPIDER_L_K")) {
             let staged: Vec<LineConfig> = (0..=crate::game::NUM_DEALS).map(|k| LineConfig::from_env_stage(d, Some(k))).collect();

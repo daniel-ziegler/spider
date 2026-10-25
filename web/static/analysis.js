@@ -15,7 +15,9 @@
 // It comes in two passes, both in workers (analysis-worker.js) and both shown
 // as they arrive:
 //   1. A network values every position (and each position where cards came
-//      up, also before they were known): the curve.
+//      up, also before they were known): the curve. (It is trained on games
+//      of a stronger line player than the one that plays the games of the
+//      second pass, so the curve stands some points above their chances.)
 //   2. The mistakes are found by playing games out in shuffles of the cards
 //      the player had not seen, from before the player's moves (the line
 //      player choosing its own) and from after them, in the order the
@@ -24,7 +26,7 @@
 //      workers and the page.
 import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, SEARCH } from './analysis-core.js';
 
-const NET_VERSION = 2; // in the network's address, which is cached for good: change it with the network
+const NET_VERSION = 3; // in the network's address, which is cached for good: change it with the network
 const VALUES = 6; // positions valued in one piece of work
 const ROLL_WEIGHT = 3; // a game played out against a position's valuing, for the progress bar
 

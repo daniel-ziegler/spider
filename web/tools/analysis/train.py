@@ -6,7 +6,7 @@
 It is the value network of vnet/train.py (see there for what it is made of)
 with one more embedding on the global token, the number of suits, trained on
 the records of target/release/adata (src/vnet.rs, record_for_analysis:
-positions of games of the rollout player, each with the game's outcome, the
+positions of games of a line player (whichever adata was given), each with the game's outcome, the
 number of suits and what kind of position it is). A twentieth of the games
 (by seed) is held out; `report` gives the log loss on them for each number
 of suits and how well the probabilities are calibrated, by tenths and by kind

@@ -61,6 +61,11 @@ the better line; `?` or `C` has the computer's move shown at every position;
   one the analysis began with (`LineConfig::fast`) 86%, 63%, 42% and 25%, at
   a sixth of the work. `static/lineplayer.js` is a port of it that plays move
   for move as the Rust does (65 ms a four-suit game from the deal on one core, 17 ms a one-suit game).
+  That is the player whose line is shown and whose games measure the
+  mistakes. The curve is of a stronger one, the strongest that could be
+  afforded for the network's games (see [the network](#the-network)): it
+  wins 90%, 70%, 53% and 37.5%, so the curve stands some points above the
+  chances a mistake is listed with.
 * **WebAssembly.** The workers play the games and value the positions in
   WebAssembly where it loads (`static/spider.wasm`, built from `wasm/`:
   `lineplayer.js` and `vnet.js`'s forward pass over again in Rust;
@@ -91,7 +96,8 @@ the better line; `?` or `C` has the computer's move shown at every position;
 * **The curve** comes from a network (`static/vnet.js`, a forward pass in
   plain typed arrays; `static/nets/value.bin`, 650 kB, float16): the value
   network of the main README (a transformer over the cards, here of 325,000
-  weights: 80 wide, four layers) trained on games of that player, one
+  weights: 80 wide, four layers) trained on games of the strongest line
+  player there was time for (not the one that plays the games out), one
   network for all four numbers of suits. Besides the cards it is told the
   number of suits and what the cheap line player would do next in the
   position (a line, one that turns a card, the same about to deal, a deal, or
@@ -249,29 +255,51 @@ hashed from its two changed columns, the beam picked by a sort of numbers).
 
 ```
 cargo build --release
-target/release/adata 4 1000001 320000 runs/analysis2/a4.bin    # games of the player, positions with their outcomes
-target/release/afeat runs/analysis2/a4.bin runs/analysis2/a4.feat   # what the cheap player does next in each
-.venv/bin/python web/tools/analysis/train.py train --data runs/analysis2/a?.bin --out runs/analysis2/net.pt
-.venv/bin/python web/tools/analysis/train.py report --data runs/analysis2/a?.bin --ckpt runs/analysis2/net.pt
-.venv/bin/python web/tools/analysis/export.py --ckpt runs/analysis2/net.pt --data runs/analysis2/a?.bin
+P="SPIDER_L_REPLAN=4 SPIDER_L_BEAM=300"                      # the player the games are of: `rollout` with these
+P1="SPIDER_L_K0_MAX_STEPS=4 SPIDER_L_K0_EXPECT_STEPS=2"      # (one suit)
+env $P1 target/release/adata 1 5000001 80000 runs/strong/a1.bin
+env $P target/release/adata 2 5000001 100000 runs/strong/a2.bin
+env $P target/release/adata 3 5000001 180000 runs/strong/a3.bin
+env $P target/release/adata 4 5000001 320000 runs/strong/a4.bin    # games of the player, positions with their outcomes
+for s in 1 2 3 4; do target/release/afeat runs/strong/a$s.bin runs/strong/a$s.feat; done   # what the cheap player does next in each
+python web/tools/analysis/train.py train --data runs/strong/a4.bin --suits 4 --epochs 1.5 --out runs/strong/net4.pt
+python web/tools/analysis/train.py train --data runs/strong/a?.bin --init runs/strong/net4.pt --epochs 1.5 --out runs/strong/net.pt
+python web/tools/analysis/train.py report --data runs/strong/a?.bin --ckpt runs/strong/net.pt
+python web/tools/analysis/export.py --ckpt runs/strong/net.pt --data runs/strong/a?.bin
 ```
 
-The data (3.6 GB; some five hours of ten threads):
+**Whose games.** The network says how often a player wins from a position,
+and the player is whichever `adata` is given (`LineConfig::rollout` with the
+environment's `SPIDER_L_*`, those for one stage too). It was the analysis's
+own (`rollout`), so that the curve and the games played out measured the
+same thing; it is now the strongest line player that so many games could be
+had of, so that the curve says what good play makes of a position: with two
+to four suits `rollout` replanning every four steps with a beam of 300, which
+plays as well as the full player at a third of its time, and with one suit
+`rollout` with four-step lines and expectimax two steps deep after the last
+deal (the main README's "What is left to gain"). On deals it has not seen it
+wins 90.5%, 70.2%, 52.8% and 37.5% with one to four suits, the analysis's
+player 89.2%, 67.8%, 49.1% and 31.9%. A stronger player's games are all it
+takes to have the network follow: the commands above with other settings.
+
+The data (4.5 GB; two and a half hours of a rented machine's thirty
+threads, and an hour and a quarter of its GPU, an A10, for the training):
 
 | suits | games   | positions | with those dealt, not yet known | won (noisy starts and all) |
 |-------|---------|-----------|---------------------------------|----------------|
-| 1     | 80,000  | 1.34M     | 1.66M                           | 88%            |
-| 2     | 100,800 | 1.69M     | 2.10M                           | 66%            |
-| 3     | 180,500 | 2.94M     | 3.68M                           | 48%            |
-| 4     | 320,300 | 4.96M     | 6.27M                           | 31%            |
+| 1     | 80,000  | 1.76M     | 2.12M                           | 88.6%          |
+| 2     | 100,000 | 2.03M     | 2.45M                           | 66.4%          |
+| 3     | 180,000 | 3.69M     | 4.45M                           | 49.3%          |
+| 4     | 320,000 | 6.27M     | 7.60M                           | 33.5%          |
 
-(The networks before had 120,000, 130,000, 130,000 and 200,000 games of the
-cheap player, 2.9M to 4.3M positions; this player costs six times as much a
-game.) Half the games start with a noisy stretch that is not recorded (a
+(The network before this one had as many games of the analysis's own
+player, 1.34M to 4.96M positions, of which 88%, 66%, 48% and 31% were won;
+those before had 120,000, 130,000, 130,000 and 200,000 games of the
+cheap player.) Half the games start with a noisy stretch that is not recorded (a
 random line among the best eight one decision in four, now and then a deal
 too early), so that there are positions the player would not get into
 itself; from there on the player plays alone, so that a position's outcome
-is what games played out from it measure. Recorded are an eighth of the
+is what that player makes of it. Recorded are an eighth of the
 decisions with the end of the line played (a turned card unknown), some
 positions between a line's moves, every position dealt from (of which the
 trainer makes the position after the deal with its ten cards unknown), half
@@ -292,7 +320,24 @@ games held out (a twentieth):
 
 (The calibration error is the mean distance, over tenths of the value,
 between the value and the share won; the largest in any tenth with a
-thousand positions is 1.7 points.) Being told what the cheap player does
+thousand positions is 1.7 points. These are of the network before, on the
+analysis's own player's games.) The network of the stronger player's games,
+the same and trained the same way, against the one before, each on games
+held out of both players (40,000 more of the analysis's player for each
+number of suits; log loss, and in brackets the mean value less the share
+won, in points):
+
+| suits | the stronger player's games: this network | the one before | the analysis's player's games: this network | the one before |
+|-------|----------------|----------------|----------------|----------------|
+| 1     | 0.1456 (−0.3)  | 0.1473 (−1.2)  | 0.1730 (+0.7)  | 0.1723 (−0.2)  |
+| 2     | 0.3225 (−0.1)  | 0.3241 (−1.5)  | 0.3449 (+1.0)  | 0.3439 (−0.4)  |
+| 3     | 0.3998 (−0.4)  | 0.4034 (−2.8)  | 0.4264 (+2.7)  | 0.4222 (+0.2)  |
+| 4     | 0.4084 (+0.5)  | 0.4135 (−3.2)  | 0.4090 (+4.7)  | 0.3997 (+0.8)  |
+
+So each is right about its own player and off by the difference between the
+two about the other's (the positions are not only from the deal on, where
+the players differ by 1.4 to 5.6 points); its calibration error on its own
+games is 0.4 to 0.6 points. Being told what the cheap player does
 next is worth more than the size: on 885,000 four-suit positions the same
 network had 0.4214 with it and 0.4351 without, and without it valued the
 positions a game is given up in at 12% (with: 0.3%), those dealt from at 39%
@@ -302,7 +347,8 @@ where 33% were won (with: 34%) and those between a line's moves at 56% where
 `node tools/analysis/calib.mjs SUITS FIRST GAMES` measures what is left on
 the line player's own games, where the moves should cost nothing and luck
 be fair (40 games for each number of suits; in brackets the networks
-before, on 24):
+before, on 24). This is of the network of the analysis's own player's
+games:
 
 | suits | where a lost game stops | fall over a stretch that ends in a deal | a turned card unknown is high by | a deal unknown is high by | dips inside a stretch: mean, over 3 points |
 |-------|------------|------------|-------------|-----------|---------------------|
@@ -317,6 +363,18 @@ taken out any more (`BIAS` in `analysis-core.js` is zero): a deal's cards
 not yet known are valued as a position of its own and not as the mean over
 sixteen sampled deals, and that position is 0.2 to 0.3 points above that
 mean.
+
+With the network of the stronger player's games the same 40 games (of the
+analysis's player, whose moves now do cost something: it is the weaker)
+give: a lost game stops at 0.2%, 0.1%, 0.1% and 0.0%; the fall over a
+stretch that ends in a deal is 1.3, 1.9, 2.4 and 1.8 points; a deal unknown
+is 0.3, 0.1, −0.2 and 0.1 above the mean of sixteen deals; the dips are
+0.2, 0.5, 1.0 and 0.9 points, over three in 2%, 5%, 10% and 9% of the
+stretches. A turned card unknown is 1.1, 1.1 and 1.2 points low with two to
+four suits (one suit: 0.2 high; before 0.6 low): over a stretch that ends
+with a card turned the moves lose that much on average and the card gives
+it back. `BIAS` is left at zero: it is two pixels of the plot, and the order
+of the candidates has it on both sides.
 
 ### How good the network's order is
 
@@ -338,6 +396,23 @@ they are settled. What the analysis then lists for the eight games (2,400
 to 3,700 games each): six of the seven, nothing else, and nothing in the
 four-suit games. The seventh (nine points over six moves) was seventh by
 the network in its game, and the games ran out before it came in.
+
+All that is of the network before. A mistake is still what costs the
+analysis's own player games, while the network now values positions for a
+stronger one, so the order was measured again for both networks, by
+`tools/analysis/order.mjs`: 54 games (16 each with two to four suits, 6
+with one; seeds 81001 on) played as the analysis's player does but for one
+stretch in eight, where a deal comes before its time or one to three legal
+moves at random, and half the others, which are the cheap player's; every
+candidate played out in 256 shuffles. Of 390 candidates 68 cost eight points
+or more and surely something. Among the first three, five and eight of
+their games by the network's difference are 63, 66 and 67 of them (the
+network before: 63, 66 and 66; at random 31, 47 and 60), and over all
+candidates the difference and the cost correlate at 0.71 (before: 0.72),
+the difference where the cost is under three points having a standard
+deviation of 4.7 points (4.9). These mistakes are plainer than a person's
+(the eight games above were not to hand to be played again), but the two
+networks order them alike.
 
 ## FreeCell
 
