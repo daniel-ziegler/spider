@@ -414,6 +414,37 @@ deviation of 4.7 points (4.9). These mistakes are plainer than a person's
 (the eight games above were not to hand to be played again), but the two
 networks order them alike.
 
+Not done, but measured (`tools/analysis/short.mjs`, on the same 54 games, 393
+candidates, 256 shuffles each): the games of a mistake not played out to the
+end but until so many moves have shown cards, counted from the stretch's
+start, the network then valuing the position. A value takes as long as a
+game or longer (12 to 18 ms against 5 to 25 ms for a game from the middle),
+so a shuffle is no cheaper; what is gained is that a shuffle's difference is
+far less noisy. With four suits:
+
+| stopped after | correlation with the full games' cost | difference left with shuffles without end (rms) | a shuffle's sd | shuffles for the same error | time for the same error |
+|---|---|---|---|---|---|
+| 1 showing | 0.68 | 5.8 points | 4.6 points | 1/70 | 1/100 |
+| 2 | 0.84 | 3.4 | 7.8 | 1/25 | 1/32 |
+| 4 | 0.92 | 1.8 | 13.0 | 1/9 | 1/10 |
+| 8 | 0.94 | 1.1 | 19.8 | 1/4 | 1/4 |
+| 16 | 0.96 | 0.7 | 26.9 | 1/2 | 2/3 |
+| the next deal | 0.93 | 2.1 | 17.6 | 1/5 | 1/5 |
+| the end | 1 | 0 | 38.7 | 1 | 1 |
+
+(The times are of a laptop with four of these running, where a shuffle's two
+full games took 53 ms; alone they took 24 and the gain at four showings was
+six times rather than ten.) One to three suits are alike (after four
+showings 1.7, 1.7 and 0.5 points left, a seventh to a tenth of the time with
+two and three suits; with one suit a game is cheaper than a value and little
+is gained before eight). Of the 73 candidates that are mistakes by the full
+games in 256 shuffles, 64 shuffles stopped after eight showings find 67 and
+call 2 others mistakes; 64 shuffles of full games find 39. The network being
+of a stronger player shows with four suits only: there the mistakes that
+cost 15 points in full games cost 19 so (measured in shuffles other than
+those that chose them); with one to three suits the two agree within a
+point.
+
 ## FreeCell
 
 The home page switches between Spider and FreeCell. FreeCell has a daily
