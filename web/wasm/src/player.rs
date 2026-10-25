@@ -19,13 +19,14 @@ pub const DONE: usize = DOWN + NUM_COLS;
 pub const SIZE: usize = DONE + 1;
 const LOST: i32 = -1073741824;
 
-/// lineplayer.js's configurations (`fastConfig`, `rolloutConfig`), less the
-/// weights that are zero in both.
+/// lineplayer.js's configurations (`fastConfig`, `rolloutConfig`,
+/// `analysisConfig`), less the weights that are zero in all.
 #[derive(Clone, Copy)]
 pub struct Config {
     max_steps: usize,
     touch: bool,
     beam: usize,
+    replan: usize,
     expect_top: usize,
     expect_steps: usize,
     expect_beam: usize,
@@ -54,6 +55,7 @@ impl Config {
             max_steps: 6,
             touch: true,
             beam: 0,
+            replan: 0,
             expect_top: 0,
             expect_steps: 4,
             expect_beam: 20,
@@ -88,6 +90,21 @@ impl Config {
             Config { expect_top: 4, expect_steps: 1, ..fast }
         } else {
             Config { max_steps: 14, beam: 100, expect_top: 4, expect_steps: 1, ..fast }
+        }
+    }
+
+    /// `analysisConfig`: the configuration for each number of deals left
+    /// (lineplayer.js's ANALYSIS).
+    pub fn analysis(suits: u8) -> [Config; 6] {
+        let rollout = Config::rollout(suits);
+        if suits == 1 {
+            let mut stages = [rollout; 6];
+            stages[0] = Config { max_steps: 4, expect_steps: 2, ..rollout };
+            stages
+        } else {
+            let mut stages = [Config { replan: 4, beam: 150, ..rollout }; 6];
+            stages[0] = Config { replan: 8, beam: 100, ..rollout };
+            stages
         }
     }
 }
@@ -427,20 +444,28 @@ impl Default for Search {
     }
 }
 
-pub enum Decision {
-    /// A line's moves, as (from, to, count) bytes.
-    Line(Vec<u8>),
+pub enum Decision<L> {
+    /// A line: its steps, each its moves as (from, to, count) bytes
+    /// (`decide`), or the moves to play now (`choose`).
+    Line(L),
     Deal,
     Stuck,
 }
 
 /// What the player keeps between decisions: whether it is about to deal,
-/// whether the line chosen last turns a card, and the positions looked at.
+/// whether the line chosen last turns a card and what it is worth where it
+/// ends, the positions looked at, and with `replan` what is left of the line
+/// being played, what that is worth where it ends and whether it is about to
+/// deal.
 #[derive(Default)]
 pub struct Tempo {
     pub dealing: bool,
     pub turns: bool,
+    pub value: i32,
     pub work: u64,
+    pub plan: Vec<Vec<u8>>,
+    pub plan_value: i32,
+    pub plan_dealing: bool,
 }
 
 impl Search {
@@ -771,25 +796,22 @@ impl Search {
         out
     }
 
-    /// The moves of the line to node k.
-    fn line_to(&self, mut k: usize) -> Vec<u8> {
-        let mut path = Vec::new();
+    /// The steps of the line to node k.
+    fn line_to(&self, mut k: usize) -> Vec<Vec<u8>> {
+        let mut steps = Vec::new();
         while k != 0 {
-            path.push(k);
+            let (a, b) = self.nodes[k].step;
+            steps.push(self.steps[a as usize..b as usize].to_vec());
             k = self.nodes[k].parent as usize;
         }
-        let mut moves = Vec::new();
-        for &k in path.iter().rev() {
-            let (a, b) = self.nodes[k].step;
-            moves.extend_from_slice(&self.steps[a as usize..b as usize]);
-        }
-        moves
+        steps.reverse();
+        steps
     }
 
     /// What to do in the position `root` with this many deals left.
     /// `visited` has the keys of the positions never to return to; `unseen`
     /// gives how many of each card the player has not seen.
-    pub fn decide(&mut self, root: &[u8], deals_left: usize, visited: &Keys, tempo: &mut Tempo, cfg: &Config, unseen: impl FnOnce() -> [u8; 52]) -> Decision {
+    pub fn decide(&mut self, root: &[u8], deals_left: usize, visited: &Keys, tempo: &mut Tempo, cfg: &Config, unseen: impl FnOnce() -> [u8; 52]) -> Decision<Vec<Vec<u8>>> {
         self.search(root, cfg, cfg.splits, cfg.beam);
         tempo.work += self.count as u64;
         let empty = if deals_left > 0 { cfg.deal_empty } else { cfg.end_empty };
@@ -813,20 +835,22 @@ impl Search {
                     best_score = sc;
                 }
             }
-            best
+            (best, best_score)
         };
         if !tempo.dealing {
-            let best = best_by(0, cfg.empty, 0);
+            let (best, score) = best_by(0, cfg.empty, 0);
             if best != 0 {
                 tempo.turns = nodes[best].leaf;
+                tempo.value = score;
                 return Decision::Line(self.line_to(best));
             }
         }
         // About to deal or, with the stock gone, to give up.
-        let best = best_by(1, empty, cfg.deal_flip);
+        let (best, score) = best_by(1, empty, cfg.deal_flip);
         if best != 0 {
             tempo.dealing = true;
             tempo.turns = nodes[best].leaf;
+            tempo.value = score;
             return Decision::Line(self.line_to(best));
         }
         if deals_left == 0 {
@@ -863,7 +887,29 @@ impl Search {
             }
         }
         tempo.turns = self.nodes[k].leaf;
+        tempo.value = self.nodes[k].value(deals_left, empty);
         Decision::Line(self.line_to(k))
+    }
+
+    /// The moves to play now: the line decided on or, with `cfg.replan`, its
+    /// first steps only, what is left of it being kept and played on from
+    /// unless the line decided on next ends better (or in the other mode).
+    fn choose(&mut self, root: &[u8], deals_left: usize, visited: &Keys, tempo: &mut Tempo, cfg: &Config, unseen: impl FnOnce() -> [u8; 52]) -> Decision<Vec<u8>> {
+        let line = match self.decide(root, deals_left, visited, tempo, cfg, unseen) {
+            Decision::Line(line) => line,
+            Decision::Deal => return Decision::Deal,
+            Decision::Stuck => return Decision::Stuck,
+        };
+        if cfg.replan == 0 {
+            return Decision::Line(line.concat());
+        }
+        if tempo.plan.is_empty() || tempo.dealing != tempo.plan_dealing || tempo.value > tempo.plan_value {
+            tempo.plan = line;
+            tempo.plan_value = tempo.value;
+            tempo.plan_dealing = tempo.dealing;
+        }
+        let n = cfg.replan.min(tempo.plan.len());
+        Decision::Line(tempo.plan.drain(..n).flatten().collect())
     }
 
     /// Play the game on from the position `s`, changing it, with the stock
@@ -871,8 +917,9 @@ impl Search {
     /// is won or the player gives up. With `moves` the moves go there, three
     /// bytes each (255s for a deal); with `to_show` it stops right after the
     /// first move that turns a card or deals. Returns whether it stopped at
-    /// a card turned, and the positions looked at.
-    pub fn play_out(&mut self, s: &mut [u8], stock: &[u8], cfg: &Config, mut moves: Option<&mut Vec<u8>>, to_show: bool) -> (bool, u64) {
+    /// a card turned, and the positions looked at. `cfg` has the
+    /// configuration for each number of deals left.
+    pub fn play_out(&mut self, s: &mut [u8], stock: &[u8], cfg: &[Config; 6], mut moves: Option<&mut Vec<u8>>, to_show: bool) -> (bool, u64) {
         let mut visited = Keys::default();
         let mut tempo = Tempo::default();
         let (mut left, mut played) = (stock.len(), 0);
@@ -892,7 +939,7 @@ impl Search {
                 }
                 counts
             };
-            let d = self.decide(s, left / NUM_COLS, &visited, &mut tempo, cfg, unseen);
+            let d = self.choose(s, left / NUM_COLS, &visited, &mut tempo, &cfg[left / NUM_COLS], unseen);
             visited.insert(key_of(self.nodes[0].pa, self.nodes[0].pb)); // (the position it stood in, as the search hashed it)
             match d {
                 Decision::Stuck => break,
@@ -929,6 +976,7 @@ impl Search {
             let after = progress(s, left);
             if after != before {
                 tempo.dealing = false;
+                tempo.plan.clear();
                 if to_show && (after.0, after.1) != (before.0, before.1) {
                     break;
                 }

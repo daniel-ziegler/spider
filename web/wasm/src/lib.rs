@@ -72,7 +72,7 @@ pub extern "C" fn work() -> f64 {
 /// see): until it is won, the player gives up or 5000 moves are played; a
 /// deal onto a column of MAXC cards ends it (undealt); with `to_show` it
 /// stops right after the first move that turns a card or deals. With `cfg` 0
-/// the rollout player plays, with 1 the cheap one. The position it ends in
+/// the rollout player plays, with 1 the cheap one, with 2 the analysis's. The position it ends in
 /// is left in the state buffer, and with `record` the moves in the moves
 /// buffer, three bytes each (from, to, count; 255 for a deal). Returns
 /// whether it is won (bit 0), the suits completed (bits 1 to 4), whether it
@@ -81,7 +81,11 @@ pub extern "C" fn work() -> f64 {
 #[no_mangle]
 pub extern "C" fn play_out(suits: u8, stock_len: usize, cfg: u32, record: u32, to_show: u32) -> u32 {
     let b = buffers();
-    let cfg = if cfg == 1 { Config::fast(suits) } else { Config::rollout(suits) };
+    let cfg = match cfg {
+        1 => [Config::fast(suits); 6],
+        2 => Config::analysis(suits),
+        _ => [Config::rollout(suits); 6],
+    };
     b.moves.clear();
     let search = b.search.get_or_insert_with(Default::default);
     let (turned, work) = search.play_out(&mut b.state, &b.stock[..stock_len], &cfg, (record != 0).then_some(&mut b.moves), to_show != 0);

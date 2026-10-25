@@ -7,7 +7,7 @@
 // time each engine took. The repository root's `cargo test` runs this.
 import { readFileSync } from 'node:fs';
 import { Game } from '../static/game.js';
-import { fastConfig, rolloutConfig, makeState, playOut, NUM_COLS, MAXC, LEN, DOWN, DONE } from '../static/lineplayer.js';
+import { fastConfig, rolloutConfig, analysisConfig, makeState, playOut, NUM_COLS, MAXC, LEN, DOWN, DONE } from '../static/lineplayer.js';
 import { Net } from '../static/vnet.js';
 import { prepare } from '../static/analysis-core.js';
 import { roll, track, useEngine, useNet } from '../static/analysis-worker.js';
@@ -24,7 +24,7 @@ const timed = (name, f) => { const t = performance.now(), r = f(); time[name] +=
 
 // Games from the deal, by both players, and their end positions.
 const games = [];
-for (const [name, config] of [['rollout', rolloutConfig], ['fast', fastConfig]]) {
+for (const [name, config] of [['analysis', analysisConfig], ['rollout', rolloutConfig], ['fast', fastConfig]]) {
   for (let suits = 1; suits <= 4; suits++) {
     for (let seed = 70001; seed < 70004; seed++) {
       const g = new Game(suits, seed), out = {};
@@ -34,7 +34,7 @@ for (const [name, config] of [['rollout', rolloutConfig], ['fast', fastConfig]])
         out[e] = { r, moves, s: cards(s) };
       }
       check(same(out.js, out.wasm), `${name} ${suits}/${seed}: the engines play differently`);
-      if (name === 'rollout') games.push({ suits, seed, moves: out.js.moves });
+      if (name === 'analysis') games.push({ suits, seed, moves: out.js.moves });
     }
   }
 }
@@ -45,7 +45,7 @@ for (const { suits, seed, moves } of games) {
     const p = data.snaps[t], out = {};
     for (const [e, play] of [['js', playOut], ['wasm', wasm.playOut]]) {
       const s = makeState(p.columns, p.faceDown, p.completed.length), own = [];
-      const r = play(s, Uint8Array.from(p.stock), rolloutConfig(suits), own, true);
+      const r = play(s, Uint8Array.from(p.stock), analysisConfig(suits), own, true);
       out[e] = { r, own, s: cards(s) };
     }
     check(same(out.js, out.wasm), `${suits}/${seed} after ${t} moves: the engines play differently to the first card shown`);
@@ -98,4 +98,4 @@ for (const { suits, seed, moves } of games.filter(g => g.seed === 70001 && g.sui
     check(out.js.length === 6 && out.js.every((x, k) => Math.abs(x - out.wasm[k]) < 1e-6), `${suits}/${seed} stretch ${at}: the engines' stopped games differ`);
   });
 }
-console.log(`${games.length * 2} games, ${stopped} rolls stopped and valued, ${n} values (largest difference ${worst.toExponential(1)}): JavaScript ${(time.js / 1000).toFixed(1)} s, WebAssembly ${(time.wasm / 1000).toFixed(1)} s`);
+console.log(`${games.length * 3} games, ${stopped} rolls stopped and valued, ${n} values (largest difference ${worst.toExponential(1)}): JavaScript ${(time.js / 1000).toFixed(1)} s, WebAssembly ${(time.wasm / 1000).toFixed(1)} s`);

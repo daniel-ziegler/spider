@@ -2,10 +2,11 @@
 // (static/lineplayer.js) and prints, one line per deal:
 //   config suits seed won completed work moves
 // The repository root's `cargo test` plays the same deals with src/lines.rs
-// (LineConfig::rollout, the analysis's player, and LineConfig::fast) and
+// (the analysis's player: LineConfig::rollout with the settings of
+// lineplayer.js's ANALYSIS; LineConfig::rollout; and LineConfig::fast) and
 // compares.
 import { Game, encodeMoves } from '../static/game.js';
-import { fastConfig, rolloutConfig, makeState, playOut } from '../static/lineplayer.js';
+import { fastConfig, rolloutConfig, analysisConfig, makeState, playOut } from '../static/lineplayer.js';
 
 // (GAMES in the environment: more deals of each suit count than the test's
 // twelve; CONFIG: only that one; EXPECT_TOP, EXPECT_STEPS, EXPECT_BEAM,
@@ -13,7 +14,7 @@ import { fastConfig, rolloutConfig, makeState, playOut } from '../static/linepla
 const first = 70001, count = +(process.env.GAMES || 12), env = process.env;
 const over = {};
 for (const [name, key] of [['EXPECT_TOP', 'expectTop'], ['EXPECT_STEPS', 'expectSteps'], ['EXPECT_BEAM', 'expectBeam'], ['MAX_STEPS', 'maxSteps'], ['BEAM', 'beam']]) if (env[name]) over[key] = +env[name];
-for (const [name, config] of [['rollout', rolloutConfig], ['fast', fastConfig]]) {
+for (const [name, config] of [['analysis', analysisConfig], ['rollout', rolloutConfig], ['fast', fastConfig]]) {
   if (env.CONFIG && env.CONFIG !== name) continue;
   for (let suits = 1; suits <= 4; suits++) {
     for (let seed = first; seed < first + count; seed++) {

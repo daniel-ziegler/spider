@@ -1,7 +1,9 @@
 // A player that does not look at the face-down cards, for the analysis's
 // rollouts (analysis-worker.js): a port of the line player, ../../src/lines.rs, as
-// far as the analysis's configuration needs (LineConfig::rollout, and the
-// cheaper LineConfig::fast: no replanning, no wider search before a deal). It
+// far as the analysis's configurations need (LineConfig::rollout with
+// replanning, a wider beam and settings of its own for a number of deals
+// left, as SPIDER_L_REPLAN, SPIDER_L_BEAM and SPIDER_L_K<n>_* give it there,
+// and the cheaper LineConfig::fast: no wider search before a deal). It
 // decides exactly as the Rust does: the repository root's `cargo test` plays
 // deals with both and compares the moves (test/lineplayer.mjs).
 //
@@ -12,7 +14,9 @@
 // lines that turn a card by the mean, over the cards that can come up, of the
 // best score a step further on), and the best line that raises the score is
 // played; failing that the best by a score that values empty columns low (a
-// deal needs them filled); failing that it deals.
+// deal needs them filled); failing that it deals. With `replan` only the
+// first few steps of a line are played before it looks again, keeping to the
+// line unless it finds one that ends better.
 //
 // A position is a Uint8Array of SIZE bytes: MAXC cards for each of ten
 // columns, then each column's length, each column's number of face-down
@@ -32,7 +36,7 @@ const imul = Math.imul;
 // (`name` and `suits` say which of lines.rs's it is, for wasm.js.)
 export function fastConfig(suits) {
   const base = {
-    name: 'fast', suits, maxSteps: 6, touch: true, beam: 0, expectTop: 0, expectSteps: 4, expectBeam: 20, splits: suits === 1 ? 2 : 1,
+    name: 'fast', suits, maxSteps: 6, touch: true, beam: 0, expectTop: 0, expectSteps: 4, expectBeam: 20, replan: 0, staged: null, splits: suits === 1 ? 2 : 1,
     completed: 1000, hidden: 47, empty: 53, dealEmpty: -72, dealFlip: 0, endEmpty: 3, same: 0, off: -6, offRank: 3,
     king: 0, ranks: 9, runSq: 13, wrong: 0, clear: 0, hiddenSq: 0, dig: 0, turnable: 0,
   };
@@ -80,18 +84,41 @@ function colHash(S, at, n, d) {
 
 const keyOf = (a, b) => (b & 0x1FFFFF) * 4294967296 + (a >>> 0);
 
-// The player the analysis plays games out with and whose chance of winning
-// its network gives: LineConfig::rollout in lines.rs (which see). Lines of up
-// to fourteen steps (two with one suit), a beam of 100, and expectimax one
-// step deep for the best four lines that turn a card: it wins some 89%, 68%,
-// 50% and 31% of deals with one to four suits, at six times the work of
-// fastConfig (86%, 63%, 42%, 25%).
+// LineConfig::rollout in lines.rs (which see), the player the analysis had
+// before: lines of up to fourteen steps (two with one suit), a beam of 100,
+// and expectimax one step deep for the best four lines that turn a card: it
+// wins some 89%, 68%, 49% and 32% of deals with one to four suits, at six
+// times the work of fastConfig (86%, 63%, 42%, 25%).
 export function rolloutConfig(suits) {
   return { ...fastConfig(suits), ...ROLLOUT[suits], name: 'rollout' };
 }
 
 const STRONGER = { maxSteps: 14, beam: 100, expectTop: 4, expectSteps: 1 };
 const ROLLOUT = { 1: { expectTop: 4, expectSteps: 1 }, 2: STRONGER, 3: STRONGER, 4: STRONGER };
+
+// The player the analysis plays games with and shows the lines of:
+// rolloutConfig with what ANALYSIS has for the number of suits (`replan`:
+// only so many steps of a line are played before the player looks again;
+// `beam`; `stages`: settings of its own for the play with that many deals
+// left; in lines.rs's terms SPIDER_L_ROLLOUT with SPIDER_L_REPLAN,
+// SPIDER_L_BEAM and SPIDER_L_K<n>_*). With two suits or more it looks again
+// every four steps with a beam of 150, and after the last deal, where the
+// lines are long and the games of an analysis are played to their end,
+// every eight with a beam of 100; with one suit its lines after the last
+// deal are of four steps and its expectimax there two steps deep. It wins
+// 91.0%, 69.1%, 51.8% and 37.1% of deals with one to four suits where
+// rolloutConfig wins 89.3%, 67.5%, 49.4% and 32.5% (seeds 700001 to 703000),
+// at two to two and a half times the work. The analysis's network is of the
+// same player with a beam of 300 throughout (and with one suit of this very
+// one), which wins 69.9%, 53.5% and 37.8% at twice the work again.
+export function analysisConfig(suits) {
+  const { stages = {}, ...all } = ANALYSIS[suits], cfg = { ...rolloutConfig(suits), ...all, name: 'analysis' };
+  if (Object.keys(stages).length) cfg.staged = Array.from({ length: 6 }, (_, k) => ({ ...cfg, ...stages[k] }));
+  return cfg;
+}
+
+const REPLANNING = { replan: 4, beam: 150, stages: { 0: { replan: 8, beam: 100 } } };
+const ANALYSIS = { 1: { stages: { 0: { maxSteps: 4, expectSteps: 2 } } }, 2: REPLANNING, 3: REPLANNING, 4: REPLANNING };
 
 
 // The positions a search has reached: an open-addressed table (for each
@@ -645,20 +672,21 @@ function expectFlips(dealsLeft, visited, cfg, empty, unseen) {
   return out;
 }
 
-// The moves of the line to node k, as [from, to, count, ...].
+// The steps of the line to node k, each its moves as [from, to, count, ...].
 function lineTo(k) {
   const steps = [];
   for (; k !== 0; k = parent[k]) steps.push(stepOf[k]);
-  return steps.reverse().flat();
+  return steps.reverse();
 }
 
 const DEAL = 'deal', STUCK = 'stuck';
 
 // What to do in the position `root` with this many deals left
-// (decide_steps in lines.rs): a line's moves, DEAL or STUCK. `visited` has
+// (decide_steps in lines.rs): a line's steps, DEAL or STUCK. `visited` has
 // the keys of the positions never to return to, `tempo.dealing` says that the
 // player is about to deal (and tempo.turns comes to say whether the line
-// chosen turns a card), `tempo.work` counts the positions looked at (those
+// chosen turns a card, tempo.value what it is worth where it ends),
+// `tempo.work` counts the positions looked at (those
 // of the expectimax apart, as in the Rust). `unseen` is asked for the cards
 // not seen (see expectFlips) if they are needed.
 function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
@@ -674,7 +702,7 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
       const sc = scored(k, 0, cfg.empty);
       if (sc > bestScore && fresh(k)) { best = k; bestScore = sc; }
     }
-    if (best) { tempo.turns = leaf[best] === 1; return lineTo(best); }
+    if (best) { tempo.turns = leaf[best] === 1; tempo.value = bestScore; return lineTo(best); }
   }
   // About to deal or, with the stock gone, to give up.
   const dealValue = k => { const v = scored(k, 1, empty); return v > LOST && leaf[k] ? v + cfg.dealFlip : v; };
@@ -686,6 +714,7 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
   if (best) {
     tempo.dealing = true;
     tempo.turns = leaf[best] === 1;
+    tempo.value = bestScore;
     return lineTo(best);
   }
   if (dealsLeft === 0) return STUCK;
@@ -700,6 +729,7 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
       const v = value(k, dealsLeft, empty);
       if (!at || v > most) { at = k; most = v; }
     }
+    tempo.value = most;
     return at && most > LOST ? at : 0;
   };
   let k = fill();
@@ -710,6 +740,23 @@ function decide(root, dealsLeft, visited, tempo, cfg, unseen) {
   if (!k) return STUCK;
   tempo.turns = leaf[k] === 1;
   return lineTo(k);
+}
+
+// The moves to play now ([from, to, count, ...]), DEAL or STUCK (decide in
+// lines.rs): the line decided on or, with cfg.replan, its first steps only,
+// what is left of it being kept in tempo.plan and played on from unless the
+// line decided on next ends better (or in the other mode), so that looking
+// again cannot make the player wander.
+function choose(root, dealsLeft, visited, tempo, cfg, unseen) {
+  const d = decide(root, dealsLeft, visited, tempo, cfg, unseen);
+  if (d === DEAL || d === STUCK) return d;
+  if (!cfg.replan) return d.flat();
+  if (!tempo.plan.length || tempo.dealing !== tempo.planDealing || tempo.value > tempo.planValue) {
+    tempo.plan = d;
+    tempo.planValue = tempo.value;
+    tempo.planDealing = tempo.dealing;
+  }
+  return tempo.plan.splice(0, cfg.replan).flat();
 }
 
 // What the player would do next in the position `s`, in which every face-up
@@ -730,7 +777,7 @@ export function nextKind(s, dealsLeft, cfg) {
 // With `toShow` it stops right after the first move that turns a card or
 // deals (and returns nothing).
 export function playOut(s, stock, cfg, moves = null, toShow = false) {
-  const visited = new Set(), tempo = { dealing: false, work: 0 };
+  const visited = new Set(), tempo = { dealing: false, work: 0, plan: [] };
   let left = stock.length, played = 0;
   // How many of each card are face down or in the stock.
   const counts = new Uint8Array(52);
@@ -747,7 +794,7 @@ export function playOut(s, stock, cfg, moves = null, toShow = false) {
   };
   while (s[DONE] < 8 && played < 5000) {
     const before = progress();
-    const d = decide(s, left / NUM_COLS, visited, tempo, cfg, unseen);
+    const d = choose(s, left / NUM_COLS, visited, tempo, cfg.staged ? cfg.staged[left / NUM_COLS] : cfg, unseen);
     visited.add(keyOf(PA[0], PB[0])); // (the position it stood in, as the search hashed it; decide only asks about others)
     if (d === STUCK) break;
     if (d === DEAL) {
@@ -768,6 +815,7 @@ export function playOut(s, stock, cfg, moves = null, toShow = false) {
     }
     if (progress() !== before) {
       tempo.dealing = false;
+      tempo.plan = [];
       if (toShow && Math.floor(progress() / 10) !== Math.floor(before / 10)) break;
     }
   }
