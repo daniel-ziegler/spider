@@ -30,7 +30,7 @@
 import { suite, played, stretchJob } from '/bench-worker.js';
 import { loadWasm } from '/wasm.js';
 import { fastConfig } from '/lineplayer.js';
-import { prepare, stretchValues, screenJobs, screen, findMistakes } from '/analysis-core.js';
+import { prepare, stretchValues, screenJobs, screen, findMistakes, searchFor } from '/analysis-core.js';
 
 const out = document.getElementById('out');
 const log = s => { out.textContent += s + '\n'; };
@@ -113,7 +113,7 @@ async function whole(suits, n) {
   const busy0 = p.busy.ms;
   let spent = 0, rolls = 0;
   const roll = r => p.run({ roll: r }).then(a => { rolls++; return a.rolls; });
-  const found = await findMistakes({ stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits), update: (c, k) => { spent = k; } });
+  const found = await findMistakes({ stretches: data.stretches, cuts, job, roll, opt: searchFor(suits), prior: screen(data.stretches, values, theirs, data.won, N, suits), update: (c, k) => { spent = k; } });
   mark(`play out ${spent} games`);
   const use = (p.busy.ms - busy0) / (n * (t[`play out ${spent} games`] - t.screen));
   p.close();

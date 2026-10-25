@@ -32,8 +32,8 @@ if (cmd === 'make') {
   const cands = [];
   data.stretches.forEach((st, at) => {
     if (!cuts[at]?.length) return;
-    const bytes = roll({ ...job(at), from: 0, to: worlds, at: [0, st.to - st.from] });
-    const d = paired([...bytes].map(b => b & 1), [...bytes].map(b => (b >> 1) & 1));
+    const worth = roll({ ...job(at), from: 0, to: worlds, at: [0, st.to - st.from] });
+    const d = paired(worth.filter((_, k) => !(k & 1)), worth.filter((_, k) => k & 1));
     cands.push({ at, mean: d.mean, se: d.se, before: d.a });
   });
   writeFileSync(out, JSON.stringify({

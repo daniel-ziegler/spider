@@ -61,11 +61,13 @@ the better line; `?` or `C` has the computer's move shown at every position;
   one the analysis began with (`LineConfig::fast`) 86%, 63%, 42% and 25%, at
   a sixth of the work. `static/lineplayer.js` is a port of it that plays move
   for move as the Rust does (65 ms a four-suit game from the deal on one core, 17 ms a one-suit game).
-  That is the player whose line is shown and whose games measure the
-  mistakes. The curve is of a stronger one, the strongest that could be
-  afforded for the network's games (see [the network](#the-network)): it
-  wins 90%, 70%, 53% and 37.5%, so the curve stands some points above the
-  chances a mistake is listed with.
+  That is the player whose line is shown and who plays the games that
+  measure the mistakes. The curve is of a stronger one, the strongest that
+  could be afforded for the network's games (see [the network](#the-network)):
+  it wins 90%, 70%, 53% and 37.5%. With two suits or more the mistakes'
+  games are not played to the end but valued by that network after a while
+  (below), so the chances a mistake is listed with are of the curve's kind;
+  with one suit they are the games' own player's, a point under the curve.
 * **WebAssembly.** The workers play the games and value the positions in
   WebAssembly where it loads (`static/spider.wasm`, built from `wasm/`:
   `lineplayer.js` and `vnet.js`'s forward pass over again in Rust;
@@ -119,6 +121,21 @@ the better line; `?` or `C` has the computer's move shown at every position;
   is measured by playing games out, in shuffles of the cards the player had
   not seen: the same shuffles from both positions, which makes the difference
   much less noisy than the two rates. What the cards did is no part of it.
+  * *How far the games go.* With one suit to the end. With two or more a
+    game is played on until eight moves have shown cards (turned one over,
+    or dealt), counted from the start of its stretch so that the games from
+    after the player's moves stop as far on as those from before them, and
+    is then worth what the network makes of the position (`stop` in `SHORT`
+    in `analysis-core.js`; a game over by then is worth what it came to). A
+    value takes as long as a game, so a shuffle is no cheaper, but its
+    difference is half as noisy (20 points for 39 with four suits) and a
+    quarter of the shuffles do: the numbers below are those of one suit, and
+    with more they are a quarter (8 shuffles at first, up to 128, a mistake
+    from 32, 600 games; 32 for the move, the loss and the luck). Near the
+    end of a game fewer than eight such moves are left, the games end after
+    all and are as noisy as ever; a mistake found there gets up to four
+    times the shuffles for its move and its loss again. What this was
+    measured to cost and gain is under [the network](#the-network).
   * *Candidates.* Every stretch whose moves are not in effect the computer
     player's own (`track` in `analysis-worker.js`): its own line from the
     stretch's start goes up to its first move that shows cards, a move played
@@ -208,9 +225,15 @@ the better line; `?` or `C` has the computer's move shown at every position;
   valuing a game's 150 to 450 positions takes about a second on twelve
   workers (14 ms a position, a millisecond of it the search for what the
   cheap player does next), and the rest of the time goes to playing games
-  out, which is a search and not arithmetic. An analysis plays 2,400 to
-  3,700 games out (2,400 to find the mistakes, then for each found some 250
-  to 500 for its move and 256 for its loss, and 256 for the luck). In
+  out, which is a search and not arithmetic. An analysis of a one-suit
+  game plays 2,400 to 3,700 games out (2,400 to find the mistakes, then for
+  each found some 250 to 500 for its move and 256 for its loss, and 256 for
+  the luck), one of more suits 600 to 2,000, each stopped and valued (the
+  cheap player's four-suit game of `bench.html`, whose two mistakes are at
+  its end and get the most: 2,000 games in 6.4 s on a laptop's twelve
+  workers, where the 3,552 played to the end took 21 s; a person's four-suit
+  game of 343 moves 750 games for 3,300, on one core 14 s for 69). The
+  times that follow are of games all played to the end, in JavaScript. In
   headless Chrome on a laptop with eight cores (twelve workers), with nothing
   else running, the owner's eight games below took 8 s (one suit), 40 to 50 s
   (two and three suits) and 47 to 74 s (four suits; the longest is a game
@@ -421,10 +444,10 @@ deviation of 4.7 points (4.9). These mistakes are plainer than a person's
 (the eight games above were not to hand to be played again), but the two
 networks order them alike.
 
-Not done, but measured (`tools/analysis/short.mjs`, on the same 54 games, 393
-candidates, 256 shuffles each): the games of a mistake not played out to the
-end but until so many moves have shown cards, counted from the stretch's
-start, the network then valuing the position. A value takes as long as a
+What stopping the games is worth was measured first (`tools/analysis/short.mjs`,
+on the same 54 games, 393 candidates, 256 shuffles each): the games of a
+mistake not played out to the end but until so many moves have shown cards,
+counted from the stretch's start, the network then valuing the position. A value takes as long as a
 game or longer (12 to 18 ms against 5 to 25 ms for a game from the middle),
 so a shuffle is no cheaper; what is gained is that a shuffle's difference is
 far less noisy. With four suits:
@@ -451,6 +474,26 @@ of a stronger player shows with four suits only: there the mistakes that
 cost 15 points in full games cost 19 so (measured in shuffles other than
 those that chose them); with one to three suits the two agree within a
 point.
+
+The page now stops after eight showings with two suits or more, and the
+whole search was then compared with the one before on 48 such games (16 for
+each of two to four suits, made again since the hints and the lines had
+changed; `tools/analysis/found.mjs`, against every candidate's cost by full
+games in 256 shuffles). Of the 62 candidates that are mistakes by those (five
+points, 2.5 standard errors):
+
+| the search | found | not | called mistakes besides: costing three points or more | less | games | time, one core, sixteen at once |
+|---|---|---|---|---|---|---|
+| games to the end (`SEARCH`) | 56 | 6 | 3 | 1 | 2,325 | 231 s |
+| stopped after eight showings (`SHORT`) | 55 | 7 | 5 | 1 | 763 | 38 s |
+
+(Three of the seven not found are in the list as perhaps mistakes; as are
+three of the six.) The losses shown for those found are 20.3 points on
+average, their full games' 20.4 (17.6 and 17.6 with four suits). More games
+(800 for 600) or sixteen shuffles at first find no more. Before a mistake at
+a game's end got more shuffles (`noisy`), the two in `bench.html`'s game
+were found but not put to their moves, their losses known to 8 and 11
+points.
 
 ## FreeCell
 

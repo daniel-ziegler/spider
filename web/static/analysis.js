@@ -17,18 +17,22 @@
 //   1. A network values every position (and each position where cards came
 //      up, also before they were known): the curve. (It is trained on games
 //      of a stronger line player than the one that plays the games of the
-//      second pass, so the curve stands some points above their chances.)
+//      second pass.)
 //   2. The mistakes are found by playing games out in shuffles of the cards
 //      the player had not seen, from before the player's moves (the line
 //      player choosing its own) and from after them, in the order the
 //      network gives the stretches (screen): see findMistakes in
 //      analysis-core.js, which has what is computed; this file has the
-//      workers and the page.
-import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, SEARCH } from './analysis-core.js';
+//      workers and the page. With two suits or more the games are played
+//      on for eight moves that show cards and the network values where they
+//      stand, so a mistake's chances are of the curve's kind; with one suit
+//      they are played to the end, and the chances are the games' own
+//      player's (a point or so under the curve).
+import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, searchFor } from './analysis-core.js';
 
 const NET_VERSION = 3; // in the network's address, which is cached for good: change it with the network
 const VALUES = 6; // positions valued in one piece of work
-const ROLL_WEIGHT = 3; // a game played out against a position's valuing, for the progress bar
+const ROLL_WEIGHT = 3; // a game played out (to the end, or as far as it is and then valued) against a position's valuing, for the progress bar
 
 let fetched = null; // the promise of the network's bytes (one network for every number of suits)
 function fetchNet() {
@@ -131,6 +135,7 @@ export function open(ctx) {
   let pooled; // (called when the workers are there)
   const workers = new Promise(resolve => { pooled = resolve; });
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
+  const SEARCH = searchFor(suits); // the search's numbers: how far its games are played, and how many
   const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
@@ -409,7 +414,7 @@ export function open(ctx) {
   // at, from..end: the moves picked out, sure, title, cost, ...}.
   function shownItems() {
     if (found) return found;
-    return cands.filter(c => c.stat.n >= 64 && c.stat.mean <= -SEARCH.cost && c.state !== 'out')
+    return cands.filter(c => c.stat.n >= SEARCH.least / 2 && c.stat.mean <= -SEARCH.cost && c.state !== 'out')
       .sort((a, b) => a.stat.mean - b.stat.mean).slice(0, SEARCH.most)
       .map(c => ({ sure: false, at: c.st.to, from: c.st.from, end: c.st.to, move: c.st.from + 1, cost: c.stat, title: c.st.to - c.st.from > 1 ? `Moves ${c.st.from + 1}–${c.st.to}` : `Move ${c.st.to}` }));
   }
@@ -599,7 +604,7 @@ export function open(ctx) {
     const roll = r => pool.run({ roll: r }).then(a => a.rolls);
     // The cards' biggest swing by the network, measured alongside.
     const swing = vals.map((v, at) => [cuts[at] && data.stretches[at].shows ? Math.abs(v.luck) : 0, at]).sort((a, b) => b[0] - a[0])[0];
-    const lucky = swing && swing[0] >= 0.05 ? measureLuck({ st: data.stretches[swing[1]], job: job(swing[1]), roll }).then(d => {
+    const lucky = swing && swing[0] >= 0.05 ? measureLuck({ st: data.stretches[swing[1]], job: job(swing[1]), roll, opt: SEARCH }).then(d => {
       const st = data.stretches[swing[1]];
       if (Math.abs(d.mean) >= 0.05 && Math.abs(d.mean) >= 2 * d.se) luck = { t: st.to, show: st.shows, mean: d.mean, se: d.se };
     }) : null;
@@ -612,7 +617,7 @@ export function open(ctx) {
     }));
     if (closed) return;
     const mistakes = await findMistakes({
-      stretches: data.stretches, cuts, job, roll, prior: screen(data.stretches, values, theirs, data.won, N, suits),
+      stretches: data.stretches, cuts, job, roll, opt: SEARCH, prior: screen(data.stretches, values, theirs, data.won, N, suits),
       update: (c, n) => { cands = c; spent = n; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
     });
     await lucky;

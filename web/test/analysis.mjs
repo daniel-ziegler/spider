@@ -4,10 +4,12 @@
 // network's encoding of positions from play, and "dealt ...": that of the
 // position after the moves and a deal with the cards dealt not yet known,
 // which the test compares with what src/vnet.rs encodes.
+import { readFileSync } from 'node:fs';
 import { Game, encodeMoves } from '../static/game.js';
+import { Net } from '../static/vnet.js';
 import { rolloutConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
-import { prepare, stretchValues, committed, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, SEARCH, BIAS } from '../static/analysis-core.js';
-import { random, shuffled, showReal, setup, roll, track, simplify } from '../static/analysis-worker.js';
+import { prepare, stretchValues, committed, encodeSnap, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, searchFor, SEARCH, SHORT, BIAS } from '../static/analysis-core.js';
+import { random, shuffled, showReal, setup, roll, track, simplify, useNet } from '../static/analysis-worker.js';
 
 const check = (ok, what) => { if (!ok) throw new Error(what); };
 
@@ -155,15 +157,33 @@ for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
   const g = new Game(2, 70001);
   const job = { suits: 2, columns: g.columns, faceDown: g.faceDown, completed: 0, stock: g.stock, moves: [], seed: 7, from: 0, to: 48, reveal: true };
   const a = roll(job), b = roll({ ...job, from: 16, to: 32 });
-  check(a.slice(16, 32).join() === b.join(), 'the same worlds play out differently');
-  check(a.every(x => x === 0 || x === 7), 'the three games differ with no moves played');
-  const rate = a.reduce((n, x) => n + (x & 1), 0) / a.length;
+  const col = (r, i, width) => r.filter((_, k) => k % width === i);
+  check(a.length === 3 * 48 && a.slice(3 * 16, 3 * 32).join() === b.join(), 'the same worlds play out differently');
+  check(a.every((x, k) => (x === 0 || x === 1) && x === a[k - k % 3]), 'the three games differ with no moves played');
+  const rate = col(a, 0, 3).reduce((n, x) => n + x, 0) / 48;
   check(rate > 0.4 && rate < 0.85, `an odd rate from the deal: ${rate}`);
   // A move that turns a card: games from before it, after it, and both with the real card; a game is the same whatever else is asked for.
   const moves = played(2, 70001), data = prepare(2, 70001, moves), st = data.stretches[0];
   const own = moves.slice(st.from, st.to), r = roll({ ...job, moves: own, to: 16, at: [0, own.length] });
   const r2 = roll({ ...job, moves: own, to: 16, at: [own.length], reveal: false });
-  check(r.every((x, w) => (x & 1) === (a[w] & 1) && ((x >> 1) & 1) === (r2[w] & 1)) && r.every(x => x < 8) && r2.every(x => x < 2), 'the games of a roll');
+  check(r.length === 3 * 16 && r2.length === 16 && r2.every((x, w) => r[3 * w] === a[3 * w] && r[3 * w + 1] === x), 'the games of a roll');
+  // Games stopped after some moves that show cards and valued there: chances, the same in the same worlds, their
+  // mean about the rate; with no moves the three are one; the game after a move that showed a card stops a move
+  // sooner than the one before it (stopped after one, it is not played at all: its three games' worth are the
+  // network's values of the position, with the world's card and the real one).
+  const bytes = readFileSync(new URL('../static/nets/value.bin', import.meta.url));
+  useNet(new Net(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), 2));
+  const s8 = roll({ ...job, stop: 8 }), s8b = roll({ ...job, stop: 8, from: 16, to: 32 });
+  check(s8.slice(3 * 16, 3 * 32).join() === s8b.join() && s8.every((x, k) => x >= 0 && x <= 1 && x === s8[k - k % 3]) && s8.some(x => x > 0 && x < 1), 'games stopped and valued');
+  const mean = col(s8, 0, 3).reduce((n, x) => n + x, 0) / 48;
+  check(Math.abs(mean - rate) < 0.15, `games stopped are worth ${mean}, played out ${rate}`);
+  const sd = xs => { const m = xs.reduce((n, x) => n + x, 0) / xs.length; return Math.sqrt(xs.reduce((n, x) => n + (x - m) ** 2, 0) / xs.length); };
+  check(sd(col(s8, 0, 3)) < 0.8 * sd(col(a, 0, 3)), 'games stopped are as noisy as games played out');
+  const s1 = roll({ ...job, moves: own, to: 16, at: [0, own.length], reveal: true, stop: 1 });
+  const net2 = new Net(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), 2), after = data.snaps[st.to];
+  const real = net2.winProb(encodeSnap(after));
+  check(st.shows === 'turn' && s1.every((x, k) => x >= 0 && x <= 1 && (k % 3 !== 2 || Math.abs(x - real) < 1e-6)), 'a game stopped where it starts is not the network\'s value');
+  check(new Set(col(s1, 1, 3)).size > 1, 'the card turned is the same in every world');
 }
 
 // Differences of games in the same worlds, and what is called a mistake.
@@ -208,7 +228,7 @@ for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
   const world = (i, w) => { const below = random(Math.imul(i + 1, 0x9E3779B1) ^ Math.imul(w + 1, 0x85EBCA6B)); below(2); return below(1 << 20) / (1 << 20); };
   const fake = job => {
     games += job.at.length * (job.to - job.from);
-    return Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => job.at.reduce((bits, u, j) => bits | ((world(job.i, job.from + k) < made[job.i][0][u] ? 1 : 0) << j), 0)));
+    return Promise.resolve(Float32Array.from({ length: (job.to - job.from) * job.at.length }, (_, k) => (world(job.i, job.from + Math.floor(k / job.at.length)) < made[job.i][0][job.at[k % job.at.length]] ? 1 : 0)));
   };
   let seen = 0;
   const found = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: fake, update: (c, n) => { check(n >= seen && c.length === made.length - 1, 'the search goes backwards'); seen = n; } });
@@ -238,11 +258,11 @@ for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
     `what may be mistakes: ${JSON.stringify(none.map(m => [m.at, m.move, m.exact, m.n, m.cost.mean]))}`);
   // With every game the same there are none, and the games are not all played.
   games = 0;
-  const same = job => { games += job.at.length * (job.to - job.from); return Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 5 < 2 ? (1 << job.at.length) - 1 : 0))); };
+  const same = job => { games += job.at.length * (job.to - job.from); return Promise.resolve(Float32Array.from({ length: (job.to - job.from) * job.at.length }, (_, k) => ((job.from + Math.floor(k / job.at.length)) % 5 < 2 ? 1 : 0))); };
   const flat = await findMistakes({ stretches, cuts, job: i => ({ i }), roll: same });
   check(flat.length === 0 && games <= SEARCH.games, `no mistakes to find: ${flat.length} found in ${games} games`);
   // The cards' part: the real cards against the world's.
-  const luck = await measureLuck({ st: stretches[0], job: {}, roll: job => Promise.resolve(Uint8Array.from({ length: job.to - job.from }, (_, k) => ((job.from + k) % 4 ? 1 : 3))) });
+  const luck = await measureLuck({ st: stretches[0], job: {}, roll: job => Promise.resolve(Float32Array.from({ length: 2 * (job.to - job.from) }, (_, k) => (k % 2 ? ((job.from + (k >> 1)) % 4 ? 0 : 1) : 1))) });
   check(luck.n === SEARCH.luck && Math.abs(luck.mean + 0.75) < 1e-12 && luck.a === 1 && luck.b === 0.25, 'the cards\' part');
 }
 

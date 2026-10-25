@@ -2,7 +2,7 @@
 // ../wasm; static/wasm.js) against the JavaScript it stands in for: the
 // line player's games (lineplayer.js's playOut, from the deal and played to
 // the first card shown), the analysis's games and tracks (roll and track in
-// analysis-worker.js), and the network's values (vnet.js). They must be the
+// analysis-worker.js, the games also stopped and valued), and the network's values (vnet.js). They must be the
 // same, the values to a millionth. It fails by throwing, and prints the
 // time each engine took. The repository root's `cargo test` runs this.
 import { readFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { Game } from '../static/game.js';
 import { fastConfig, rolloutConfig, makeState, playOut, NUM_COLS, MAXC, LEN, DOWN, DONE } from '../static/lineplayer.js';
 import { Net } from '../static/vnet.js';
 import { prepare } from '../static/analysis-core.js';
-import { roll, track, useEngine } from '../static/analysis-worker.js';
+import { roll, track, useEngine, useNet } from '../static/analysis-worker.js';
 import { loadWasm } from '../static/wasm.js';
 
 const check = (ok, what) => { if (!ok) throw new Error(what); };
@@ -79,4 +79,23 @@ for (const { suits, seed, moves } of games.filter(g => g.seed <= 70002)) {
   }
 }
 check(worst < 1e-6, `the engines' values differ by ${worst}`);
-console.log(`${games.length * 2} games, ${n} values (largest difference ${worst.toExponential(1)}): JavaScript ${(time.js / 1000).toFixed(1)} s, WebAssembly ${(time.wasm / 1000).toFixed(1)} s`);
+// Games stopped after a few moves that show cards and valued there (a roll with `stop`).
+let stopped = 0;
+for (const { suits, seed, moves } of games.filter(g => g.seed === 70001 && g.suits > 1)) {
+  const data = prepare(suits, seed, moves), nets = { js: new Net(bytes, suits), wasm: wasm.net(bytes, suits) };
+  data.stretches.forEach((st, at) => {
+    if (at % 7 !== 2) return;
+    const start = data.snaps[st.from];
+    const job = { suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock, moves: moves.slice(st.from, st.to), seed: at, from: 0, to: 2, reveal: true, stop: 3 };
+    const out = {};
+    for (const [e, engine] of [['js', null], ['wasm', wasm]]) {
+      useEngine(engine);
+      useNet(nets[e]);
+      out[e] = timed(e, () => roll(job));
+    }
+    useEngine(null);
+    stopped++;
+    check(out.js.length === 6 && out.js.every((x, k) => Math.abs(x - out.wasm[k]) < 1e-6), `${suits}/${seed} stretch ${at}: the engines' stopped games differ`);
+  });
+}
+console.log(`${games.length * 2} games, ${stopped} rolls stopped and valued, ${n} values (largest difference ${worst.toExponential(1)}): JavaScript ${(time.js / 1000).toFixed(1)} s, WebAssembly ${(time.wasm / 1000).toFixed(1)} s`);

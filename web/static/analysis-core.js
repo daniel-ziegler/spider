@@ -89,6 +89,11 @@ export function stretchValues(st, values, won, last, suits = 0) {
 // would have from the position before it, by games played out in shuffles of
 // the cards the player had not seen (analysis-worker.js: the same shuffles
 // for both, so that the difference is far less noisy than the two rates).
+// With one suit the games are played to the end. With more they are played
+// until `stop` moves have shown cards and the network values where they
+// stand (SHORT, below), so that a game is worth a chance and not a win or a
+// loss: the chance of the network's player, as the curve is, and a few
+// points more than the games' own player would make of it with four suits.
 // Every stretch whose moves are not, in effect, the line player's own
 // (track, in the worker) is a candidate. There are too many of them (some
 // forty in a game of fifty stretches) to play all out as far as it takes to
@@ -107,7 +112,7 @@ export function stretchValues(st, values, won, last, suits = 0) {
 // The numbers are in games played out, since the time is theirs: `games` for
 // finding the mistakes, then for each found at most some 2 * `pin` for
 // putting it to a move and 2 * `fresh` for its loss, and 2 * `luck` for the
-// cards' biggest swing. Where few mistakes are found, those that may be are
+// cards' biggest swing (each times `noisy` at most). Where few mistakes are found, those that may be are
 // brought up to `enough` worlds (some two for each place to fill) and put to
 // a move as well.
 export const SEARCH = {
@@ -129,7 +134,31 @@ export const SEARCH = {
   shown: 3, // with fewer mistakes than this, the list is filled up with what may be mistakes
   maybe: 0.02, // which is what lost this much in its games, however unsurely,
   enough: 128, // in this many worlds at least
+  stop: 0, // moves showing cards a game is played on for before the network values it (0: to the end)
+  sd: 0.2, // with `stop`: the standard deviation of a world's difference that pin, fresh and luck are meant for,
+  noisy: 1, // and how many times as many worlds a candidate may get for them whose worlds differ more
 };
+
+// With two suits or more a game stops after eight moves that show cards,
+// counted from the start of its stretch. Measured against games played to
+// the end on games with mistakes put in (tools/analysis/short.mjs), a
+// world's difference then has a quarter of the variance with four suits (the
+// standard deviation 20 points for 39), so a quarter of the worlds do, and
+// what the network adds of its own to a candidate's cost is about a point
+// (1.1 with four suits; stopped after four it is 1.8, after sixteen 0.7). A
+// world costs about what it did (a value takes the time of a game or more),
+// so the search takes about a quarter of the time. With one suit a game is
+// over in less time than a value takes, and nothing is gained. Towards the
+// end of a game there are not eight such moves left, the games are played
+// out after all and a world's difference is as noisy as it was (up to 70
+// points): a mistake found there gets up to four times the worlds for its
+// move and its loss, as many as it had (`noisy`; so does the cards' swing).
+export const SHORT = {
+  ...SEARCH, stop: 8, games: 600, round: 8, piece: 2, first: 8, cap: 128, least: 32, pin: 32, fresh: 32, luck: 32, enough: 32, noisy: 4,
+};
+
+// The search's numbers for a game of this many suits.
+export const searchFor = suits => (suits > 1 ? SHORT : SEARCH);
 
 // What the network is to value besides the game's own positions, to say
 // which candidates to look at first: for each stretch that leaves the line
@@ -171,14 +200,15 @@ export function screen(stretches, values, theirs, won, last, suits = 0) {
   });
 }
 
-// Games in the same worlds compared: `a` and `b` have for each world 1 (won),
-// 0 or -1 (not played). {n, a, b, mean, se}: over the worlds from `from` up
+// Games in the same worlds compared: `a` and `b` have for each world what
+// the game was worth (1 won, 0 lost, or the network's value where it
+// stopped), NaN where it was not played. {n, a, b, mean, se}: over the worlds from `from` up
 // to `to` that have both, the two rates, and b - a with its standard error
 // (never taken for less than one game's difference would make it).
 export function paired(a, b, to = Infinity, from = 0) {
   let n = 0, sa = 0, sb = 0, sd = 0, sq = 0;
   for (let w = from; w < a.length && w < to; w++) {
-    if (a[w] < 0 || b[w] < 0) continue;
+    if (!(a[w] >= 0 && b[w] >= 0)) continue;
     const d = b[w] - a[w];
     n++; sa += a[w]; sb += b[w]; sd += d; sq += d * d;
   }
@@ -232,7 +262,7 @@ export function nextRound(stats, order, left, opt = SEARCH) {
 // `prior[i]` what the network makes stretch i cost (screen; without it the
 // candidates come in as they are in the game), `job(i)` the roll's position
 // and moves for stretch i (see the worker), and roll(job) plays games out: a
-// promise of the bytes. `update` is called as results come in, with the
+// promise of what they were worth (the worker's roll). `update` is called as results come in, with the
 // candidates so far.
 //
 // Returns the mistakes, the costliest first, each
@@ -240,7 +270,7 @@ export function nextRound(stats, order, left, opt = SEARCH) {
 // stretch `at`; the move numbered `move` in the game (1 is the first) was
 // the mistake, `line` what the line player would have played in its place up
 // to its first move that shows cards; `better` and `yours` are the line
-// player's rates of winning from before the move and from after it (with
+// player's chances of winning (the games' mean worth) from before the move and from after it (with
 // `exact`), or, where no one move of the stretch is surely the loss, from
 // before it and from the end of the stretch: in `n` worlds not played
 // before, as is the cost. After them, where they are fewer than `shown`,
@@ -260,13 +290,13 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
   let spent = 0;
   // Games from after `upto` moves of a candidate's stretch, in its worlds from `from` up to n.
   const play = async (c, uptos, n, from = 0) => {
-    for (const u of uptos) if (!c.wins.has(u)) c.wins.set(u, new Int8Array(opt.cap + opt.fresh).fill(-1));
+    for (const u of uptos) if (!c.wins.has(u)) c.wins.set(u, new Float32Array(opt.cap + opt.noisy * opt.fresh).fill(NaN));
     from = Math.min(...uptos.map(u => { const w = c.wins.get(u); let k = from; while (k < n && w[k] >= 0) k++; return k; }));
     const work = [];
     for (let w = from; w < n; w += opt.piece) {
       const to = Math.min(n, w + opt.piece);
-      work.push(roll({ ...job(c.at), from: w, to, at: uptos }).then(bytes => {
-        uptos.forEach((u, i) => { const wins = c.wins.get(u); bytes.forEach((b, k) => { wins[w + k] = (b >> i) & 1; }); });
+      work.push(roll({ ...job(c.at), from: w, to, at: uptos, stop: opt.stop }).then(worth => {
+        uptos.forEach((u, i) => { const wins = c.wins.get(u); for (let k = 0; k < to - w; k++) wins[w + k] = worth[k * uptos.length + i]; });
         spent += uptos.length * (to - w);
         c.stat = paired(c.wins.get(0), c.wins.get(c.st.to - c.st.from) ?? [], opt.cap);
         update(cands, spent);
@@ -304,14 +334,18 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
     return { ends, lo, hi };
   };
   const record = (c, lo, exact, d, unsure) => ({ at: c.at, move: c.st.from + c.cuts[lo].at, line: c.cuts[lo].line, exact, unsure, n: d.n, better: d.a, yours: d.b, cost: { mean: d.mean, se: d.se } });
+  // `base` worlds, or up to `noisy` times as many for a candidate whose worlds differ by more than `sd`.
+  const worlds = (c, base) => base * Math.min(opt.noisy, Math.max(1, Math.ceil((c.stat.se * Math.sqrt(c.stat.n) / opt.sd) ** 2)));
   const sure = (await Promise.all(found.map(async c => {
-    const n = Math.min(c.n, opt.pin), at = await cut(c, n), { ends } = at;
+    const fresh = worlds(c, opt.fresh), n = Math.min(opt.cap, Math.max(Math.min(c.n, opt.pin), worlds(c, opt.pin)));
+    if (n > c.n) { c.n = n; await play(c, [0, c.st.to - c.st.from], n); }
+    const at = await cut(c, n), { ends } = at;
     let { lo, hi } = at;
     const one = c.cuts.length === 1;
     const exact = one || isMistake(paired(c.wins.get(ends[lo]), c.wins.get(ends[hi]), n), opt, Math.min(n, opt.least));
     if (!exact) { lo = 0; hi = c.cuts.length; }
     // The loss to show: in worlds the search has not seen.
-    await play(c, [ends[lo], ends[hi]], opt.cap + opt.fresh, opt.cap);
+    await play(c, [ends[lo], ends[hi]], opt.cap + fresh, opt.cap);
     const d = paired(c.wins.get(ends[lo]), c.wins.get(ends[hi]), Infinity, opt.cap);
     if (d.mean > -(exact ? opt.cost / 2 : opt.spread)) {
       c.state = 'out';
@@ -356,13 +390,19 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
 
 // What the cards shown by a stretch did, by games played out after its moves
 // with the world's cards coming up and with the real ones: the difference (paired).
+// (In more worlds where they differ much, as a mistake's loss is: see SHORT.)
 export async function measureLuck({ st, job, roll, opt = SEARCH }) {
-  const len = st.to - st.from, a = new Int8Array(opt.luck), b = new Int8Array(opt.luck);
-  const work = [];
-  for (let w = 0; w < opt.luck; w += opt.piece) {
-    work.push(roll({ ...job, from: w, to: w + opt.piece, at: [len], reveal: true }).then(bytes => bytes.forEach((x, k) => { a[w + k] = x & 1; b[w + k] = (x >> 1) & 1; })));
-  }
-  await Promise.all(work);
+  const len = st.to - st.from, most = opt.noisy * opt.luck, a = new Float32Array(most).fill(NaN), b = new Float32Array(most).fill(NaN);
+  const play = async (from, to) => {
+    const work = [];
+    for (let w = from; w < to; w += opt.piece) {
+      work.push(roll({ ...job, from: w, to: w + opt.piece, at: [len], reveal: true, stop: opt.stop }).then(worth => { for (let k = 0; k < opt.piece; k++) { a[w + k] = worth[2 * k]; b[w + k] = worth[2 * k + 1]; } }));
+    }
+    await Promise.all(work);
+  };
+  await play(0, opt.luck);
+  const d = paired(a, b);
+  await play(opt.luck, opt.luck * Math.min(opt.noisy, Math.max(1, Math.ceil((d.se * Math.sqrt(d.n) / opt.sd) ** 2))));
   return paired(a, b);
 }
 

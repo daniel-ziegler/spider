@@ -5,13 +5,13 @@
 // Messages to it:
 //   {net: ArrayBuffer, suits}        the network's file and the game's number of suits, first
 //   {id, value: [enc, ...]}          positions, encoded (vnet.js); answers {id, values: [p, ...]}
-//   {id, roll: {...}}                games played out in some worlds; answers         {id, rolls: [...]}
+//   {id, roll: {...}}                games played out in some worlds; answers {id, rolls: Float32Array}
 //   {id, track: [{suits, columns, faceDown, completed, stock, moves}, ...]}
 //                                    for each position and the moves played from it up to the first that showed
 //                                    cards: where they leave the line player's own (see track); answers {id, tracks: [...]}
 //   {id, ask: {the same}}            the same of one position, and the line player's own line from it; answers {id, asked: {cuts, line}}
 //
-// A roll is {suits, columns, faceDown, completed, stock, moves, seed, from, to, at, reveal}:
+// A roll is {suits, columns, faceDown, completed, stock, moves, seed, from, to, at, reveal, stop}:
 // a position with its real cards, moves played from it (the last of which
 // may turn cards over or deal), and the worlds to play, numbered from..to. A
 // world is a shuffle of every card that is face down or in the stock at the
@@ -22,12 +22,21 @@
 // moves with the cards that really came up (the world's other cards as they
 // are, but for those swapped to make room). The same worlds for all the
 // games (common random numbers) make the differences between them far less
-// noisy than the rates. The answer has a byte per world, a bit for each game.
+// noisy than the rates. With `stop`, a game is not played to its end but
+// until that many moves have shown cards (turned some over, or dealt),
+// counted from the roll's position, so that the games after its moves and
+// before them stop as far on; the network then values the position, every
+// card face up in it known, and that is the game's worth (a game over by
+// then is worth what it came to). A value costs about as much as a whole
+// game, but a world's difference between two games is so much less noisy
+// that far fewer worlds do (tools/analysis/short.mjs has the measurements).
+// The answer has for each world a number for each game (a Float32Array,
+// world by world): 1 won, 0 lost, or the network's value.
 //
 // The games are played and the positions valued in WebAssembly (wasm.js)
 // where it loads, else in JavaScript (lineplayer.js, vnet.js): the two give
 // the same, the WebAssembly in less than half the time.
-import { Net } from './vnet.js';
+import { Net, encode } from './vnet.js';
 import { NUM_COLS, MAXC, LEN, DOWN, DONE, SIZE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
 import { loadWasm } from './wasm.js';
 
@@ -38,6 +47,11 @@ let playOut = jsPlayOut, engine = null;
 export function useEngine(e) {
   engine = e;
   playOut = e ? e.playOut : jsPlayOut;
+}
+
+// Value with this network ({winProb(enc)}: what a roll with `stop` needs).
+export function useNet(n) {
+  net = n;
 }
 
 // A small seeded generator (mulberry32).
@@ -82,9 +96,9 @@ export function showReal(cards, real, shown, below) {
 
 // What a roll's worlds are made of: the hidden cards in the order of their
 // places (each column's face-down cards, then the stock), the places the
-// moves show, and game(cards, upto): the position with the hidden cards
-// `cards` after the first `upto` of the moves, as {s, stock} for the line
-// player (null if a column gets too long for it).
+// moves show, how many are hidden, and game(cards, upto): the position with
+// the hidden cards `cards` after the first `upto` of the moves, as {s, stock}
+// for the line player (null if a column gets too long for it).
 export function setup({ columns, faceDown, completed, stock, moves }) {
   const start = makeState(columns, faceDown, completed);
   const places = [];
@@ -110,7 +124,7 @@ export function setup({ columns, faceDown, completed, stock, moves }) {
     for (let c = 0; c < NUM_COLS; c++) for (let i = 0; i < faceDown[c]; i++, k++) if (i >= after.s[DOWN + c]) shown.push(k);
     for (let i = after.stock.length; i < stock.length; i++) shown.push(nd + i);
   }
-  return { real, shown, game };
+  return { real, shown, game, hidden: real.length };
 }
 
 // Play a move in a position of the line player's, the stock having `left`
@@ -127,36 +141,66 @@ function play(s, stock, left, mv) {
   return left;
 }
 
-// The games of a roll: for each world a byte, bit i of which says whether the
-// line player won from the position after the first at[i] of the moves (with
-// the world's cards coming up), and, with `reveal`, the next bit whether it
-// won after all the moves with the cards that really came up.
+const hiddenCards = s => { let n = 0; for (let c = 0; c < NUM_COLS; c++) n += s[DOWN + c]; return n; };
+
+// The network's value of a position of the line player's with `left` cards in the stock.
+function valued(s, left) {
+  const columns = [];
+  for (let c = 0; c < NUM_COLS; c++) columns.push(s.subarray(c * MAXC, c * MAXC + s[LEN + c]));
+  return net.winProb(encode(columns, s.subarray(DOWN, DOWN + NUM_COLS), left / NUM_COLS, s[DONE]));
+}
+
+// What the game g ({s, stock}) is worth to the line player, played on until
+// `stop` moves have shown cards, `shown` having done so already: from one
+// such move to the next (each time thought out anew), then the network's
+// value; 1 or 0 if it is over first.
+function playedOn(g, shown, stop, cfg) {
+  const s = g.s;
+  let left = g.stock.length;
+  for (;;) {
+    if (s[DONE] === 8) return 1;
+    if (shown >= stop) return valued(s, left);
+    const down = hiddenCards(s);
+    playOut(s, g.stock.subarray(0, left), cfg, null, true);
+    let now = 104 - 13 * s[DONE];
+    for (let c = 0; c < NUM_COLS; c++) now -= s[LEN + c];
+    if (now === left && hiddenCards(s) === down) return s[DONE] === 8 ? 1 : 0; // nothing more came up: it is over
+    shown++;
+    left = now;
+  }
+}
+
+// The games of a roll: for each world, one after the other, what the line
+// player's game is worth from the position after the first at[i] of the
+// moves, for each i (with the world's cards coming up), and, with `reveal`,
+// one more: after all the moves with the cards that really came up. Worth 1
+// if won and 0 if not, or with `stop` see above.
 export function roll(job) {
-  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false } = job, cfg = rolloutConfig(suits);
-  const { real, shown, game } = setup(job);
-  const won = g => (g && playOut(g.s, g.stock, cfg).won ? 1 : 0);
-  const out = new Uint8Array(to - from);
+  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false, stop = 0 } = job, cfg = rolloutConfig(suits);
+  const { real, shown, game, hidden } = setup(job);
+  const worth = g => {
+    if (!g) return 0;
+    if (!stop) return playOut(g.s, g.stock, cfg).won ? 1 : 0;
+    return playedOn(g, hiddenCards(g.s) + g.stock.length < hidden ? 1 : 0, stop, cfg);
+  };
+  const width = at.length + (reveal ? 1 : 0), out = new Float32Array((to - from) * width);
   for (let w = from; w < to; w++) {
     const below = random(Math.imul(seed, 0x9E3779B1) ^ Math.imul(w + 1, 0x85EBCA6B));
-    const cards = shuffled(real, below), games = new Map();
-    let bits = 0;
+    const cards = shuffled(real, below), games = new Map(), o = (w - from) * width;
     at.forEach((upto, i) => {
-      if (!games.has(upto)) games.set(upto, won(game(cards, upto)));
-      bits |= games.get(upto) << i;
+      if (!games.has(upto)) games.set(upto, worth(game(cards, upto)));
+      out[o + i] = games.get(upto);
     });
     if (reveal) {
-      if (!shown.length) bits |= (games.get(moves.length) ?? won(game(cards, moves.length))) << at.length; // nothing came up
+      if (!shown.length) out[o + at.length] = games.get(moves.length) ?? worth(game(cards, moves.length)); // nothing came up
       else {
         showReal(cards, real, shown, below);
-        bits |= won(game(cards, moves.length)) << at.length;
+        out[o + at.length] = worth(game(cards, moves.length));
       }
     }
-    out[w - from] = bits;
   }
   return out;
 }
-
-const hiddenCards = s => { let n = 0; for (let c = 0; c < NUM_COLS; c++) n += s[DOWN + c]; return n; };
 
 // Play a move of a line in p ({s, left}: a position, and the cards in the
 // stock): whether it may be played and, unless it is to be the line's last,
