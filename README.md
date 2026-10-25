@@ -716,6 +716,56 @@ games choosing every line and 979 deciding only about dealing, where the
 line player wins 1,761: with almost every position a won one it has nothing
 to tell lines apart by.
 
+**AlphaZero from the better player.** A second day on such a machine gave
+the AlphaZero search (`az/`) a fairer trial with four suits. Its imitation
+games are now the line player's as it really plays (`SPIDER_L_ROLLOUT=1
+SPIDER_L_REPLAN=4 SPIDER_L_BEAM=300`, with what it keeps between decisions:
+the same games as `--bin lines`, seed for seed), the move imitated being
+the line its plan ends with, which is always among the moves offered (the
+rest of a plan was missing from them a quarter of the time); the network
+is told how many cards of each rank are unseen; and the search can play
+the first four steps of its line and search again (`AZ_REPLAN=4`), or keep
+to the line player and overrule it only where the search's move is worth
+more by a margin (`AZ_ANCHOR=1 AZ_MARGIN`). On games held out, a network
+of 300,000 games (7.7 million decisions, 256 wide, four layers) puts the
+line player's move first 72% of the time, and its value has a log loss of
+0.457 against the outcome (0.680 knowing nothing) and is well calibrated;
+100,000 games give 71% and 0.461, so more games would not help. Wins on
+seeds 20001-21000 (line player: 373) and 700001-704000 (line player:
+1,503, 37.58%), differences paired:
+
+| player (64 simulations unless said)                         | seeds 20001-21000    | seeds 700001-704000  |
+|-------------------------------------------------------------|----------------------|----------------------|
+| the network's first move, 100,000 games / 300,000           | 278 / 305 (-6.8 ± 1.7) |                    |
+| the search alone, 300,000 games                             | 334 (-3.9 ± 1.7)     |                      |
+| the line player unless the search gains 0.01 / 0.03 / 0.06 (100,000 games) | 380 / 381 / 375 | 1,515 (0.02: +0.30 ± 0.32) |
+| the same, 0.03, 300,000 games (64 / 16 simulations)         | 370 / 371            |                      |
+| after 10,000 games of self-play: the search alone           | 232 of 600 (+1.3 ± 2.3) | 1,382 (-3.02 ± 0.87) |
+| the same: the line player unless it gains 0.03 (16 simulations) |                  | 1,507 (+0.10 ± 0.21) |
+| after 18,000 / 26,000 games: the search alone               | 214 of 600 / 366     |                      |
+| after 26,000 games: the network's first move                | 314 (-5.9 ± 1.7)     |                      |
+
+So the search does improve on the network's own first move, by three
+points, but that is still three to four points short of the line player
+it imitates, and where it may only overrule the line player it changes a
+move in one game in two to four and gains nothing that can be measured
+(+0.3 ± 0.3 and +0.1 ± 0.2 on 4,000 games). Self-play (`az/train.py
+selfplay --prefill`: the search alone with 48 simulations, replanning, the
+buffer begun with 600,000 of the line player's decisions; 26,000 games in
+six hours) won 36 to 37% of its own games over the first 10,000, as the
+line player does, and then, the line player's games gone from the buffer,
+fell back to 33 to 34%; the checkpoint that looked best on 600 held-out
+games (232) is three points behind the line player on 4,000 others. The
+reason is the one found before for the value networks: the value is right
+on average and tells good positions from bad (its correlation with the
+outcome is 0.62), but the line player's choice and the moves that compete
+with it differ by a point or two of the chance of winning, less than the
+network's error on one position, and neither three times the games nor
+the search's deeper look narrows that. What is not tried: a network that
+sees every card and not a summary of each column, and self-play on a
+scale of millions of games (here a game takes a second and a half on
+thirty cores).
+
 **Weights for the last stage** (`stage/coord.py`: a coordinate search on
 whole games' wins, for one stage's weights if asked; 20,000 and 8,000
 tuning games, changes kept at two standard errors). With one suit `HIDDEN`
