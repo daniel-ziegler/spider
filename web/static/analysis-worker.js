@@ -28,7 +28,7 @@
 // where it loads, else in JavaScript (lineplayer.js, vnet.js): the two give
 // the same, the WebAssembly in less than half the time.
 import { Net } from './vnet.js';
-import { NUM_COLS, MAXC, LEN, DOWN, DONE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
+import { NUM_COLS, MAXC, LEN, DOWN, DONE, SIZE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
 import { loadWasm } from './wasm.js';
 
 let net = null;
@@ -156,17 +156,122 @@ export function roll(job) {
   return out;
 }
 
+const hiddenCards = s => { let n = 0; for (let c = 0; c < NUM_COLS; c++) n += s[DOWN + c]; return n; };
+
+// Play a move of a line in p ({s, left}: a position, and the cards in the
+// stock): whether it may be played and, unless it is to be the line's last,
+// shows nothing. (A deal's cards are not put down: which come is not the
+// line's to know, and positions after one are compared without them.)
+function step(p, mv, last) {
+  const s = p.s, down = hiddenCards(s);
+  if (mv.deal) {
+    if (p.left < NUM_COLS) return false;
+    for (let c = 0; c < NUM_COLS; c++) if (!s[LEN + c] || s[LEN + c] >= MAXC) return false;
+    p.left -= NUM_COLS;
+  } else {
+    const { from, to, count } = mv, fl = s[LEN + from], tl = s[LEN + to], fo = from * MAXC + fl - count;
+    if (from === to || count < 1 || fl - count < s[DOWN + from] || tl + count > MAXC) return false;
+    for (let k = 1; k < count; k++) if (s[fo + k - 1] - s[fo + k] !== 1 || s[fo + k - 1] % 13 === 0) return false;
+    if (tl && (s[to * MAXC + tl - 1] % 13) - (s[fo] % 13) !== 1) return false;
+    applyMove(s, 0, from, to, count, -1);
+  }
+  return last || !(mv.deal || hiddenCards(s) < down);
+}
+
+// Whether two such are the same position. (A column's cards above its length
+// are what was once there.)
+function samePosition(a, b) {
+  if (a.left !== b.left) return false;
+  for (let i = LEN; i < SIZE; i++) if (a.s[i] !== b.s[i]) return false;
+  for (let c = 0; c < NUM_COLS; c++) for (let i = c * MAXC, n = i + a.s[LEN + c]; i < n; i++) if (a.s[i] !== b.s[i]) return false;
+  return true;
+}
+
+// Whether the moves, played from p as a line (none but the last showing cards), come to `goal`.
+function comesTo(p, moves, goal) {
+  p = { s: p.s.slice(), left: p.left };
+  for (let k = 0; k < moves.length; k++) if (!step(p, moves[k], k === moves.length - 1)) return false;
+  return samePosition(p, goal);
+}
+
+// What is left of a line (`rest`, from the position p) at the position q that
+// a move not the line's next led to from p, if q is still on the way to where
+// the line ends: the line's moves in their order without one or two of them
+// (the move played was one of them out of its turn, or did the work of two),
+// or all of them. Null if it is not.
+function reordered(p, q, rest) {
+  const goal = { s: p.s.slice(), left: p.left }, n = rest.length;
+  for (let k = 0; k < n; k++) if (!step(goal, rest[k], k === n - 1)) return null;
+  if (comesTo(q, rest, goal)) return rest;
+  for (let i = 0; i < n; i++) {
+    const less = rest.filter((_, k) => k !== i);
+    if (comesTo(q, less, goal)) return less;
+  }
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const less = rest.filter((_, k) => k !== i && k !== j);
+      if (comesTo(q, less, goal)) return less;
+    }
+  }
+  return null;
+}
+
+// A line of moves from a position (`left` cards in the stock) with what it
+// does for nothing taken out: the line player's lines are pieces put end to
+// end, and a later piece may take a move of an earlier one back, or carry on
+// the cards it moved. As long as one can be, some moves are left out (a run
+// of them, or two apart: a move and the one that takes it back) or two that
+// move the same cards on are made one, where the moves left are all legal,
+// none but the last shows cards (as in the line, so that none is chosen by
+// a card that was not to be seen) and they end in the very position the line
+// does.
+export function simplify(start, left, line) {
+  for (;;) {
+    // before[i]: the position before the line's move i; the last, where it ends.
+    const n = line.length, before = [{ s: start, left }];
+    for (let i = 0; i < n; i++) {
+      const p = { s: before[i].s.slice(), left: before[i].left };
+      if (!step(p, line[i], i === n - 1)) return line;
+      before.push(p);
+    }
+    // Whether the line's first i moves and then `rest` will do.
+    const ok = (i, rest) => comesTo(before[i], rest, before[n]);
+    const shorter = () => {
+      for (let i = 0; i < n; i++) {
+        for (let j = n - 1; j >= i; j--) if (ok(i, line.slice(j + 1))) return [...line.slice(0, i), ...line.slice(j + 1)]; // a run of moves left out
+      }
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const a = line[i], b = line[j], between = line.slice(i + 1, j), after = line.slice(j + 1);
+          const tries = j > i + 1 ? [[...between, ...after]] : []; // two apart
+          if (!a.deal && !b.deal && a.to === b.from && a.count === b.count && a.from !== b.to) {
+            const one = { from: a.from, to: b.to, count: a.count };
+            tries.push([one, ...between, ...after], [...between, one, ...after]);
+          }
+          for (const rest of tries) if (ok(i, rest)) return [...line.slice(0, i), ...rest];
+        }
+      }
+      return null;
+    };
+    const found = shorter();
+    if (!found) return line;
+    line = found;
+  }
+}
+
 // Where the moves played from a position, up to the first that showed cards
 // (or the game's last), leave what the line player would have played, and
 // what it would have played there. The player's own line from the position
 // goes up to its first move that shows cards; a move played that is its next
 // is no departure. One that is not is a departure if the line player, asked
 // anew after it, ends its line somewhere else than it would have before it
-// (with the same cards coming up): the moves can often be played in another
-// order, or taken back. Returns the departures in order, each {at, line}: the
+// (with the same cards coming up), and the line it had cannot be played on
+// from there to where it ended either (reordered: the move was one of its
+// later ones; the line is then kept, without it): the moves can often be
+// played in another order, or taken back. Returns the departures in order, each {at, line}: the
 // move moves[at - 1], and the line player's moves in its place, up to its
-// first that shows cards. None: the moves cost nothing by the line player's
-// measure. (Its lines do not depend on the hidden cards.) Null if a column is
+// first that shows cards (simplified). None: the moves cost nothing by the
+// line player's measure. (Its lines do not depend on the hidden cards.) Null if a column is
 // too long for it. With `whole`, {cuts, line}: the departures, and the line
 // player's own line from the position.
 export function track({ suits, columns, faceDown, completed, stock, moves }, whole = false) {
@@ -189,18 +294,23 @@ export function track({ suits, columns, faceDown, completed, stock, moves }, who
   };
   const cuts = [];
   let line = lineFrom(), used = 0;
-  const first = line.own;
+  const first = simplify(cur, left, line.own);
   for (let j = 1; j <= moves.length; j++) {
-    const mv = moves[j - 1], next = line.own[used], down = hidden(cur);
+    const mv = moves[j - 1], next = line.own[used], down = hidden(cur), before = cur.slice(), had = left;
     left = play(cur, cards, left, mv);
     if (left < 0) return null;
     if (next && (mv.deal ? !!next.deal : !next.deal && mv.from === next.from && mv.to === next.to && mv.count === next.count)) { used++; continue; }
     const rest = line.own.slice(used);
     // After a move that showed cards the line played has ended where it stands.
-    const now = mv.deal || hidden(cur) < down ? { own: [], end: cur.slice(), left } : lineFrom();
-    if (!equal(now, line)) cuts.push({ at: j, line: rest });
-    line = now;
+    const shows = mv.deal || hidden(cur) < down, now = shows ? { own: [], end: cur.slice(), left } : lineFrom();
     used = 0;
+    if (!equal(now, line)) {
+      // (Its line from here ends elsewhere, but the one it had may still be played out from here.)
+      const kept = shows ? null : reordered({ s: before, left: had }, { s: cur, left }, rest);
+      if (kept) { line = { own: kept, end: line.end, left: line.left }; continue; }
+      cuts.push({ at: j, line: simplify(before, had, rest) });
+    }
+    line = now;
   }
   return whole ? { cuts, line: first } : cuts;
 }

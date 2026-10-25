@@ -124,7 +124,14 @@ the better line; `?` or `C` has the computer's move shown at every position;
     stretch's start goes up to its first move that shows cards, a move played
     that is its next is no departure, and one that is not is a departure only
     if the player, asked anew after it, would end its line somewhere else
-    (moves can often be played in another order, or taken back). A deal or a
+    (moves can often be played in another order, or taken back) and the line
+    it had can no longer be played on to where it ended (a later move of the
+    line played first is on the line still, though the player asked anew may
+    choose another). The line shown in a departure's place is the computer
+    player's with what it does for nothing taken out (`simplify`: a move and
+    the one that takes it back, a detour, two moves of the same cards made
+    one; it is legal, shows no card before its end and comes to the same
+    position). A deal or a
     turned card where it would first have made other moves is a departure
     like any other: the commonest mistake, dealing too early, is found so.
     A real game of fifty stretches has thirty to forty candidates.

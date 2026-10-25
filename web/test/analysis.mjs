@@ -7,7 +7,7 @@
 import { Game, encodeMoves } from '../static/game.js';
 import { rolloutConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
 import { prepare, stretchValues, committed, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, SEARCH, BIAS } from '../static/analysis-core.js';
-import { random, shuffled, showReal, setup, roll, track } from '../static/analysis-worker.js';
+import { random, shuffled, showReal, setup, roll, track, simplify } from '../static/analysis-worker.js';
 
 const check = (ok, what) => { if (!ok) throw new Error(what); };
 
@@ -58,9 +58,12 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
     check(track(job).length === 0, 'the line player leaves its own line');
     if (st.shows === 'turn' && start.stock.length && start.columns.every(c => c.length)) {
       const cuts = track({ ...job, moves: [{ deal: true }] });
-      check(cuts.length === 1 && cuts[0].at === 1 && encodeMoves(cuts[0].line) === encodeMoves(own), 'a deal too early is not seen, or not with what was better');
-      const alt = branch(suits, seed, moves, st.from, cuts[0].line), last = alt.shows[alt.shows.length - 1];
-      check(alt.snaps.length === own.length + 1 && last.show === 'turn' && alt.snaps[own.length].faceDown[last.col] === start.faceDown[last.col] - 1, 'the better line does not end with its card turned');
+      // (The better line is the line player's without what it does for nothing: it comes to the same position.)
+      const better = simplify(makeState(start.columns, start.faceDown, start.completed.length), start.stock.length, own);
+      check(cuts.length === 1 && cuts[0].at === 1 && encodeMoves(cuts[0].line) === encodeMoves(better), 'a deal too early is not seen, or not with what was better');
+      const alt = branch(suits, seed, moves, st.from, cuts[0].line), last = alt.shows[alt.shows.length - 1], n = better.length;
+      check(alt.snaps.length === n + 1 && last.show === 'turn' && alt.snaps[n].faceDown[last.col] === start.faceDown[last.col] - 1, 'the better line does not end with its card turned');
+      check(n <= own.length && JSON.stringify(alt.snaps[n]) === JSON.stringify(data.snaps[st.to]) && alt.shows.slice(0, -1).every(s => !s.show), 'the better line simplified is not the line');
       // What the network is asked of the line player's line then is the game's own position there, its card not yet known.
       const asks = screenJobs(suits, seed, [...moves.slice(0, st.from), { deal: true }], [{ from: st.from, to: st.from + 1, shows: 'deal' }], [cuts]);
       check(asks.length === 1 && asks[0].at === 0 && asks[0].shows === 'turn' && asks[0].enc.join() === data.jobs.find(j => j.key === `u${st.to}`).enc.join(), 'the position to compare a departure with');
@@ -85,6 +88,49 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
       for (let i = end.faceDown[c]; i < end.columns[c].length; i++) check(s[c * MAXC + i] === end.columns[c][i], 'a face-up card is wrong after the moves');
     }
   }
+}
+
+// A line simplified: a move taken back, a detour and two moves of the same
+// cards go, in a line with them put in; what is left is legal and comes to
+// the same position. And a move of the line played before its turn does not
+// leave it.
+{
+  const text = moves => encodeMoves(moves);
+  // The 7 of spades on an 8 of hearts, two more 8s, an empty column, a king and its queen, and kings.
+  const columns = [[20, 6], [7], [33], [], [12], [11], [25], [25], [38], [38]], faceDown = columns.map(() => 0);
+  const s = makeState(columns, faceDown, 0);
+  const mv = (from, to, count = 1) => ({ from, to, count });
+  const is = (state, line, want, what) => check(text(simplify(state, 0, line)) === text(want), what);
+  is(s, [mv(0, 1), mv(1, 0)], [], 'a move and its taking back stay');
+  is(s, [mv(0, 1), mv(5, 4), mv(1, 0)], [mv(5, 4)], 'a move taken back after another stays');
+  is(s, [mv(0, 1), mv(1, 2)], [mv(0, 2)], 'two moves of a card are not made one');
+  is(s, [mv(0, 3), mv(5, 4), mv(3, 2), mv(2, 1)], [mv(0, 1), mv(5, 4)], 'a detour stays');
+  is(s, [mv(0, 2), mv(5, 4)], [mv(0, 2), mv(5, 4)], 'a line with nothing to take out is changed');
+  // With a card to turn under the 7, the moves before the turn are simplified and the turn stays last.
+  const down = makeState([[3, 6], ...columns.slice(1)], [1, ...faceDown.slice(1)], 0);
+  is(down, [mv(5, 3), mv(3, 4), mv(0, 1)], [mv(5, 4), mv(0, 1)], 'moves before a turn are not made one');
+  is(down, [mv(0, 1), mv(1, 2)], [mv(0, 1), mv(1, 2)], 'moves are made one across a card turned');
+}
+for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
+  const moves = played(suits, seed), data = prepare(suits, seed, moves);
+  let shorter = 0, swapped = 0;
+  for (const st of data.stretches) {
+    const start = data.snaps[st.from], own = moves.slice(st.from, st.to);
+    const line = simplify(makeState(start.columns, start.faceDown, start.completed.length), start.stock.length, own);
+    const alt = branch(suits, seed, moves, st.from, line);
+    check(alt.snaps.length === line.length + 1 && JSON.stringify(alt.snaps[line.length]) === JSON.stringify(data.snaps[st.to]), 'a line simplified does not come to the line\'s position');
+    check(alt.shows.slice(0, -1).every(s => !s.show), 'a line simplified shows cards before its end');
+    if (line.length < own.length) shorter++;
+    // The line player's line from there (track's) with its second move first, where that can be played and comes to the same position: no departure.
+    const plan = [];
+    playOut(makeState(start.columns, start.faceDown, start.completed.length), Uint8Array.from(start.stock), rolloutConfig(suits), plan, true);
+    if (plan.length < 3) continue;
+    const other = [plan[1], plan[0], ...plan.slice(2)], straight = branch(suits, seed, moves, st.from, plan), swap = branch(suits, seed, moves, st.from, other);
+    if (swap.snaps.length !== plan.length + 1 || swap.shows[0].show || swap.shows[1].show || JSON.stringify(swap.snaps[plan.length]) !== JSON.stringify(straight.snaps[plan.length])) continue;
+    swapped++;
+    check(track({ suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock, moves: other }).length === 0, 'a move of the line before its turn leaves the line');
+  }
+  check(suits < 4 || seed !== 70018 || (shorter > 0 && swapped > 0), 'nothing simplified, or nothing played in another order');
 }
 
 // Showing a real card leaves the rest a fair shuffle: with the hidden cards
