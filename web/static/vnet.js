@@ -1,5 +1,5 @@
 // The value network of the analysis (analysis-worker.js): the chance that the line
-// player (lineplayer.js, rolloutConfig) goes on to win from a position, given
+// player (lineplayer.js, analysisConfig, with a beam of 300 where that has less) goes on to win from a position, given
 // only the cards that are face up. A small transformer over the cards, trained
 // on that player's games (../tools/analysis/train.py: one network for all
 // four numbers of suits, which it is told) and exported by

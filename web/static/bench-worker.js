@@ -9,13 +9,13 @@
 // where that loads (wasm.js).
 import { Net } from './vnet.js';
 import { Game } from './game.js';
-import { makeState, playOut as jsPlayOut, rolloutConfig } from './lineplayer.js';
+import { makeState, playOut as jsPlayOut, analysisConfig } from './lineplayer.js';
 import { prepare } from './analysis-core.js';
 import { roll, track, useEngine } from './analysis-worker.js';
 import { loadWasm } from './wasm.js';
 
 // A game of the line player's from a deal (in the configuration `cfg`, with this playOut).
-export function played(suits, seed, cfg = rolloutConfig(suits), playOut = jsPlayOut) {
+export function played(suits, seed, cfg = analysisConfig(suits), playOut = jsPlayOut) {
   const g = new Game(suits, seed), moves = [];
   playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), cfg, moves);
   return moves;
@@ -45,7 +45,7 @@ export function suite(bytes, { suits = 4, seed = 70018, reps = 1 } = {}, wasm = 
       useEngine(engine);
       const [netLoad, net] = time(() => (engine ? engine.net(bytes.slice(0), suits) : new Net(bytes.slice(0), suits)));
       keep(`net load, ${name}`, netLoad);
-      const [gameMs, moves] = time(() => played(suits, seed, rolloutConfig(suits), engine ? engine.playOut : jsPlayOut));
+      const [gameMs, moves] = time(() => played(suits, seed, analysisConfig(suits), engine ? engine.playOut : jsPlayOut));
       keep(`play a game, ${name}`, gameMs);
       const data = prepare(suits, seed, moves), encs = data.jobs.slice(0, 24).map(j => j.enc);
       keep(`net 24 positions, ${name}`, time(() => { for (const e of encs) sink += net.winProb(e); })[0]);

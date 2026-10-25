@@ -53,28 +53,32 @@ the better line; `?` or `C` has the computer's move shown at every position;
 
 * **Whose chance.** That of a computer player that sees only the cards face
   up and takes nothing back: the line player of the main README in a
-  configuration made for this (`LineConfig::rollout`: lines of up to
-  fourteen steps, two with one suit; a beam of 100; and the four best lines
-  that turn a card valued by expectimax one step deep). It wins 89%, 68%, 50%
-  and 31% of deals with one to four suits; the full player 88%, 70%, 54% and
-  39%, at nine times the work with two suits and more with four; the cheap
-  one the analysis began with (`LineConfig::fast`) 86%, 63%, 42% and 25%, at
-  a sixth of the work. `static/lineplayer.js` is a port of it that plays move
-  for move as the Rust does (65 ms a four-suit game from the deal on one core, 17 ms a one-suit game).
-  That is the player whose line is shown and who plays the games that
-  measure the mistakes. The curve is of a stronger one, the strongest that
-  could be afforded for the network's games (see [the network](#the-network)):
-  it wins 90%, 70%, 53% and 37.5%. With two suits or more the mistakes'
-  games are not played to the end but valued by that network after a while
-  (below), so the chances a mistake is listed with are of the curve's kind;
-  with one suit they are the games' own player's, a point under the curve.
+  configuration made for this (`analysisConfig` in `static/lineplayer.js`,
+  a port that plays move for move as the Rust does: `LineConfig::rollout`,
+  which is lines of up to fourteen steps, two with one suit, a beam of 100,
+  and the four best lines that turn a card valued by expectimax one step
+  deep; and besides, with two suits or more, only four steps of a line
+  played before it looks again, with a beam of 150, after the last deal
+  eight and 100; with one suit lines of four steps and expectimax two deep
+  after the last deal). It wins 91%, 69%, 52% and 37% of deals with one to
+  four suits; `rollout` alone, which the analysis had before, 89%, 67%, 49%
+  and 32.5% at four tenths of the work; the full player 88%, 70%, 54% and
+  39%, at five times the work with four suits; the cheap one the analysis
+  began with (`LineConfig::fast`) 86%, 63%, 42% and 25% (see [the player
+  looking again](#the-player-looking-again)). That is the player whose line
+  is shown and who plays the games that measure the mistakes. The curve's
+  network is of the same player with a beam of 300 throughout, the strongest
+  that could be afforded for its games (see [the network](#the-network)): it
+  wins 70%, 53.5% and 38% with two to four suits, and with one suit it is
+  this very player.
 * **WebAssembly.** The workers play the games and value the positions in
   WebAssembly where it loads (`static/spider.wasm`, built from `wasm/`:
   `lineplayer.js` and `vnet.js`'s forward pass over again in Rust;
   `static/wasm.js` loads it), else in JavaScript. It gives what the
   JavaScript gives, to the bit (`test/wasm.mjs`, and 2,000 more deals played
-  the same by both), in less than half the time for the games (28 ms a
-  four-suit game from the deal on one core against 63) and two thirds of it
+  the same by both), in less than half the time for the games (of `rollout`
+  28 ms a four-suit game from the deal on one core against 63; the player
+  of now 59 ms) and two thirds of it
   for the network; where JavaScript runs interpreted (Chrome with its
   optimizer off, as under Android's Advanced Protection) the games take a
   seventeenth of the JavaScript's time and the network a twentieth, so a
@@ -303,7 +307,9 @@ and the player is whichever `adata` is given (`LineConfig::rollout` with the
 environment's `SPIDER_L_*`, those for one stage too). It was the analysis's
 own (`rollout`), so that the curve and the games played out measured the
 same thing; it is now the strongest line player that so many games could be
-had of, so that the curve says what good play makes of a position: with two
+had of, so that the curve says what good play makes of a position (and the
+analysis's own has since been made that player, but for a narrower beam:
+[the player looking again](#the-player-looking-again)): with two
 to four suits `rollout` replanning every four steps with a beam of 300, which
 plays as well as the full player at a third of its time, and with one suit
 `rollout` with four-step lines and expectimax two steps deep after the last
@@ -494,6 +500,60 @@ average, their full games' 20.4 (17.6 and 17.6 with four suits). More games
 a game's end got more shuffles (`noisy`), the two in `bench.html`'s game
 were found but not put to their moves, their losses known to 8 and 11
 points.
+
+### The player looking again
+
+The analysis's player was `LineConfig::rollout`, five and a half points
+weaker with four suits than the player its network had come to be of. The
+main README's "What is left to gain" has what makes the difference:
+replanning (only the first four steps of a line are played, then the player
+looks again and keeps to its line unless it finds one that ends better) and
+a wider beam. Both are now in `lineplayer.js` and `wasm/src/player.rs`
+(`replan`, and `stages`: settings for a number of deals left), as
+`analysisConfig`, and the root's `cargo test` plays its games against
+`src/lines.rs` with `SPIDER_L_REPLAN` and the rest. What each setting costs
+an analysis, in WebAssembly on one core (seeds 700001 to 703000 for the
+deals won; the analysis of a real four-suit game of 293 moves, 624 to 752
+games stopped after eight showings):
+
+| with two suits or more | four suits | three | two | positions a game, four suits | the analysis |
+|---|---|---|---|---|---|
+| `rollout` (before) | 32.50% | 49.37% | 67.47% | 55,000 | 18 s |
+| replanning after 4 steps | | | | 103,000 | 28 s |
+| and a beam of 150 | | | | 149,000 | 36 s |
+| **and after the last deal after 8 steps with a beam of 100** (now) | 37.10% | 51.83% | 69.13% | 130,000 | 32 s |
+| replanning after 4 steps, a beam of 300 (the network's) | 37.83% | 53.50% | 69.87% | 259,000 | 48 s |
+
+(On 6,000 deals natively replanning alone is worth 3.6 points with four
+suits, with a beam of 150 4.9 and of 300 5.6.) The beam of 300 would have
+made an analysis two and a half times as long for three quarters of a
+point. After the last deal the lines are long and replanning costs most,
+and there the games of an analysis are played to their end whatever `SHORT`
+says, so a game with its mistakes at the end (`bench.html`'s) took five
+times as long, 92 s for 19 on one core; looking again only after eight steps
+there with a beam of 100 makes that 24 s, and of 4,000 deals it wins 36.8%
+for 37.5% (natively; `rollout` after the last deal 35.5%, replanning after
+four steps with a beam of 100 there 36.9%, after eight with 150 36.9%).
+With one suit, where the games are all played to the end, lines of four
+steps and expectimax two deep after the last deal (the network's player)
+win 91.03% for 89.30% at two and a half times the positions: the analysis
+of a game there 17.5 s for 7 on one core.
+
+The whole analysis, one core: 32.5 s for 18.2 (the real game above), 23.8
+for 18.7 (`bench.html`'s), 36.9 for 23.7 and 14.6 for 11.8 (a cheap
+player's game of three suits and of two); `bench.html` on a laptop's twelve
+workers 7.8 s for 5.6. A four-suit game from the deal takes 59 ms for 24.5.
+
+The search for mistakes on the 48 games with mistakes put in, made again
+with this player (`tools/analysis/found.mjs`; 67 candidates are mistakes by
+full games in 256 shuffles): 57 found and 10 not (five of them listed as
+perhaps mistakes), 7 more called mistakes that cost three points or more
+and 2 that cost less, in 817 games; with the player before 55 of 62, 5 and
+1 in 763. The losses shown for those found are 19.5 points on average,
+their full games' 20.2. `SHORT` is as it was.
+
+`tools/analysis/strength.mjs` plays deals with a configuration in
+WebAssembly and counts.
 
 ## FreeCell
 

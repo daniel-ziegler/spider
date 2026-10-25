@@ -37,7 +37,7 @@
 // where it loads, else in JavaScript (lineplayer.js, vnet.js): the two give
 // the same, the WebAssembly in less than half the time.
 import { Net, encode } from './vnet.js';
-import { NUM_COLS, MAXC, LEN, DOWN, DONE, SIZE, rolloutConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
+import { NUM_COLS, MAXC, LEN, DOWN, DONE, SIZE, analysisConfig, makeState, applyMove, removeIfComplete, playOut as jsPlayOut } from './lineplayer.js';
 import { loadWasm } from './wasm.js';
 
 let net = null;
@@ -176,7 +176,7 @@ function playedOn(g, shown, stop, cfg) {
 // one more: after all the moves with the cards that really came up. Worth 1
 // if won and 0 if not, or with `stop` see above.
 export function roll(job) {
-  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false, stop = 0 } = job, cfg = rolloutConfig(suits);
+  const { suits, moves, seed, from, to, at = [0, moves.length], reveal = false, stop = 0 } = job, cfg = analysisConfig(suits);
   const { real, shown, game, hidden } = setup(job);
   const worth = g => {
     if (!g) return 0;
@@ -320,7 +320,7 @@ export function simplify(start, left, line) {
 // player's own line from the position.
 export function track({ suits, columns, faceDown, completed, stock, moves }, whole = false) {
   if (columns.some(c => c.length > MAXC)) return null;
-  const cfg = rolloutConfig(suits), cards = Uint8Array.from(stock), cur = makeState(columns, faceDown, completed);
+  const cfg = analysisConfig(suits), cards = Uint8Array.from(stock), cur = makeState(columns, faceDown, completed);
   let left = cards.length;
   const hidden = s => { let n = 0; for (let c = 0; c < NUM_COLS; c++) n += s[DOWN + c]; return n; };
   const lineFrom = () => {

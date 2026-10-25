@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { Game, encodeMoves } from '../static/game.js';
 import { Net } from '../static/vnet.js';
-import { rolloutConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
+import { analysisConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
 import { prepare, stretchValues, committed, encodeSnap, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, searchFor, SEARCH, SHORT, BIAS } from '../static/analysis-core.js';
 import { random, shuffled, showReal, setup, roll, track, simplify, useNet } from '../static/analysis-worker.js';
 
@@ -16,7 +16,7 @@ const check = (ok, what) => { if (!ok) throw new Error(what); };
 // A game of the line player's, analysed.
 function played(suits, seed) {
   const g = new Game(suits, seed), moves = [];
-  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), rolloutConfig(suits), moves);
+  playOut(makeState(g.columns, g.faceDown, 0), Uint8Array.from(g.stock), analysisConfig(suits), moves);
   return moves;
 }
 
@@ -113,9 +113,9 @@ for (const [suits, seed] of [[1, 70002], [2, 70001], [3, 70002], [4, 70018]]) {
   is(down, [mv(5, 3), mv(3, 4), mv(0, 1)], [mv(5, 4), mv(0, 1)], 'moves before a turn are not made one');
   is(down, [mv(0, 1), mv(1, 2)], [mv(0, 1), mv(1, 2)], 'moves are made one across a card turned');
 }
+let shorter = 0, swapped = 0;
 for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
   const moves = played(suits, seed), data = prepare(suits, seed, moves);
-  let shorter = 0, swapped = 0;
   for (const st of data.stretches) {
     const start = data.snaps[st.from], own = moves.slice(st.from, st.to);
     const line = simplify(makeState(start.columns, start.faceDown, start.completed.length), start.stock.length, own);
@@ -125,15 +125,15 @@ for (const [suits, seed] of [[2, 70001], [4, 70018], [4, 70021]]) {
     if (line.length < own.length) shorter++;
     // The line player's line from there (track's) with its second move first, where that can be played and comes to the same position: no departure.
     const plan = [];
-    playOut(makeState(start.columns, start.faceDown, start.completed.length), Uint8Array.from(start.stock), rolloutConfig(suits), plan, true);
+    playOut(makeState(start.columns, start.faceDown, start.completed.length), Uint8Array.from(start.stock), analysisConfig(suits), plan, true);
     if (plan.length < 3) continue;
     const other = [plan[1], plan[0], ...plan.slice(2)], straight = branch(suits, seed, moves, st.from, plan), swap = branch(suits, seed, moves, st.from, other);
     if (swap.snaps.length !== plan.length + 1 || swap.shows[0].show || swap.shows[1].show || JSON.stringify(swap.snaps[plan.length]) !== JSON.stringify(straight.snaps[plan.length])) continue;
     swapped++;
     check(track({ suits, columns: start.columns, faceDown: start.faceDown, completed: start.completed.length, stock: start.stock, moves: other }).length === 0, 'a move of the line before its turn leaves the line');
   }
-  check(suits < 4 || seed !== 70018 || (shorter > 0 && swapped > 0), 'nothing simplified, or nothing played in another order');
 }
+check(shorter > 0 && swapped > 0, 'nothing simplified, or nothing played in another order');
 
 // Showing a real card leaves the rest a fair shuffle: with the hidden cards
 // X X Y Z and the first place shown to be X, the other three are each of

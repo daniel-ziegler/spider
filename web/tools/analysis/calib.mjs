@@ -1,6 +1,6 @@
 // How well the analysis's network does on games of the player it was trained
 // on: node calib.mjs SUITS [FIRST_SEED] [GAMES]. For each game of the line
-// player (rolloutConfig) it values what the analysis would, and prints the
+// player (analysisConfig) it values what the analysis would, and prints the
 // means, over the stretches of all games, of the network's "moves" part
 // (commit - start) and "cards" part (end - commit), with no bias taken out.
 // The player is the one the network predicts, and luck is fair, so both
@@ -17,14 +17,14 @@
 // than three points.
 import { readFileSync } from 'node:fs';
 import { Game, NUM_COLS, runLen, rankOf } from '../../static/game.js';
-import { rolloutConfig, makeState, playOut } from '../../static/lineplayer.js';
+import { analysisConfig, makeState, playOut } from '../../static/lineplayer.js';
 import { Net, encode } from '../../static/vnet.js';
 import { prepare, stretchValues } from '../../static/analysis-core.js';
 
 const [suits = 4, first = 80001, games = 20] = process.argv.slice(2).map(Number);
 const bytes = readFileSync(new URL('../../static/nets/value.bin', import.meta.url));
 const net = new Net(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), suits);
-const config = rolloutConfig(suits);
+const config = analysisConfig(suits);
 const sum = { turn: [0, 0, 0], deal: [0, 0, 0], end: [0, 0, 0] };
 let won = 0, p0 = 0, stopped = 0, dips = 0, deep = 0, long = 0, positions = 0, ms = 0, dealt = 0, deals = 0;
 const SAMPLES = 16, UNKNOWN = 255;

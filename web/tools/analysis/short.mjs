@@ -32,7 +32,7 @@
 // (analysis-core.js's isMistake: five points, 2.5 standard errors) compare
 // with those full calls so in all the worlds.
 import { readFileSync, writeFileSync } from 'node:fs';
-import { NUM_COLS, MAXC, LEN, DOWN, DONE, rolloutConfig } from '../../static/lineplayer.js';
+import { NUM_COLS, MAXC, LEN, DOWN, DONE, analysisConfig } from '../../static/lineplayer.js';
 import { encode } from '../../static/vnet.js';
 import { isMistake, SEARCH } from '../../static/analysis-core.js';
 import { random, shuffled, setup, useEngine } from '../../static/analysis-worker.js';
@@ -48,7 +48,7 @@ if (cmd === 'run') {
   const [suits, seed, out, worlds] = [+args[1], +args[2], args[3], +(args[4] ?? 256)];
   const engine = await loadWasm(file(new URL('../../static/spider.wasm', import.meta.url)));
   useEngine(engine);
-  const net = engine.net(file(args[0]), suits), cfg = rolloutConfig(suits);
+  const net = engine.net(file(args[0]), suits), cfg = analysisConfig(suits);
   const { moves, data, job, cuts } = plant(suits, seed);
   let evals = 0, evalTime = 0;
   const value = (s, left) => {
