@@ -313,10 +313,19 @@ export class Game extends Played {
     }
   }
 
-  // Every legal move, best first, for hints: a port of Game::hint_moves.
-  // Scored by the destination plus what the move frees at the source; among
-  // equal scores the longer run first; the deal last. Only whole runs are
-  // offered for an empty column, and only for the first empty one.
+  // The moves worth a hint, best first: a port of Game::hint_moves. Scored by
+  // the destination plus what the move frees at the source; among equal
+  // scores, onto a card of another suit the higher card first (a low card on
+  // the wrong suit shuts in more than a high one), and then the longer run;
+  // the deal last. Only whole runs are offered for an empty column. A move is
+  // left out when the position it gives is the one it started from with the
+  // columns in another order (a whole column to an empty one, a run from a
+  // column to one just like what it leaves behind), and of several moves
+  // that give the same position but for the columns' order only the best is
+  // kept (so one empty column of several, one of two columns alike). Columns
+  // with cards face down are never alike. With the stock empty the order of
+  // the columns is nothing to the game, so no winning line needs a move left
+  // out; before that it is only which column gets which card of a deal.
   hintMoves() {
     const out = [];
     const firstEmpty = this.columns.findIndex(c => c.length === 0);
@@ -327,18 +336,34 @@ export class Game extends Played {
       for (let to = 0; to < NUM_COLS; to++) {
         if (to === from) continue;
         let count;
-        if (this.columns[to].length === 0) {
+        const top = this.columns[to].at(-1);
+        if (top === undefined) {
           if (firstEmpty !== to || run === src.length) continue;
           count = run;
         } else {
           count = this.requiredCount(from, to);
           if (count === null) continue;
         }
-        out.push({ score: this.hintScore(from, to, count), mv: { from, to, count } });
+        const bottom = src[src.length - count];
+        out.push({ score: this.hintScore(from, to, count), off: top !== undefined && suitOf(top) !== suitOf(bottom), rank: rankOf(bottom), mv: { from, to, count } });
       }
     }
-    out.sort((a, b) => b.score - a.score || b.mv.count - a.mv.count);
-    const moves = out.map(h => h.mv);
+    out.sort((a, b) => b.score - a.score || (a.off && b.off ? b.rank - a.rank : 0) || b.mv.count - a.mv.count);
+    // A column as it counts for telling positions apart: its cards, and
+    // which column it is when it has cards face down.
+    const sig = (c, cards) => (this.faceDown[c] ? `${c}:` : '') + cards.join(',');
+    const sigs = this.columns.map((cards, c) => sig(c, cards));
+    const seen = new Set([[...sigs].sort().join('|')]);
+    const moves = [];
+    for (const { mv } of out) {
+      const after = [...sigs], src = this.columns[mv.from], cut = src.length - mv.count;
+      after[mv.from] = sig(mv.from, src.slice(0, cut));
+      after[mv.to] = sig(mv.to, [...this.columns[mv.to], ...src.slice(cut)]);
+      const key = after.sort().join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      moves.push(mv);
+    }
     if (!this.checkDeal()) moves.push(DEAL);
     return moves;
   }

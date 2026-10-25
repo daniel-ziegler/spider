@@ -405,7 +405,7 @@ impl Game {
         Some(new_rec)
     }
 
-    /// Every legal player move, ranked greedily for use as hints.
+    /// The moves worth a hint, ranked greedily.
     ///
     /// Each move is scored by what it does at the destination plus what it
     /// frees at the source, so for example a run moved off a cross-suit
@@ -413,10 +413,23 @@ impl Game {
     /// (a card that is not one rank higher) onto a cross-suit linkage, which in
     /// turn ranks above a plain cross-to-cross shuffle. Suit completions come
     /// first, moves that break a same-suit run or spend an empty column come
-    /// last, and the deal is after all card moves. Only whole movable runs are
-    /// offered for empty columns.
+    /// last, and the deal is after all card moves. Among equal scores, onto a
+    /// card of another suit the higher card comes first (a low card on the
+    /// wrong suit shuts in more than a high one), and then the longer run.
+    /// Only whole movable runs are offered for empty columns.
+    ///
+    /// A move is left out when the position it gives is the one it started
+    /// from with the columns in another order (a whole column to an empty
+    /// one, a run from a column to one just like what it leaves behind), and
+    /// of several moves that give the same position but for the columns'
+    /// order only the best is kept (so one empty column of several, one of
+    /// two columns alike). Columns with cards face down are never alike. With
+    /// the stock empty the order of the columns is nothing to the game, so no
+    /// winning line needs a move left out; before that it is only which
+    /// column gets which card of a deal.
     pub fn hint_moves(&self) -> Vec<Move> {
-        let mut out: Vec<(i32, usize, Move)> = Vec::new();
+        // (score, onto another suit, rank of the run's first card, count)
+        let mut out: Vec<(i32, bool, u8, usize, Move)> = Vec::new();
         let first_empty = self.columns.iter().position(|c| c.is_empty());
         for from in 0..NUM_COLS {
             let run = self.run_len(from);
@@ -439,12 +452,45 @@ impl Game {
                         None => continue,
                     }
                 };
-                out.push((self.hint_score(from, to, count), count, Move::Move { from, to, count }));
+                let bottom = src[src.len() - count];
+                let off = self.columns[to].last().is_some_and(|top| top.suit() != bottom.suit());
+                out.push((self.hint_score(from, to, count), off, bottom.rank(), count, Move::Move { from, to, count }));
             }
         }
-        // Best score first; among equals, the longer run.
-        out.sort_by_key(|&(score, count, _)| (-score, std::cmp::Reverse(count)));
-        let mut moves: Vec<Move> = out.into_iter().map(|(_, _, m)| m).collect();
+        out.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(if a.1 && b.1 { b.2.cmp(&a.2) } else { std::cmp::Ordering::Equal })
+                .then(b.3.cmp(&a.3))
+        });
+        // A column as it counts for telling positions apart: its cards, and
+        // which column it is when it has cards face down.
+        let sig = |c: usize, cards: &[Card]| -> Vec<u8> {
+            let mut v = if self.face_down[c] > 0 { vec![255, c as u8] } else { Vec::new() };
+            v.extend(cards.iter().map(|k| k.0));
+            v
+        };
+        let sigs: Vec<Vec<u8>> = (0..NUM_COLS).map(|c| sig(c, &self.columns[c])).collect();
+        let mut seen: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut start = sigs.clone();
+        start.sort();
+        seen.push(start);
+        let mut moves: Vec<Move> = Vec::new();
+        for (_, _, _, _, mv) in out {
+            let Move::Move { from, to, count } = mv else { continue };
+            let src = &self.columns[from];
+            let cut = src.len() - count;
+            let mut after = sigs.clone();
+            after[from] = sig(from, &src[..cut]);
+            let mut joined = self.columns[to].clone();
+            joined.extend_from_slice(&src[cut..]);
+            after[to] = sig(to, &joined);
+            after.sort();
+            if seen.contains(&after) {
+                continue;
+            }
+            seen.push(after);
+            moves.push(mv);
+        }
         if self.check_deal().is_ok() {
             moves.push(Move::Deal);
         }
