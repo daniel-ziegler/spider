@@ -1212,6 +1212,55 @@ pub fn imitate(p: &AzParams, seed: u64, tau: f32) -> (GameResult, Vec<Record>) {
     (GameResult { seed, completed, won: g.is_won(), decisions, overrides: missed }, records)
 }
 
+/// Positions the line player decides in on `seed` (each with probability
+/// `sample`), as this network sees them and as the analysis's does, for
+/// comparing the two on the same positions (`--bin vcmp`): for each, `POS`
+/// bytes of [`features`], [`crate::vnet::ENC`] of its encoding, what the
+/// cheap line player does next there ([`crate::vnet::next_kind`]) and the
+/// deals left. Returns them with whether the game was won and its suits
+/// completed.
+pub fn both_inputs(p: &AzParams, seed: u64, sample: f64) -> (bool, u8, Vec<u8>) {
+    let cfg = &p.lines;
+    let mut g = Game::new(p.suits, seed);
+    let mut visited = HashSet::new();
+    let mut out = Vec::new();
+    let mut decisions = 0;
+    let mut tempo = Tempo::default();
+    let mut rng = Rng(mix(0xC0DE, seed));
+    while !g.is_won() && decisions < p.max_moves && g.columns.iter().all(|c| c.len() <= MAXC) {
+        let obs = mask(&g);
+        let os = State::from_game(&obs);
+        let deals_left = g.deals_remaining();
+        visited.insert(os.hash());
+        let before = progress(&g);
+        let (d, _) = decide(&obs, deals_left, &visited, &mut tempo, cfg);
+        if d == Decision::Stuck {
+            break;
+        }
+        if rng.unit() < sample {
+            let n = out.len();
+            out.resize(n + POS + crate::vnet::ENC, 0);
+            features(&os, deals_left, p.suits, false, &mut out[n..n + POS]);
+            crate::vnet::encode(&os, deals_left, &mut out[n + POS..]);
+            let next = crate::vnet::next_kind(&out[n + POS..], p.suits);
+            out.extend_from_slice(&[next, deals_left as u8]);
+        }
+        match d {
+            Decision::Play(moves) => {
+                for mv in moves {
+                    g.apply(mv).expect("line is legal");
+                }
+            }
+            _ => g.apply(Move::Deal).expect("deal is legal"),
+        }
+        decisions += 1;
+        if progress(&g) != before {
+            tempo = Tempo::default();
+        }
+    }
+    (g.is_won(), g.completed.len() as u8, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
