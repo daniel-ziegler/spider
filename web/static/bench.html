@@ -53,7 +53,7 @@ function env() {
 
 let netBytes = null;
 async function net() {
-  netBytes ??= await fetch('/nets/value.bin?2').then(r => { if (!r.ok) throw new Error(r.statusText); return r.arrayBuffer(); });
+  netBytes ??= await fetch('/nets/value.bin?4').then(r => { if (!r.ok) throw new Error(r.statusText); return r.arrayBuffer(); });
   return netBytes;
 }
 

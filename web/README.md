@@ -67,10 +67,8 @@ the better line; `?` or `C` has the computer's move shown at every position;
   began with (`LineConfig::fast`) 86%, 63%, 42% and 25% (see [the player
   looking again](#the-player-looking-again)). That is the player whose line
   is shown and who plays the games that measure the mistakes. The curve's
-  network is of the same player with a beam of 300 throughout, the strongest
-  that could be afforded for its games (see [the network](#the-network)): it
-  wins 70%, 53.5% and 38% with two to four suits, and with one suit it is
-  this very player.
+  network is of this very player's games (see [the network](#the-network)
+  and [the network without the cards face down](#the-network-without-the-cards-face-down)).
 * **WebAssembly.** The workers play the games and value the positions in
   WebAssembly where it loads (`static/spider.wasm`, built from `wasm/`:
   `lineplayer.js` and `vnet.js`'s forward pass over again in Rust;
@@ -102,8 +100,8 @@ the better line; `?` or `C` has the computer's move shown at every position;
 * **The curve** comes from a network (`static/vnet.js`, a forward pass in
   plain typed arrays; `static/nets/value.bin`, 650 kB, float16): the value
   network of the main README (a transformer over the cards, here of 325,000
-  weights: 80 wide, four layers) trained on games of the strongest line
-  player there was time for (not the one that plays the games out), one
+  weights: 80 wide, four layers, a token for each face-up card and none for
+  those face down) trained on games of the player that plays the games out, one
   network for all four numbers of suits. Besides the cards it is told the
   number of suits and what the cheap line player would do next in the
   position (a line, one that turns a card, the same about to deal, a deal, or
@@ -289,7 +287,7 @@ hashed from its two changed columns, the beam picked by a sort of numbers).
 
 ```
 cargo build --release
-P="SPIDER_L_REPLAN=4 SPIDER_L_BEAM=300"                      # the player the games are of: `rollout` with these
+P="SPIDER_L_REPLAN=4 SPIDER_L_BEAM=300"                      # the player the games are of: `rollout` with these (now the analysis's own: see below)
 P1="SPIDER_L_K0_MAX_STEPS=4 SPIDER_L_K0_EXPECT_STEPS=2"      # (one suit)
 env $P1 target/release/adata 1 5000001 80000 runs/strong/a1.bin
 env $P target/release/adata 2 5000001 100000 runs/strong/a2.bin
@@ -554,6 +552,49 @@ their full games' 20.2. `SHORT` is as it was.
 
 `tools/analysis/strength.mjs` plays deals with a configuration in
 WebAssembly and counts.
+
+### The network without the cards face down
+
+The network had a token for every card on the table, and a card face down
+says nothing but that it is there: a face-up card's row is its height in
+the column, and the lowest is told that the card under it is face down. So
+the face-down cards are no tokens now (`card_features` in `vnet/train.py`
+with `down_tokens` off, `tokens` in `vnet.js` and `wasm/src/net.rs`; the
+file says `SPV3`): 47 tokens for 70 in a four-suit game's decisions, ten for
+54 at its first deal, and a value in 7.5 ms for 11.2 in WebAssembly (9.9
+for 15.3 in JavaScript). The weights are not the old ones' (the face-down
+tokens were attended to), so it was trained again, and on the games of the
+player the analysis now has (`P="SPIDER_L_REPLAN=4 SPIDER_L_BEAM=150
+SPIDER_L_K0_REPLAN=8 SPIDER_L_K0_BEAM=100"` in the commands above; lines.rs
+with these wins the very 91.0%, 69.1%, 51.8% and 37.1% of seeds 700001 to
+703000 that the WebAssembly does), so that the curve and the games played
+out are of one player: 680,000 games as before (16.1 million positions
+with the deals not yet known), an hour and a quarter of thirty threads
+for them and as long of an A10 for the training. On the games held out (log loss; in
+brackets the mean value less the share won, in points), against the network
+before, which is of the beam of 300:
+
+| suits | this network   | the one before |
+|-------|----------------|----------------|
+| 1     | 0.1455 (−0.3)  | 0.1456 (−0.3)  |
+| 2     | 0.3319 (+0.2)  | 0.3316 (+1.0)  |
+| 3     | 0.4039 (−1.0)  | 0.4035 (+0.2)  |
+| 4     | 0.4084 (−0.1)  | 0.4085 (+1.6)  |
+
+As good, then, without the tokens (on four-suit decisions alone a network
+with them had 0.4502 held out and one without 0.4519: nothing that shows in
+the analysis). `calib.mjs` on 40 games for each number of suits: a turned
+card unknown is 0.2 high with one suit and 0.5, 0.7 and 0.9 points low with
+two to four (before 0.1, 0.8, 1.0 and 1.0; counting such positions double
+in training did not change it: 0.5, 0.9, 1.1), a deal unknown 0.1, −0.1,
+0.3 and 0.6 above the mean of sixteen deals, so `BIAS` stays zero.
+`order.mjs` on the 48 games of [the player looking
+again](#the-player-looking-again): of 65 real mistakes 59, 64 and 65 are
+among the first three, five and eight (before 57, 64 and 64), the
+correlation 0.80 (0.80); `found.mjs`: 57 of 67 found, 6 near and 2 false
+besides (57, 7 and 2), in 813 games (817). A game of the page's own
+(four suits, 20820) on one core: the values 3.0 s for 3.9, the games 20.8 s
+for 27.7. The checkpoints and logs are in `runs/vnet-faceup`.
 
 ## FreeCell
 

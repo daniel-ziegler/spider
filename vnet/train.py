@@ -39,10 +39,11 @@ EMPTY_ID = 55
 GLOBAL_ID = 56
 
 
-def card_features(x):
+def card_features(x, down_tokens=True):
     """x: uint8 (B, ENC) on the device. Returns per-slot integer features,
     each (B, NUM_COLS, ROWS): code, rel_above, rel_below, run_above,
-    run_below, whole; and a validity mask."""
+    run_below, whole; and a validity mask (without `down_tokens`, of the
+    face-up cards only: a face-down card is then no token)."""
     b = x.shape[0]
     code = x[:, : NUM_COLS * ROWS].view(b, NUM_COLS, ROWS).long()
     present = code > 0
@@ -85,7 +86,7 @@ def card_features(x):
     empty = n == 0
     code = code.clone()
     code[..., 0] = torch.where(empty, torch.full_like(code[..., 0], EMPTY_ID), code[..., 0])
-    valid = present.clone()
+    valid = present.clone() if down_tokens else present & ~down
     valid[..., 0] |= empty
     return code, rel_above, rel_below, run_above.clamp_max(12), run_below.clamp_max(12), whole, valid
 

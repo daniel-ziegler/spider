@@ -1,10 +1,10 @@
 // The value network of the analysis (analysis-worker.js): the chance that the line
-// player (lineplayer.js, analysisConfig, with a beam of 300 where that has less) goes on to win from a position, given
-// only the cards that are face up. A small transformer over the cards, trained
+// player (lineplayer.js, analysisConfig: the one that plays the analysis's games) goes on to win from a position, given
+// only the cards that are face up. A small transformer over those cards, trained
 // on that player's games (../tools/analysis/train.py: one network for all
 // four numbers of suits, which it is told) and exported by
 // ../tools/analysis/export.py; this is its forward pass, in plain typed
-// arrays: the network is small enough (325,000 weights, about 14 ms a
+// arrays: the network is small enough (325,000 weights, about 10 ms a
 // position) that nothing more is needed. test/vnet.mjs compares it with
 // PyTorch.
 //
@@ -85,7 +85,7 @@ export class Net {
   // From the bytes of a file written by export.py, for games of this many suits.
   constructor(buffer, suits) {
     const head = new DataView(buffer, 0, 20);
-    if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'SPV2') throw new Error('not a network');
+    if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'SPV3') throw new Error('not a network');
     if (!(suits >= 1 && suits <= 4)) throw new Error('a network for how many suits?');
     this.suits = suits;
     const d = this.d = head.getUint32(4, true), ff = this.ff = head.getUint32(16, true);
@@ -139,7 +139,10 @@ export class Net {
   }
 
   // The tokens of an encoded position, into this.x; returns how many. (As
-  // card_features and Net.forward in train.py.)
+  // card_features and Net.forward in train.py.) A token for the position,
+  // one for each face-up card and one for an empty column: none for the
+  // cards face down, which a face-up card's row (its height in the column)
+  // and the lowest's relation to the card under it tell of all the same.
   tokens(enc) {
     const { d, x, emb } = this;
     const add = (t, table, i) => { for (let k = 0, o = t * d, e = i * d; k < d; k++) x[o + k] += table[e + k]; };
@@ -177,7 +180,8 @@ export class Net {
       below[n - 1] = 0;
       for (let r = n - 2; r >= 0; r--) below[r] = rel[r] === 2 ? below[r + 1] + 1 : 0;
       const whole = enc[o + n - 1] >= 3 && above[n - 1] + 1 === faceUp ? 1 : 0;
-      for (let r = 0; r < n; r++, T++) {
+      for (let r = 0; r < n; r++) {
+        if (enc[o + r] === 1) continue; // a face-down card is no token
         x.fill(0, T * d, (T + 1) * d);
         add(T, emb.code, enc[o + r]);
         add(T, emb.row, r);
@@ -187,6 +191,7 @@ export class Net {
         add(T, emb.runAbove, Math.min(above[r], 12));
         add(T, emb.runBelow, Math.min(below[r], 12));
         add(T, emb.whole, whole);
+        T++;
       }
     }
     return T;

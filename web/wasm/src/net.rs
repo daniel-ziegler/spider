@@ -121,7 +121,7 @@ impl Net {
     /// From the bytes of a file written by export.py, for games of this many
     /// suits (None if it is not one).
     pub fn new(buf: &[u8], suits: u8) -> Option<Net> {
-        if buf.len() < 20 || &buf[..4] != b"SPV2" || !(1..=4).contains(&suits) {
+        if buf.len() < 20 || &buf[..4] != b"SPV3" || !(1..=4).contains(&suits) {
             return None;
         }
         let word = |i: usize| u32::from_le_bytes(buf[4 * i..4 * i + 4].try_into().unwrap()) as usize;
@@ -241,6 +241,9 @@ impl Net {
             }
             let whole = (enc[o + n - 1] >= 3 && above[n - 1] as usize + 1 == face_up) as usize;
             for r in 0..n {
+                if enc[o + r] == 1 {
+                    continue; // a face-down card is no token
+                }
                 self.x[t * d..(t + 1) * d].fill(0.0);
                 self.add(t, CODE, enc[o + r] as usize);
                 self.add(t, ROW, r);

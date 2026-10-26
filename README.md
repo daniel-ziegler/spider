@@ -766,6 +766,29 @@ sees every card and not a summary of each column, and self-play on a
 scale of millions of games (here a game takes a second and a half on
 thirty cores).
 
+**Would seeing every card help the value?** Not by what could be measured
+without the search. The analysis's network (`web/tools/analysis/train.py`: a
+token for every face-up card) was trained on what the AlphaZero network had,
+300,000 four-suit games of that line player (8.7 million of its decisions,
+half of each game's; the win as the target) and both were scored on the
+decisions of 6,000 other games (seeds 800001 on; `--bin vcmp`,
+`az/vcmp.py`), by the log loss against the win of the value refitted with a
+line, and the area under the curve:
+
+| value network                                        | weights | log loss | AUC   |
+|------------------------------------------------------|---------|----------|-------|
+| a summary of each column (AlphaZero's, 256 wide)     | 2.27M   | 0.4367   | 0.872 |
+| every face-up card, 80 wide                          | 0.33M   | 0.4435   | 0.867 |
+| every face-up card, 256 wide                         | 2.2M    | 0.4444   | 0.867 |
+| every card, those face down too, 80 wide             | 0.33M   | 0.4428   | 0.868 |
+| the analysis's own network (all suits' games, 80)    | 0.33M   | 0.4435   | 0.867 |
+
+Three times the width does nothing, nor do the games being all of four
+suits, and the summaries (which have by hand what matters: runs, links,
+breaks, what is unseen of each rank) are 0.007 better at every stage of a
+game. The value is as good as these games let it be either way, so a
+network of cards is no reason to try the search again.
+
 **Weights for the last stage** (`stage/coord.py`: a coordinate search on
 whole games' wins, for one stage's weights if asked; 20,000 and 8,000
 tuning games, changes kept at two standard errors). With one suit `HIDDEN`

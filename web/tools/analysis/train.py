@@ -38,8 +38,9 @@ WIDTH = ENC + 9
 class SuitsNet(Net):
     """Net with the number of suits (1 to 4) known to the global token."""
 
-    def __init__(self, d=64, layers=3, heads=4, ff=256):
+    def __init__(self, d=64, layers=3, heads=4, ff=256, down_tokens=True):
         super().__init__(d, layers, heads, ff)
+        self.cfg["down_tokens"] = self.down_tokens = down_tokens
         self.suits = nn.Embedding(5, d)
         self.next = nn.Embedding(7, d)
         nn.init.zeros_(self.suits.weight)
@@ -51,7 +52,7 @@ class SuitsNet(Net):
         g = self.code.weight
         extra = self.suits(suits.long()) + self.next(nxt.long())
         b = x.shape[0]
-        code, ra, rb, ua, ub, wh, valid = base.card_features(x)
+        code, ra, rb, ua, ub, wh, valid = base.card_features(x, self.down_tokens)
         tok = self.code(code) + self.row(self.rows)[None, None] + self.rel_above(ra) + self.rel_below(rb) + self.run_above(ua) + self.run_below(ub) + self.whole(wh)
         colid = self.cols[None].expand(b, -1) if perm is None else perm
         tok = (tok + self.col(colid)[:, :, None]).view(b, NUM_COLS * base.ROWS, -1)
@@ -115,7 +116,7 @@ def read(paths, suits=None, feat=True):
 
 def batch(data, idx, dev):
     rec = torch.from_numpy(data[idx]).to(dev, non_blocking=True)
-    return rec[:, :ENC], rec[:, WON].float(), rec[:, ENC + 1].float() / 8, rec[:, SUITS], rec[:, NEXT]
+    return rec[:, :ENC], rec[:, WON].float(), rec[:, ENC + 1].float() / 8, rec[:, SUITS], rec[:, NEXT], rec[:, KIND]
 
 
 @torch.no_grad()
@@ -123,7 +124,7 @@ def predict(net, data, idx, dev, bs=2048):
     net.eval()
     out = np.empty(len(idx), np.float64)
     for i in range(0, len(idx), bs):
-        x, _, _, suits, nxt = batch(data, idx[i : i + bs], dev)
+        x, _, _, suits, nxt, _ = batch(data, idx[i : i + bs], dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             w, _ = net(x, None, suits, nxt)
         out[i : i + bs] = torch.sigmoid(w.float()).double().cpu().numpy()
@@ -149,7 +150,7 @@ def cmd_train(a, dev):
     torch.manual_seed(a.seed)
     data, tr, va = read(a.data, a.suits, not a.no_feat)
     va = va[np.random.default_rng(0).permutation(len(va))[: a.val_size]]
-    net = SuitsNet(a.d, a.layers, a.heads, a.ff).to(dev)
+    net = SuitsNet(a.d, a.layers, a.heads, a.ff, a.down_tokens).to(dev)
     if a.init:
         net.load_state_dict(torch.load(a.init, map_location=dev, weights_only=False)["model"])
     params = sum(p.numel() for p in net.parameters())
@@ -162,11 +163,17 @@ def cmd_train(a, dev):
     run = 0.0
     for step in range(1, steps + 1):
         idx = np.sort(tr[rng.integers(0, len(tr), a.batch)])
-        x, won, done, suits, nxt = batch(data, idx, dev)
+        x, won, done, suits, nxt, kind = batch(data, idx, dev)
         perm = torch.argsort(torch.rand(len(idx), NUM_COLS, device=dev), 1)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             w, s = net(x, perm, suits, nxt)
-        loss = F.binary_cross_entropy_with_logits(w.float(), won) + a.aux * F.binary_cross_entropy_with_logits(s.float(), done)
+        if a.unknown_weight != 1:
+            # (Positions with a card not yet known, turned or dealt, count for more.)
+            wt = torch.where((kind == 1) & (nxt == 0) | (kind == 6), a.unknown_weight, 1.0)
+            wt = wt / wt.mean()
+        else:
+            wt = None
+        loss = F.binary_cross_entropy_with_logits(w.float(), won, wt) + a.aux * F.binary_cross_entropy_with_logits(s.float(), done, wt)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -227,6 +234,8 @@ def main():
     t.add_argument("--log-every", type=int, default=2000)
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--no-feat", action="store_true", help="without what the line player does next")
+    t.add_argument("--down-tokens", action="store_true", help="a token for a face-down card too")
+    t.add_argument("--unknown-weight", type=float, default=1, help="the weight of positions with cards not yet known")
     r = sub.add_parser("report")
     r.add_argument("--data", nargs="+", required=True)
     r.add_argument("--ckpt", nargs="+", required=True, help="one network, or four (for one to four suits)")

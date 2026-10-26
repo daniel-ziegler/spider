@@ -16,8 +16,8 @@
 // as they arrive:
 //   1. A network values every position (and each position where cards came
 //      up, also before they were known): the curve. (It is trained on games
-//      of the line player that plays the games of the second pass, searching
-//      a little wider with two suits or more: lineplayer.js, analysisConfig.)
+//      of the line player that plays the games of the second pass:
+//      lineplayer.js, analysisConfig.)
 //   2. The mistakes are found by playing games out in shuffles of the cards
 //      the player had not seen, from before the player's moves (the line
 //      player choosing its own) and from after them, in the order the
@@ -28,7 +28,7 @@
 //      stand; with one suit they are played to the end.
 import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, searchFor } from './analysis-core.js';
 
-const NET_VERSION = 3; // in the network's address, which is cached for good: change it with the network
+const NET_VERSION = 4; // in the network's address, which is cached for good: change it with the network
 const VALUES = 6; // positions valued in one piece of work
 const ROLL_WEIGHT = 3; // a game played out (to the end, or as far as it is and then valued) against a position's valuing, for the progress bar
 

@@ -2,7 +2,7 @@
 
     .venv/bin/python web/tools/analysis/export.py --ckpt runs/analysis2/net.pt --data runs/analysis2/a?.bin
 
-writes web/static/nets/value.bin, which web/static/vnet.js reads: "SPV2",
+writes web/static/nets/value.bin, which web/static/vnet.js reads: "SPV3",
 then d, layers, heads and ff as u32, then every tensor as little-endian
 float16 in the order of `tensors` below. With --data it also writes
 web/test/vnet.json: positions from the data of each number of suits (as
@@ -42,7 +42,9 @@ def main():
     cfg, sd = ck["cfg"], ck["model"]
     out = os.path.join(ROOT, "web", "static", "nets", "value.bin")
     with open(out, "wb") as f:
-        f.write(b"SPV2" + struct.pack("<4I", cfg["d"], cfg["layers"], cfg["heads"], cfg["ff"]))
+        if cfg.get("down_tokens", True):
+            sys.exit("a network with tokens for face-down cards: vnet.js has none")
+        f.write(b"SPV3" + struct.pack("<4I", cfg["d"], cfg["layers"], cfg["heads"], cfg["ff"]))
         for name in tensors(cfg):
             f.write(sd[name].numpy().astype("<f2").tobytes())
     print(f"{out}: {os.path.getsize(out)} bytes")

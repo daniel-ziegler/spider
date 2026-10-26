@@ -108,9 +108,9 @@ const ROLLOUT = { 1: { expectTop: 4, expectSteps: 1 }, 2: STRONGER, 3: STRONGER,
 // deal are of four steps and its expectimax there two steps deep. It wins
 // 91.0%, 69.1%, 51.8% and 37.1% of deals with one to four suits where
 // rolloutConfig wins 89.3%, 67.5%, 49.4% and 32.5% (seeds 700001 to 703000),
-// at two to two and a half times the work. The analysis's network is of the
-// same player with a beam of 300 throughout (and with one suit of this very
-// one), which wins 69.9%, 53.5% and 37.8% at twice the work again.
+// at two to two and a half times the work. The analysis's network is of this
+// player's games (a beam of 300 throughout wins 69.9%, 53.5% and 37.8% at
+// twice the work again).
 export function analysisConfig(suits) {
   const { stages = {}, ...all } = ANALYSIS[suits], cfg = { ...rolloutConfig(suits), ...all, name: 'analysis' };
   if (Object.keys(stages).length) cfg.staged = Array.from({ length: 6 }, (_, k) => ({ ...cfg, ...stages[k] }));
