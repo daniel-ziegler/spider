@@ -496,6 +496,37 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// The service worker (static/sw.js) with its version and the files it is
+/// to keep filled in: the version is a hash of every static file's path and
+/// contents, so that a deploy that changes any of them is a new one, and the
+/// files are all of them but the worker itself, as paths from the root.
+fn service_worker(static_dir: &str) -> String {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).expect("read the static directory") {
+            let path = entry.expect("read the static directory").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                out.push((format!("/{rel}"), std::fs::read(&path).expect("read a static file")));
+            }
+        }
+    }
+    let root = std::path::Path::new(static_dir);
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a
+    for (path, bytes) in &files {
+        for b in path.bytes().chain(bytes.iter().copied()).chain([0]) {
+            hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    let template = String::from_utf8(files.iter().find(|(p, _)| p == "/sw.js").expect("static/sw.js").1.clone()).unwrap();
+    let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).filter(|p| *p != "/sw.js").collect();
+    template.replace("__VERSION__", &format!("{hash:016x}")).replace("__FILES__", &json!(paths).to_string())
+}
+
 #[tokio::main]
 async fn main() {
     let db_path = env_or("DATABASE_PATH", "spider.db");
@@ -531,9 +562,13 @@ async fn main() {
     let nets = Router::new()
         .fallback_service(ServeDir::new(format!("{static_dir}/nets")))
         .layer(SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, keep));
+    // The service worker is made once (the files do not change while the
+    // server runs) and never kept by the browser, which looks for a new one.
+    let sw: &'static str = Box::leak(service_worker(&static_dir).into_boxed_str());
     let router = Router::new()
         .nest("/api", api)
         .nest("/nets", nets)
+        .route("/sw.js", get(move || async move { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], sw) }))
         .fallback_service(client)
         .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")));
 

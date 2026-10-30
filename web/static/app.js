@@ -211,6 +211,11 @@ document.addEventListener('visibilitychange', () => {
   else pull(); // it may have been played elsewhere meanwhile
 });
 window.addEventListener('pagehide', () => sync(true));
+window.addEventListener('online', () => { // what was played and won without the network
+  if (!me) return;
+  submitPending();
+  if (unsynced) queueSync();
+});
 
 function load(deal, push = false) {
   closeReview();
@@ -248,6 +253,7 @@ function showPage(name, push = false) {
   closeReview();
   setView(name);
   sync();
+  applyUpdate();
   sel = hint = null;
   $('#dangler').hidden = true;
   if (dialog.open) dialog.close();
@@ -641,7 +647,10 @@ async function onWin() {
     showWinDialog(win, resultsTable(data.results));
     fetchDailies();
   } catch (e) {
-    showWinDialog(win, `<p class="error">Could not save this win: ${esc(e.message)}. Reload to try again.</p>`);
+    if (e.status && e.status !== 503) return showWinDialog(win, `<p class="error">Could not save this win: ${esc(e.message)}. Reload to try again.</p>`);
+    // No network (503: the service worker says so): the win is kept here and sent when there is one (submitPending).
+    if (!pending().some(p => sameDeal(p, win) && p.moves === win.moves)) store.set('spider:pending', [...pending(), win]);
+    showWinDialog(win, '<p>You are offline: the win will be recorded when you are back.</p>');
   }
 }
 
@@ -1538,6 +1547,30 @@ const startup = Promise.all([
   api('GET', '/me').then(user => { if (user) { me = user; return loggedIn(); } }).catch(() => {}),
   fetchDailies(),
 ]);
+
+// ---------------------------------------------------------------- the service worker (sw.js)
+
+// It keeps the site in the browser, for playing without the network. A new
+// one (a deploy) waits until nothing is being played, then takes over and
+// the page is loaded again, so that it never mixes two versions' files.
+let newWorker = null, reloading = false;
+function applyUpdate() {
+  if (!newWorker || view === 'game') return;
+  reloading = true;
+  newWorker.postMessage('skip');
+  newWorker = null;
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    const installing = w => w?.addEventListener('statechange', () => {
+      if (w.state === 'installed' && navigator.serviceWorker.controller) { newWorker = w; applyUpdate(); }
+    });
+    if (reg.waiting && navigator.serviceWorker.controller) { newWorker = reg.waiting; applyUpdate(); }
+    installing(reg.installing);
+    reg.addEventListener('updatefound', () => installing(reg.installing));
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloading) location.reload(); });
+}
 // An invite link, /join/CODE, opens the sign-up form with the code filled in.
 const join = /^\/join\/([^/]+)\/?$/.exec(location.pathname);
 if (join) {

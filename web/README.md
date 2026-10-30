@@ -709,6 +709,33 @@ cd web/tools/dailies && cargo run --release -- medium 2027-01-01 2027-03-31
 kept). `cargo test` fails once today is past the end of the medium
 ones too.
 
+## Offline, and as an app on a phone
+
+A service worker (`static/sw.js`) keeps the whole site in the browser, so
+that it opens and plays without the network: every static file, the
+analysis's network included (1.2 MB in all), and the API's last answers to
+GET, so the player stays logged in, the daily challenges last seen still
+show and a game's copy on the server is what it was. A game played offline
+is saved in the browser as ever and goes to the server when the network is
+back (`online`); a win made offline is kept with those made while logged
+out (`spider:pending`) and recorded then. Logging in or out drops the kept
+answers. Only what has not been seen needs the network: a deal's results,
+other days' challenges.
+
+The server fills the worker in with a version, a hash of every static file,
+and the list of them (`main.rs`: `service_worker`), so a deploy that
+changes anything is a new version: the browser finds it on the next visit
+(`/sw.js` is served with `Cache-Control: no-cache`), it fetches every file
+afresh into a cache of its own, and once nothing is being played the page
+lets it take over and loads itself again (`app.js`: `applyUpdate`), so a
+page never mixes two versions' files. A game in play carries on with the
+old version until the player goes back to the home page.
+
+`manifest.webmanifest` and the icons (`icon.svg`, rendered to `icon-192.png`
+and `icon-512.png` with `rsvg-convert`) let the site be installed: in Chrome
+on Android, the menu's **Add to Home screen** / **Install app** puts it on
+the home screen and it opens full screen, without the browser's bars.
+
 ## Running locally
 
 ```
