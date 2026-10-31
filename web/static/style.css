@@ -330,6 +330,9 @@ button.tile .tier { font-size: 13px; color: var(--ink-dim); }
   #bar nav button { padding: 5px 8px; font-size: 14px; }
   #info { font-size: 13px; }
   #msg { font-size: 13px; }
+  /* The cards take the whole width (computeLayout in app.js puts two pixels between columns). */
+  #board { margin: 0 max(2px, env(safe-area-inset-right)) 0 max(2px, env(safe-area-inset-left)); }
+  #tray { padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right)); }
 }
 
 /* Keep the logo and buttons on one row on small phones. */

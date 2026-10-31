@@ -19,6 +19,7 @@ const SUIT_COUNTS = [1, 2, 3, 4];
 const MAX_SEED = 2 ** 53 - 1;
 const MAX_SAVES = 30;
 const GHOST = 2 / 3; // how much of a face-up card's strip a seen face-down card gets, if its rank still fits
+const PHONE = 640; // a board narrower than this gets the phone layout (with style.css's media query)
 const SYNC_MS = 5000; // a game in progress goes to the server at most this often
 
 const $ = s => document.querySelector(s);
@@ -586,6 +587,7 @@ async function analyze() {
   const lost = !g.isWon() && (!$('#fate').hidden || !g.hintMoves().length);
   review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview });
   document.body.dataset.review = '';
+  computeLayout(); // (the board is lower with the review under it)
   render();
 }
 
@@ -594,7 +596,7 @@ function closeReview() {
   review.destroy();
   review = null;
   delete document.body.dataset.review;
-  if (view === 'game') render();
+  if (view === 'game') { computeLayout(); render(); }
 }
 
 // The Analyze button is in the tray once the game is won or marked as lost.
@@ -1110,20 +1112,32 @@ function cardBack() {
   return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 }
 
+// The cards are as wide as the board allows (a phone held upright: two
+// pixels between columns, see style.css), unless the board is so low that a
+// column of five face-down cards and six face-up would not fit (a phone on
+// its side): then as tall as that allows.
 function computeLayout() {
-  const bw = board.clientWidth;
-  const gap = Math.max(3, Math.min(14, bw * 0.012));
+  const bw = board.clientWidth, bh = board.clientHeight;
+  const gap = bw < PHONE ? 2 : Math.max(3, Math.min(14, bw * 0.012));
   const n = numCols();
-  const cw = Math.min(110, Math.floor((bw - gap * (n - 1)) / n));
+  let cw = Math.min(110, Math.floor((bw - gap * (n - 1)) / n));
+  cw = Math.max(24, Math.min(cw, Math.floor((g.freecell ? (bh - 58) / 3.44 : (bh - 34) / 2.65) / 1.4)));
   const ch = Math.round(cw * 1.4);
-  const font = Math.round(Math.max(11, Math.min(22, cw * 0.27)));
+  const font = Math.round(Math.max(11, Math.min(22, cw * 0.36)));
+  const down = Math.max(4, Math.round(ch * 0.09));
+  // top0: the columns' top, with room for the column numbers, shown or not.
+  // In FreeCell the free cells and foundations are a row above them, at cellTop.
+  const top0 = g.freecell ? 22 + ch + 28 : 26;
+  // A face-up card's strip shows its corner, and more of it where the board
+  // is tall for its width (a phone): up to two fifths of the card, as long
+  // as a column of five face-down cards and twenty face-up fits.
+  const strip = Math.max(Math.round(ch * 0.24), Math.round(font * 1.35));
+  const roomy = Math.floor((bh - top0 - ch - 8 - 5 * down) / 20);
   L = {
-    // top0: the columns' top, with room for the column numbers, shown or not.
-    // In FreeCell the free cells and foundations are a row above them, at cellTop.
-    gap, cw, ch, font, cellTop: 22, top0: g.freecell ? 22 + ch + 28 : 26,
+    gap, cw, ch, font, cellTop: 22, top0,
     left0: (bw - cw * n - gap * (n - 1)) / 2,
-    down: Math.max(4, Math.round(ch * 0.09)),
-    up: Math.max(Math.round(ch * 0.24), Math.round(font * 1.35)),
+    down,
+    up: Math.max(strip, Math.min(Math.round(ch * 0.4), roomy)),
   };
   const root = document.documentElement.style;
   root.setProperty('--cw', `${cw}px`);
