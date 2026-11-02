@@ -58,6 +58,7 @@ let homeGame = 'spider'; // the game the home page is showing, 'spider' (at /) o
 let g = null; // the Game or FreeCell, once one is loaded
 let base = [0, 0]; // undos and real undos made before saves kept the whole tree of moves, which counts the rest
 let changedAt = 0; // when this game was last played in, here or (once synced) elsewhere
+let touchedAt = 0; // when anything was last played on this page (0: nothing yet; applyUpdate)
 let recorded = ''; // move list of the last win of this deal sent to the server
 let sel = null; // selected run: {col, count}
 let cursor = 0, showCursor = false; // keyboard column cursor
@@ -145,7 +146,7 @@ function save() {
 
 // The game changed: save it here and, before long, on the server.
 function changed() {
-  changedAt = Date.now();
+  changedAt = touchedAt = Date.now();
   save();
   queueSync();
 }
@@ -1567,11 +1568,14 @@ const startup = Promise.all([
 // ---------------------------------------------------------------- the service worker (sw.js)
 
 // It keeps the site in the browser, for playing without the network. A new
-// one (a deploy) waits until nothing is being played, then takes over and
-// the page is loaded again, so that it never mixes two versions' files.
+// one (a deploy) takes over and the page is loaded again when nothing is
+// being played, or when the page has just opened and nothing has been played
+// yet (a game in play is saved at every move, so nothing is lost): if it
+// waited for the player to go home, loading the page again would not show
+// the new version. The page never mixes two versions' files.
 let newWorker = null, reloading = false;
 function applyUpdate() {
-  if (!newWorker || view === 'game') return;
+  if (!newWorker || (view === 'game' && touchedAt)) return;
   reloading = true;
   newWorker.postMessage('skip');
   newWorker = null;

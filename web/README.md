@@ -726,10 +726,12 @@ The server fills the worker in with a version, a hash of every static file,
 and the list of them (`main.rs`: `service_worker`), so a deploy that
 changes anything is a new version: the browser finds it on the next visit
 (`/sw.js` is served with `Cache-Control: no-cache`), it fetches every file
-afresh into a cache of its own, and once nothing is being played the page
-lets it take over and loads itself again (`app.js`: `applyUpdate`), so a
-page never mixes two versions' files. A game in play carries on with the
-old version until the player goes back to the home page.
+afresh into a cache of its own, and when nothing is being played, or the
+page has just opened and nothing has been played on it yet, the page lets
+it take over and loads itself again (`app.js`: `applyUpdate`), so a page
+never mixes two versions' files. A game being played carries on with the
+old version until the player goes back to the home page or opens the page
+again (the game is saved at every move, so nothing is lost).
 
 `manifest.webmanifest` and the icons (`icon.svg`, rendered to `icon-192.png`
 and `icon-512.png` with `rsvg-convert`) let the site be installed: in Chrome
