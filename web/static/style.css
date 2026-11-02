@@ -15,6 +15,7 @@
   --cw: 80px;
   --ch: 112px;
   --font: 18px;
+  --tray: 0.7;
 }
 /* FreeCell goes by red and black, so it is always in the traditional colours. */
 body.traditional, body[data-game=freecell] {
@@ -181,12 +182,13 @@ button.primary:hover { background: #ffe27a; }
   align-items: flex-end;
   gap: 12px;
   padding: 6px max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
-  min-height: calc(var(--ch) * 0.7 + 14px);
+  min-height: calc(var(--ch) * var(--tray) + 14px);
 }
-#done, #stock { position: relative; height: calc(var(--ch) * 0.7); flex: none; }
-#done .card, #stock .card { width: calc(var(--cw) * 0.7); height: calc(var(--ch) * 0.7); }
-#done .card .pip { font-size: calc(var(--cw) * 0.42); }
-#done .card .corner { font-size: calc(var(--font) * 0.8); }
+/* --tray: the tray's cards against the board's (computeLayout in app.js: 0.7, or 1.05 on a phone). */
+#done, #stock { position: relative; height: calc(var(--ch) * var(--tray)); flex: none; }
+#done .card, #stock .card { width: calc(var(--cw) * var(--tray)); height: calc(var(--ch) * var(--tray)); }
+#done .card .pip { font-size: calc(var(--cw) * var(--tray) * 0.6); }
+#done .card .corner { font-size: calc(var(--font) * var(--tray) * 1.14); }
 #stock { cursor: pointer; }
 #fate { flex: none; align-self: center; padding: 3px 10px; border-radius: 999px; background: #0005; font-size: 13px; white-space: nowrap; cursor: default; }
 #fate::before { content: '●'; margin-right: 6px; }

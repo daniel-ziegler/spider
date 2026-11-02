@@ -1138,11 +1138,13 @@ function computeLayout() {
     left0: (bw - cw * n - gap * (n - 1)) / 2,
     down,
     up: Math.max(strip, Math.min(Math.round(ch * 0.4), roomy)),
+    tray: bw < PHONE ? 1.05 : 0.7, // the tray's cards (finished suits, the stock) against the board's: bigger on a phone, where the cards are small
   };
   const root = document.documentElement.style;
   root.setProperty('--cw', `${cw}px`);
   root.setProperty('--ch', `${ch}px`);
   root.setProperty('--font', `${font}px`);
+  root.setProperty('--tray', L.tray);
 }
 
 const colX = c => L.left0 + c * (L.cw + L.gap);
@@ -1257,7 +1259,7 @@ function render() {
 
 // The finished suits and the stock of a position.
 function renderTray(g, hintDeal) {
-  const small = L.cw * 0.7;
+  const small = L.cw * L.tray;
   $('#done').style.width = `${g.completed.length ? small + (g.completed.length - 1) * small * 0.3 : 0}px`;
   $('#done').innerHTML = g.completed.map((s, i) => faceHtml(s * 13 + 12, `left:${i * small * 0.3}px;top:0`)).join('');
   const deals = g.dealsRemaining();
