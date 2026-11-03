@@ -1,0 +1,55 @@
+/* The undo tree (tree.js): beside the board on a wide screen, under it on a
+   phone. Loaded with it, not with the page; hidden while a game is analysed
+   and away from the board. */
+#tree {
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+  background: #0006;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+body[data-view=game][data-tree]:not([data-review]) #tree { display: flex; }
+@media (max-width: 899px) {
+  body[data-view=game][data-tree]:not([data-review]) { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+  #tree { height: 38dvh; border-top: 1px solid #ffffff12; padding: 0 max(8px, env(safe-area-inset-right)) 0 max(8px, env(safe-area-inset-left)); }
+}
+@media (min-width: 900px) {
+  body[data-view=game][data-tree]:not([data-review]) { grid-template-columns: minmax(0, 1fr) 300px; }
+  body[data-view=game][data-tree]:not([data-review]) :is(#bar, #tray) { grid-column: 1 / -1; }
+  #tree { grid-column: 2; grid-row: 2; border-left: 1px solid #ffffff12; border-radius: 10px 0 0 10px; padding: 0 0 0 10px; }
+}
+.tr-head { display: flex; align-items: center; gap: 10px; padding: 6px 4px 2px 0; }
+.tr-head b { font-size: 15px; }
+.tr-count { flex: 1; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-close { padding: 2px 10px; }
+.tr-info { min-height: 2.8em; color: var(--ink); line-height: 1.4; padding-right: 8px; }
+.tr-info b { color: var(--accent); }
+.tr-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.tr-scroll svg { display: block; cursor: pointer; }
+.tr-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--ink-dim); font-size: 12px; padding: 4px 0 6px; }
+.tr-legend i { display: inline-block; vertical-align: -1px; margin-right: 5px; }
+.tr-legend .k-turn { width: 8px; height: 8px; border-radius: 50%; background: var(--face); }
+.tr-legend .k-deal { width: 9px; height: 9px; border-radius: 2px; background: var(--back-color); outline: 1px solid #ffffff80; }
+.k-won { color: #6ee7a8; }
+.k-lost { color: #ff7b72; }
+
+#tree path { fill: none; stroke-width: 2; stroke-linecap: round; }
+#tree .edges path { stroke: #ffffff38; }
+#tree .lit path { stroke: var(--ink); }
+#tree path.folded { stroke-dasharray: 2 4; }
+#tree text { fill: var(--ink-dim); font-size: 11px; text-anchor: end; }
+#tree text.gap { font-style: italic; }
+#tree text.won { fill: #6ee7a8; font-size: 15px; text-anchor: middle; }
+#tree text.lost { fill: #ff7b72; font-size: 13px; font-weight: 700; text-anchor: middle; }
+#tree .move { fill: #ffffff60; }
+#tree .move.on { fill: var(--ink); }
+#tree .turn { fill: #fffdf7a0; }
+#tree .turn.on { fill: var(--face); }
+#tree .deal { fill: var(--back-color); stroke: #ffffff80; stroke-width: 1; }
+#tree .deal.on { stroke: var(--ink); }
+#tree .start { fill: var(--ink-dim); }
+#tree .start.on { fill: var(--ink); }
+#tree .here { fill: none; stroke: var(--accent); stroke-width: 2.5; }
+#tree .hover { fill: none; stroke: #ffd54a80; stroke-width: 1.5; }

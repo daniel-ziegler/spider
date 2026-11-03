@@ -69,6 +69,7 @@ let finish = null; // once every card is dealt and face up: {key, line}, line be
 let finishing = false; // while auto-complete plays its line
 let L; // layout, see computeLayout
 let review = null; // while the game is being analysed (analysis.js): the board shows its positions and is not played on
+let tree = null; // the undo tree, while it is open (tree.js)
 
 // ---------------------------------------------------------------- saving and loading
 
@@ -592,6 +593,24 @@ async function analyze() {
   render();
 }
 
+// The undo tree, beside the board or under it (tree.js).
+async function toggleTree() {
+  if (tree) return tree.close();
+  let open;
+  try { ({ open } = await import('./tree.js')); } catch { return flash('Could not load the undo tree'); }
+  if (tree || view !== 'game') return;
+  tree = open({
+    game: () => (view === 'game' ? g : null),
+    copy: () => newGame(g),
+    busy: () => !!review || finishing,
+    confirm: confirmDialog,
+    moved: () => { sel = null; after(); },
+    relayout: () => { if (view === 'game') { computeLayout(); render(); } },
+    cardName,
+    closed: () => { tree = null; },
+  });
+}
+
 function closeReview() {
   if (!review) return;
   review.destroy();
@@ -997,6 +1016,7 @@ function freecellHelp() {
     ['<kbd>a</kbd>', 'auto-complete, once only sending cards to the foundations is left'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
     ['<kbd>R</kbd>', 'restart this deal'],
+    ['<kbd>t</kbd>', 'the undo tree: every line played, to go to any of them'],
     ['<kbd>n</kbd>', 'home: the daily challenge and new games'],
     ['<kbd>?</kbd>', 'this help'],
   ];
@@ -1028,6 +1048,7 @@ function helpDialog() {
     ['<kbd>a</kbd>', 'auto-complete, once every card is dealt and face up and a win is found'],
     ['<kbd>u</kbd> <kbd>r</kbd>', 'undo, redo'],
     ['<kbd>R</kbd>', 'restart this deal'],
+    ['<kbd>t</kbd>', 'the undo tree: every line played, to go to any of them'],
     ['<kbd>n</kbd>', 'home: daily challenges and new games'],
     ['<kbd>?</kbd>', 'this help'],
   ];
@@ -1053,6 +1074,7 @@ function menuDialog() {
     ['restart', 'Restart this deal', playing && g.canUndo()],
     ['results', 'Results for this deal', playing && g.isWon()],
     ['analyze', 'Analyze this game', playing && !g.freecell && g.history.length > 0 && !review],
+    ['tree', tree ? 'Hide the undo tree' : 'Undo tree: every line played', playing && !review],
     ['link', 'Copy link to this deal', playing],
     ['settings', 'Settings', true],
     ['help', 'How to play', true],
@@ -1070,6 +1092,7 @@ function menuDialog() {
       case 'restart': return restart();
       case 'results': return onWin();
       case 'analyze': return analyze();
+      case 'tree': return toggleTree();
       case 'link': return copyLink();
       case 'settings': return settingsDialog();
       case 'help': return helpDialog();
@@ -1230,6 +1253,7 @@ function renderStatus() {
 
 function render() {
   if (view !== 'game') return renderPage();
+  tree?.update();
   if (g.freecell) return renderFreecell();
   if (review) return renderReview();
   const hinted = hint?.moves[hint.i], hintTo = hinted && !hinted.deal ? hinted.to : null;
@@ -1518,7 +1542,8 @@ document.addEventListener('keydown', e => {
   else if (k === 'Enter' || k === ' ') columnKey(cursor);
   else if (k === 'ArrowUp' || k === '+' || k === '=') changeCount(1);
   else if (k === 'ArrowDown' || k === '-') changeCount(-1);
-  else if (k === 'Escape') { sel = null; clearFlash(); render(); }
+  else if (k === 'Escape') { if (tree && !sel) tree.close(); sel = null; clearFlash(); render(); }
+  else if (k === 't') toggleTree();
   else if (k === 'd' && !g.freecell) play(DEAL);
   else if (k === 'a') autoComplete();
   else if (k === 'u') undo();
