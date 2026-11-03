@@ -586,7 +586,7 @@ async function analyze() {
   $('#dangler').hidden = true;
   // (Over and not won: marked as no longer to be won, or with nothing left to play.)
   const lost = !g.isWon() && (!$('#fate').hidden || !g.hintMoves().length);
-  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview });
+  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview, play: playFromReview });
   document.body.dataset.review = '';
   computeLayout(); // (the board is lower with the review under it)
   render();
@@ -598,6 +598,26 @@ function closeReview() {
   review = null;
   delete document.body.dataset.review;
   if (view === 'game') { computeLayout(); render(); }
+}
+
+// Play on from the position the analysis is showing: back along the game to
+// where its line leaves the game's, each move taken back as an undo of it
+// (counted so, and asked about if that uses undos, as restarting is), then on
+// along the line, each move played as by hand (down the tree where it was
+// played before, as redo). A win already recorded stays recorded.
+async function playFromReview() {
+  if (!review) return;
+  const line = review.line, now = g.moves();
+  let k = 0;
+  while (k < line.length && k < now.length && encodeMoves([line[k]]) === encodeMoves([now[k]])) k++;
+  const real = g.line.slice(k + 1).filter(n => n.real && !n.undone).length;
+  if (real && !await confirmDialog('Use undos?', `Going back to move ${k} takes back cards you have seen: ${plural(real, 'undo')}.`, 'Play from here', ['p'])) return;
+  closeReview();
+  if (k === now.length && k === line.length) return;
+  while (g.history.length > k) g.undo();
+  for (const mv of line.slice(k)) if (g.apply(mv)) break;
+  sel = null;
+  after();
 }
 
 // The Analyze button is in the tray once the game is won or marked as lost.
