@@ -19,6 +19,16 @@ number of **real undos**: undos that took back a card turned over or a deal.
 Restarting a deal counts as undoing every move back to the start. Results for
 a deal are shown only to players who have won it.
 
+The **undo tree** (menu, or <kbd>t</kbd>; `static/tree.js`, `tree.css`,
+loaded when opened) draws that tree beside the board, or under it on a
+narrow screen: a row per move, each node's longest branch going straight on
+and the others in lanes to its right, moves that turned a card over or dealt
+marked, won ends and ends with no move left too, and quiet stretches folded
+(a tap opens them). Tapping a position goes there as the buttons would: undo
+back to where its line and the board's part, then play down to it, so the
+undos count exactly as those presses would (one question first if any of
+them is a real undo).
+
 ## Can it still be won?
 
 A setting (on by default) marks the game, and says so when a move does it,
