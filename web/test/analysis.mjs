@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { Game, encodeMoves } from '../static/game.js';
 import { Net } from '../static/vnet.js';
 import { analysisConfig, makeState, playOut, LEN, DOWN, MAXC } from '../static/lineplayer.js';
-import { prepare, stretchValues, committed, encodeSnap, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, searchFor, SEARCH, SHORT, BIAS } from '../static/analysis-core.js';
+import { prepare, stretchValues, committed, encodeSnap, screenJobs, screen, paired, isMistake, hopeless, nextRound, findMistakes, measureLuck, branch, searchFor, evidence, blend, BLEND, SEARCH, SHORT, BIAS } from '../static/analysis-core.js';
 import { random, shuffled, showReal, setup, roll, track, simplify, useNet } from '../static/analysis-worker.js';
 
 const check = (ok, what) => { if (!ok) throw new Error(what); };
@@ -264,6 +264,28 @@ check(shorter > 0 && swapped > 0, 'nothing simplified, or nothing played in anot
   // The cards' part: the real cards against the world's.
   const luck = await measureLuck({ st: stretches[0], job: {}, roll: job => Promise.resolve(Float32Array.from({ length: 2 * (job.to - job.from) }, (_, k) => (k % 2 ? ((job.from + (k >> 1)) % 4 ? 0 : 1) : 1))) });
   check(luck.n === SEARCH.luck && Math.abs(luck.mean + 0.75) < 1e-12 && luck.a === 1 && luck.b === 0.25, 'the cards\' part');
+  check(luck.games[0].filter(x => x === 1).length === SEARCH.luck && luck.games[1].filter(x => x >= 0).length === SEARCH.luck, 'the cards\' games');
+}
+
+// What the games say of the positions, and the curve with them.
+{
+  const sts = [{ from: 0, to: 2, shows: 'turn' }, { from: 2, to: 3, shows: 'deal' }, { from: 3, to: 5, shows: 'turn' }, { from: 5, to: 6, shows: null }];
+  const games = (n, k) => Float32Array.from({ length: n }, (_, w) => (w < k ? 1 : 0));
+  const wins = new Map([[0, games(64, 48)], [2, games(64, 16)]]);
+  // The luck's games from the end of stretch 0 are the candidate's own there (the same worlds): counted once.
+  const ev = evidence(sts, [{ at: 0, st: sts[0], wins }], [{ at: 0, games: [games(32, 8), games(32, 32)] }]);
+  check(ev.get('p0').n === 64 && ev.get('p0').sum === 48 && ev.get('u2').n === 64 && ev.get('u2').sum === 16 && ev.get('p2').n === 32 && ev.get('p2').sum === 32 && ev.size === 3, 'what the games say');
+  const values = new Map([['p0', 0.5], ['p1', 0.5], ['u2', 0.5], ['p2', 0.5], ['u3', 0.5], ['p3', 0.5], ['p4', 0.5], ['u5', 0.5], ['p5', 0.5], ['p6', 1]]);
+  check([...blend(sts, values, new Map(), new Set(['p6']))].every(([k, v]) => v === values.get(k)), 'the curve moves without games');
+  const one = new Map([['p0', { n: 1000, sum: 750, sq: 750 }]]), curve = blend(sts, values, one, new Set(['p6']), false, { ...BLEND, prior: 0 });
+  // A position with many games is nearly what they say, its neighbours less so the further they are; a value known stays.
+  check(Math.abs(curve.get('p0') - 0.75) < 0.01, `a position's games: ${curve.get('p0')}`);
+  const order = ['p0', 'p1', 'u2', 'p2', 'u3', 'p3', 'p4', 'u5', 'p5'].map(k => curve.get(k));
+  check(order.every((v, i) => v > 0.5 && (!i || v < order[i - 1])) && curve.get('p6') === 1, `the games' neighbours: ${order}`);
+  // With few games the network counts for some: error / world games' worth.
+  const few = blend(sts, values, new Map([['p3', { n: 4, sum: 4, sq: 4 }]]), new Set(), false, { ...BLEND, moves: 1e9, cards: 1e9, prior: 1e9 });
+  const k = BLEND.world / BLEND.error;
+  check(Math.abs(few.get('p3') - (0.5 * k + 4) / (k + 4)) < 1e-9 && few.get('p4') === 0.5, `few games: ${few.get('p3')}`);
 }
 
 // The network's values of a stretch.

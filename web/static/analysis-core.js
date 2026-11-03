@@ -114,9 +114,10 @@ export function stretchValues(st, values, won, last, suits = 0) {
 // putting it to a move and 2 * `fresh` for its loss, and 2 * `luck` for the
 // cards' biggest swing (each times `noisy` at most). Where few mistakes are found, those that may be are
 // brought up to `enough` worlds (some two for each place to fill) and put to
-// a move as well.
+// a move as well. Then `curve` worlds are played from the start of every
+// stretch for the curve (fillCurve).
 export const SEARCH = {
-  games: 2400, // games played out to find the mistakes
+  games: 6000, // games played out to find the mistakes
   round: 16, // worlds a candidate is given more in at least
   piece: 4, // worlds in a piece of work (small, so that a round's last games are shared out over the workers)
   first: 32, // worlds for a candidate when it comes in
@@ -127,16 +128,17 @@ export const SEARCH = {
   cost: 0.05, // a mistake costs at least this much of the chance of winning
   z: 2.5, // and is this many standard errors from costing nothing
   most: 4, // mistakes shown
-  pin: 128, // worlds for putting a mistake to one move of its stretch
-  fresh: 128, // worlds, not used before, for the loss shown
+  pin: 256, // worlds for putting a mistake to one move of its stretch
+  fresh: 256, // worlds, not used before, for the loss shown
   spread: 0.1, // a loss not put to one move is shown only if it is this large
-  luck: 128, // worlds for the cards' biggest swing
+  luck: 256, // worlds for the cards' biggest swing
   shown: 3, // with fewer mistakes than this, the list is filled up with what may be mistakes
   maybe: 0.02, // which is what lost this much in its games, however unsurely,
   enough: 128, // in this many worlds at least
   stop: 0, // moves showing cards a game is played on for before the network values it (0: to the end)
   sd: 0.2, // with `stop`: the standard deviation of a world's difference that pin, fresh and luck are meant for,
   noisy: 1, // and how many times as many worlds a candidate may get for them whose worlds differ more
+  curve: 64, // worlds played from the start of every stretch for the curve alone, less those the search played there (fillCurve)
 };
 
 // With two suits or more a game stops after eight moves that show cards,
@@ -153,8 +155,14 @@ export const SEARCH = {
 // out after all and a world's difference is as noisy as it was (up to 70
 // points): a mistake found there gets up to four times the worlds for its
 // move and its loss, as many as it had (`noisy`; so does the cards' swing).
+// Both were then given more (the network got faster, and the games make
+// the curve too: blend), and SHORT keeps a quarter of each of SEARCH's but
+// for the worlds a candidate gets at first, a half
+// (tools/analysis/blend.mjs: the search's games find no more mistakes with
+// more of them, but put the curve some three points from the truth where
+// the network is nine).
 export const SHORT = {
-  ...SEARCH, stop: 8, games: 600, round: 8, piece: 2, first: 8, cap: 128, least: 32, pin: 32, fresh: 32, luck: 32, enough: 32, noisy: 4,
+  ...SEARCH, stop: 8, games: 1500, round: 8, piece: 2, first: 16, cap: 128, least: 32, pin: 64, fresh: 64, luck: 64, enough: 32, noisy: 4, curve: 16,
 };
 
 // The search's numbers for a game of this many suits.
@@ -388,8 +396,40 @@ export async function findMistakes({ stretches, cuts, prior = null, job, roll, u
   }
 }
 
+// Games for the curve alone (see blend): from the start of every stretch in
+// `opt.curve` worlds, and from the end of the last, less those the search
+// has played there (`cands`, findMistakes'; and none where `cuts` has null,
+// a column too long for the line player). Returns what it played as
+// findMistakes has its candidates' games ([{at, st, wins}]), for evidence;
+// update(those, games) is called as each piece comes in.
+export async function fillCurve({ stretches, cuts, cands, job, roll, opt = SEARCH, update = () => {} }) {
+  if (!opt.curve) return [];
+  const had = new Map(cands.map(c => [c.at, c]));
+  const out = [], work = [];
+  stretches.forEach((st, at) => {
+    const len = st.to - st.from, last = at === stretches.length - 1, c = had.get(at);
+    if (!cuts[at]) return;
+    const uptos = last && !st.shows ? [0, len] : [0];
+    for (const upto of uptos) {
+      const own = c?.wins.get(upto);
+      let from = 0;
+      while (own && from < opt.curve && own[from] >= 0) from++;
+      if (from >= opt.curve) continue;
+      const wins = new Float32Array(opt.curve).fill(NaN);
+      out.push({ at, st, wins: new Map([[upto, wins]]) });
+      for (let w = from; w < opt.curve; w += opt.piece) {
+        const to = Math.min(opt.curve, w + opt.piece);
+        work.push(roll({ ...job(at), from: w, to, at: [upto], stop: opt.stop }).then(worth => { wins.set(worth, w); update(out, to - w); }));
+      }
+    }
+  });
+  await Promise.all(work);
+  return out;
+}
+
 // What the cards shown by a stretch did, by games played out after its moves
-// with the world's cards coming up and with the real ones: the difference (paired).
+// with the world's cards coming up and with the real ones: the difference
+// (paired), and the games themselves (`games`: the two, by world).
 // (In more worlds where they differ much, as a mistake's loss is: see SHORT.)
 export async function measureLuck({ st, job, roll, opt = SEARCH }) {
   const len = st.to - st.from, most = opt.noisy * opt.luck, a = new Float32Array(most).fill(NaN), b = new Float32Array(most).fill(NaN);
@@ -403,7 +443,128 @@ export async function measureLuck({ st, job, roll, opt = SEARCH }) {
   await play(0, opt.luck);
   const d = paired(a, b);
   await play(opt.luck, opt.luck * Math.min(opt.noisy, Math.max(1, Math.ceil((d.se * Math.sqrt(d.n) / opt.sd) ** 2))));
-  return paired(a, b);
+  return { ...paired(a, b), games: [a, b] };
+}
+
+// ---------------------------------------------------------------- the curve, with the games
+//
+// The games played out to find the mistakes (and the luck) are each a sample
+// of the very chance the curve is of: a game from a stretch's start, the line
+// player choosing, of the position there; one from after some of its moves,
+// of the position they come to; one from its end with the world's cards
+// coming up, of that position with its cards not yet known (`u`); and the
+// luck's with the real cards, of the position after them. What they say of a
+// position: key -> {n, sum, sq}, the number of games, the sum of what they
+// were worth and of its squares. `cands` are findMistakes' (each {at, st,
+// wins}: wins maps a number of the stretch's moves to the games from after
+// them, by world), `lucks` [{at, games}] measureLuck's of stretch `at`.
+// The games of one stretch from one position are in the same worlds wherever
+// they come from (the luck's `a` are the candidate's own from its end), so
+// those are counted once each.
+export function evidence(stretches, cands, lucks = []) {
+  const groups = new Map(); // `${key} ${at}` -> [key, world -> worth]
+  const add = (key, at, worths) => {
+    if (!worths) return;
+    const id = `${key} ${at}`;
+    if (!groups.has(id)) groups.set(id, [key, new Map()]);
+    const seen = groups.get(id)[1];
+    worths.forEach((x, w) => { if (x >= 0 && !seen.has(w)) seen.set(w, x); });
+  };
+  const keyOf = (st, upto) => (upto === st.to - st.from && st.shows ? `u${st.to}` : `p${st.from + upto}`);
+  for (const c of cands) for (const [upto, worths] of c.wins ?? []) add(keyOf(c.st, upto), c.at, worths);
+  for (const { at, games: [a, b] } of lucks) {
+    const st = stretches[at];
+    add(keyOf(st, st.to - st.from), at, a);
+    add(`p${st.to}`, at, b);
+  }
+  const out = new Map();
+  for (const [key, seen] of groups.values()) {
+    const e = out.get(key) ?? { n: 0, sum: 0, sq: 0 };
+    for (const x of seen.values()) { e.n++; e.sum += x; e.sq += x * x; }
+    out.set(key, e);
+  }
+  return out;
+}
+
+// How the network's values and the games are put together (blend, below),
+// measured on the 48 games with mistakes put in that the search was measured
+// on (tools/analysis/blend.mjs), against every candidate's two positions
+// played to the end in 256 worlds. In units of v(1 - v), v being the
+// network's value (so that a position near certain counts its errors as
+// such): `error` is the variance of the network's error, `world` that of a
+// game's worth about its position's chance with the games stopped as SHORT
+// has it (with them played to the end it is 1: a win or a loss), `moves` and
+// `cards` how much less alike the network's errors are across a stretch's
+// moves and across the cards that end it (-ln of the correlation), `bias`
+// what the games' own error adds (stopped, they are worth the network's
+// value eight showings on), and `prior` how many games' worth of `world` a
+// position's own games' spread is taken with.
+export const BLEND = { error: 0.05, world: 0.31, moves: 0.6, cards: 0.6, bias: 0, prior: 30, least: 0.01 };
+
+// The curve with the games put in: key -> value, for every key of `values`
+// (the network's). The network's error is taken to be a random walk that
+// drifts back to nothing, along the curve: over a stretch's moves it keeps
+// exp(-moves) of what it was, a position inside the stretch so much of the
+// way along as it is, and over the cards shown exp(-cards); the games are
+// noisy measurements of the chance at their positions (with a variance of
+// their spread over their number, and `bias`). The value at each position
+// is then the network's plus what the error is most likely to be, given all
+// the games (a Kalman smoother along the curve): at a position with games of
+// its own and none near, the network's value counted as error / world games
+// against the games' own; between positions with games, in between. A
+// position whose value is known (the end of a game over) is left as it is.
+// `full`: the games are played to the end (world is then 1).
+export function blend(stretches, values, ev, fixed = new Set(), full = false, opt = BLEND) {
+  // The curve's positions in order, with where each is along it.
+  const pts = [], world = full ? 1 : opt.world;
+  let at = 0;
+  const point = (key, time) => { if (values.has(key) && !fixed.has(key)) pts.push({ key, time }); };
+  stretches.forEach((st, i) => {
+    if (i === 0) point(`p${st.from}`, at);
+    const len = st.to - st.from;
+    for (let t = st.from + 1; t < st.to; t++) point(`p${t}`, at + opt.moves * (t - st.from) / len);
+    at += opt.moves;
+    if (st.shows) { point(`u${st.to}`, at); at += opt.cards; }
+    point(`p${st.to}`, at);
+  });
+  const out = new Map(values);
+  if (!pts.length) return out;
+  // Each position's games, in units of the error: (mean - value) / sqrt(v(1 - v)), and their variance.
+  for (const p of pts) {
+    const v = values.get(p.key), e = ev.get(p.key);
+    p.scale = Math.sqrt(Math.max(opt.least, v * (1 - v)));
+    if (!e?.n) continue;
+    const mean = e.sum / e.n, spread = (Math.max(0, e.sq - e.n * mean * mean) + opt.prior * world * p.scale ** 2) / (e.n - 1 + opt.prior);
+    p.y = (mean - v) / p.scale;
+    p.r = spread / p.scale ** 2 / e.n + opt.bias;
+  }
+  // Forward (the filter), then back (the smoother).
+  const q = opt.error;
+  let m = 0, P = q;
+  pts.forEach((p, i) => {
+    const f = i ? Math.exp(-(p.time - pts[i - 1].time)) : 0;
+    p.f = f;
+    p.m0 = f * m;
+    p.P0 = f * f * P + q * (1 - f * f);
+    m = p.m0; P = p.P0;
+    if (p.y !== undefined) {
+      const k = P / (P + p.r);
+      m += k * (p.y - m);
+      P *= 1 - k;
+    }
+    p.m = m; p.P = P;
+  });
+  let ms = pts[pts.length - 1].m;
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    if (i < pts.length - 1) {
+      const nx = pts[i + 1], g = nx.P0 > 0 ? p.P * nx.f / nx.P0 : 0;
+      ms = p.m + g * (ms - nx.m0);
+    }
+    const v = values.get(p.key);
+    out.set(p.key, Math.min(1, Math.max(0, v + ms * p.scale)));
+  }
+  return out;
 }
 
 // The positions of another line from the position after `t` of the game's

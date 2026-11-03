@@ -25,8 +25,10 @@
 //      analysis-core.js, which has what is computed; this file has the
 //      workers and the page. With two suits or more the games are played
 //      on for eight moves that show cards and the network values where they
-//      stand; with one suit they are played to the end.
-import { prepare, stretchValues, screenJobs, screen, findMistakes, measureLuck, branch, searchFor } from './analysis-core.js';
+//      stand; with one suit they are played to the end. Then games are
+//      played from every stretch's start, for the curve: as they come in
+//      the curve is the network's put together with them (blend).
+import { prepare, stretchValues, screenJobs, screen, findMistakes, fillCurve, measureLuck, branch, searchFor, evidence, blend } from './analysis-core.js';
 
 const NET_VERSION = 4; // in the network's address, which is cached for good: change it with the network
 const VALUES = 6; // positions valued in one piece of work
@@ -121,6 +123,9 @@ export function open(ctx) {
   const over = data.won ? 'won' : ctx.lost ? 'lost' : '';
   if (over) values.set(`p${N}`, data.won ? 1 : 0);
   let vals = null; // its three values of each stretch, once it has said everything
+  let curve = null, stale = false; // the curve with the games played out put in (see blend), and whether games have come since
+  const lucks = []; // the luck's games, for it
+  let filled = []; // and those played for it alone (fillCurve)
   let cands = []; // the stretches games are being played out for (see findMistakes)
   let found = null; // the mistakes, once they are known: see mistake() for what each has
   let luck = null; // the cards' biggest swing: {t, show, mean}
@@ -134,7 +139,7 @@ export function open(ctx) {
   const workers = new Promise(resolve => { pooled = resolve; });
   let pool = null, closed = false, failed = '', phase = 'net', done = 0, spent = 0;
   const SEARCH = searchFor(suits); // the search's numbers: how far its games are played, and how many
-  const total = data.jobs.length + SEARCH.games * ROLL_WEIGHT;
+  const total = data.jobs.length + (SEARCH.games + (SEARCH.curve ?? 0) * data.stretches.length) * ROLL_WEIGHT;
   const t0 = performance.now();
   let seconds = 0;
 
@@ -157,12 +162,21 @@ export function open(ctx) {
 
   // ---- what is known so far
 
-  const value = t => values.get(`p${t}`);
+  // What the curve says: the network's values, and once games have been
+  // played out from positions those too (blend in analysis-core.js).
+  const shown = () => {
+    if (stale) {
+      stale = false;
+      curve = blend(data.stretches, values, evidence(data.stretches, [...cands, ...filled], lucks), over ? new Set([`p${N}`]) : new Set(), !SEARCH.stop);
+    }
+    return curve ?? values;
+  };
+  const value = t => shown().get(`p${t}`);
   // The value after move t before the cards it showed were known.
   const commitAt = t => {
     const st = { from: t - 1, to: t, shows: data.shows[t - 1] };
     if (!values.has(`u${t}`)) return undefined;
-    const v = stretchValues(st, values, data.won, N, suits);
+    const v = stretchValues(st, shown(), data.won, N, suits);
     return Number.isFinite(v.commit) ? v.commit : undefined;
   };
 
@@ -420,6 +434,7 @@ export function open(ctx) {
   function note() {
     let text = '<span class="legend"><i class="l-play"></i>your moves <i class="l-luck"></i>cards turned or dealt</span> ';
     if (found?.length) text += 'Each mistake is measured by playing some hundreds of games out both ways, with the cards you had not seen reshuffled. ';
+    if (phase === 'roll' || phase === 'done') text += 'The curve is the network\'s, corrected by the games played out. ';
     text += '<span class="keys">Keys: ← → the game\'s moves · ↑ ↓ or 1–9 the mistakes · A Y B S their views · , . along the other line · ? the computer\'s move everywhere</span> ';
     if (ctx.undos) text += 'Moves that were taken back are left out: the game is read as if it had been played straight through.';
     return text;
@@ -604,6 +619,8 @@ export function open(ctx) {
     const swing = vals.map((v, at) => [cuts[at] && data.stretches[at].shows ? Math.abs(v.luck) : 0, at]).sort((a, b) => b[0] - a[0])[0];
     const lucky = swing && swing[0] >= 0.05 ? measureLuck({ st: data.stretches[swing[1]], job: job(swing[1]), roll, opt: SEARCH }).then(d => {
       const st = data.stretches[swing[1]];
+      lucks.push({ at: swing[1], games: d.games });
+      stale = true;
       if (Math.abs(d.mean) >= 0.05 && Math.abs(d.mean) >= 2 * d.se) luck = { t: st.to, show: st.shows, mean: d.mean, se: d.se };
     }) : null;
     // Where to look first: what the network makes each candidate cost (see screen).
@@ -616,8 +633,14 @@ export function open(ctx) {
     if (closed) return;
     const mistakes = await findMistakes({
       stretches: data.stretches, cuts, job, roll, opt: SEARCH, prior: screen(data.stretches, values, theirs, data.won, N, suits),
-      update: (c, n) => { cands = c; spent = n; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
+      update: (c, n) => { cands = c; spent = n; stale = true; done = data.jobs.length + n * ROLL_WEIGHT; if (!closed) redraw(); },
     });
+    // Then games for the curve where the search played none.
+    filled = await fillCurve({
+      stretches: data.stretches, cuts, cands, job, roll, opt: SEARCH,
+      update: (out, n) => { filled = out; spent += n; done = data.jobs.length + spent * ROLL_WEIGHT; stale = true; if (!closed) redraw(); },
+    });
+    stale = true;
     await lucky;
     if (closed) return;
     found = mistakes.map(m => { const x = mistake(m); return { ...x, sure: true, maybe: !!m.unsure, at: x.move, from: x.move - 1 }; });

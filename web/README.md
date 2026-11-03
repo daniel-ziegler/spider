@@ -117,7 +117,9 @@ the better line; `?` or `C` has the computer's move shown at every position;
   the word under the plot's end. So a deal that loses the game is a bar of
   the cards' down to nothing, and where nothing was shown since the last
   cards the fall is on the last move, the player's. A game still going ends
-  with the network's value as anywhere.
+  with the network's value as anywhere. Once games are played out (below)
+  the curve is the network's put together with them, as they come in: see
+  [the curve with the games](#the-curve-with-the-games).
 * **A mistake** is a move after which the computer player wins less often
   than from the position before it, where it would have chosen its own. That
   is measured by playing games out, in shuffles of the cards the player had
@@ -132,8 +134,9 @@ the better line; `?` or `C` has the computer's move shown at every position;
     value takes as long as a game, so a shuffle is no cheaper, but its
     difference is half as noisy (20 points for 39 with four suits) and a
     quarter of the shuffles do: the numbers below are those of one suit, and
-    with more they are a quarter (8 shuffles at first, up to 128, a mistake
-    from 32, 600 games; 32 for the move, the loss and the luck). Near the
+    with more they are a quarter or less (16 shuffles at first, up to 128, a
+    mistake from 32, 2,000 games; 64 for the move, the loss and the luck, 16
+    for the curve). Near the
     end of a game fewer than eight such moves are left, the games end after
     all and are as noisy as ever; a mistake found there gets up to four
     times the shuffles for its move and its loss again. What this was
@@ -170,11 +173,11 @@ the better line; `?` or `C` has the computer's move shown at every position;
     fewer than three are open the next by the network's order come in. A
     candidate is settled when it is surely a mistake (128 shuffles or more, a
     loss of at least five points and at least 2.5 standard errors) or cannot
-    well become one. This goes on until all are settled or 2,400 games are
-    played. The games go to the workers four shuffles at a time, so that
+    well become one. This goes on until all are settled or 6,000 games are
+    played (most games are settled well before). The games go to the workers four shuffles at a time, so that
     a round's last games are spread over them.
   * *Which move.* A stretch with several departures is cut in two at one in
-    its middle, games are played from there in 128 of the same shuffles, and
+    its middle, games are played from there in 256 of the same shuffles, and
     the half that lost more is cut again, until one move is left. If that
     move by itself is surely a mistake it is the one shown; if not (the loss
     is spread over several) the stretch is shown from its first departure on,
@@ -183,7 +186,7 @@ the better line; `?` or `C` has the computer's move shown at every position;
   * *What it cost.* The games that found a mistake make it look worse than
     it is (it was picked because they went badly, and the search stops when
     they do; the losses listed ran some 30% high). So each mistake is played once more, in
-    128 shuffles not used before, and the loss shown and its interval are of
+    256 shuffles not used before, and the loss shown and its interval are of
     those games alone; one that then loses less than half of five points is
     dropped.
   * *What is shown*, for at most four, the costliest first: the move played;
@@ -213,10 +216,14 @@ the better line; `?` or `C` has the computer's move shown at every position;
     out in a worker ahead of the games waiting (some 10 to 100 ms, a second
     at most) and kept, and the workers stay for it when the search is done.
   * *Luck* is one line: the stretch where the network has the cards doing
-    most is played out (128 shuffles, after its moves with the shuffle's
+    most is played out (256 shuffles, after its moves with the shuffle's
     cards and with the real ones, the shuffle's others as they were but for
     those swapped at random to make room), and named if that is five points
     or more and twice its standard error.
+  * *For the curve* the start of every stretch is then played out in 64
+    shuffles (16 with two suits or more), less those the search played
+    there (`curve` in `SEARCH`, `fillCurve`), so that the curve has games
+    everywhere and not only where the mistakes were looked for.
 * **Where it runs.** All in the browser, in workers (as many as the cores,
   less one, at most twelve), and shown as it arrives. `analysis.js` (the
   page), `analysis-core.js`, `analysis-worker.js`, `lineplayer.js`, `vnet.js`,
@@ -234,7 +241,10 @@ the better line; `?` or `C` has the computer's move shown at every position;
   cheap player's four-suit game of `bench.html`, whose two mistakes are at
   its end and get the most: 2,000 games in 6.4 s on a laptop's twelve
   workers, where the 3,552 played to the end took 21 s; a person's four-suit
-  game of 343 moves 750 games for 3,300, on one core 14 s for 69). The
+  game of 343 moves 750 games for 3,300, on one core 14 s for 69). Those
+  are of the search before it was given more games for the curve (see [the
+  curve with the games](#the-curve-with-the-games)), which now plays two to
+  four times as many and takes two to three times as long. The
   times that follow are of games all played to the end, in JavaScript. In
   headless Chrome on a laptop with eight cores (twelve workers), with nothing
   else running, the owner's eight games below took 8 s (one suit), 40 to 50 s
@@ -595,6 +605,76 @@ correlation 0.80 (0.80); `found.mjs`: 57 of 67 found, 6 near and 2 false
 besides (57, 7 and 2), in 813 games (817). A game of the page's own
 (four suits, 20820) on one core: the values 3.0 s for 3.9, the games 20.8 s
 for 27.7. The checkpoints and logs are in `runs/vnet-faceup`.
+
+### The curve with the games
+
+The games played out to find the mistakes are each a sample of the very
+chance the curve is of: a game from a stretch's start (the line player
+choosing) of the position there, one from after some of its moves of the
+position they come to, one from its end with the shuffle's cards coming up
+of the position with its cards not yet known, and the luck's with the real
+cards of the position after them. A position's games are noisy (a game
+stopped after eight showings varies about its chance by 0.31 v(1 − v), v
+being the chance, against v(1 − v) for a win or a loss), but they are of the
+player and the position themselves, where the network is wrong about a
+position by some 8.6 points (0.052 v(1 − v): measured below). So the curve
+is now the network's put together with them as they come in (`evidence` and
+`blend` in `static/analysis-core.js`, the numbers in `BLEND`): the network's
+error is taken to be a random walk along the curve that drifts back to
+nothing (its errors at a stretch's start and at its end, cards not yet
+known, correlate at 0.66, and at that end and the next stretch's start at
+0.50), the games are measurements of the chance at their positions with the
+variance of their spread over their number, and the value shown is the
+network's plus the error most likely given all the games (a Kalman smoother
+along the curve, in units of v(1 − v)). A position with games and none near
+is so the network's value counted as some six games (0.31 / 0.05) against
+its own; positions between those with games are moved as far as their
+errors go together. The end of a game over stays what it came to.
+
+To have games everywhere the search was given more (it is faster since [the
+network without the cards face down](#the-network-without-the-cards-face-down)),
+and then the start of every stretch the search did not play out is played
+out in 16 shuffles (64 with one suit: `curve`, `fillCurve`). Measured by
+`tools/analysis/blend.mjs` on the 48 games with mistakes put in of [the
+player looking again](#the-player-looking-again) (two to four suits, every
+candidate's two positions played to the end in 256 shuffles: the truth, its
+own noise taken out of the errors), the search playing in other shuffles
+than the truth's (so it finds a few more than `found.mjs`, which uses the
+same):
+
+| | games a game | positions with games (of 758) | error with games | without | all | mistakes found (of 67), near, false |
+|---|---|---|---|---|---|---|
+| the search before, the network alone | 822 | 506 | 8.7 points | 8.5 | 8.6 | 61, 8, 3 |
+| the search before, its games put in | 822 | 506 | 3.3 | 8.0 | 5.3 | 61, 8, 3 |
+| 1,500 games | 1,164 | 716 | 3.1 | 6.2 | 3.4 | 61, 9, 3 |
+| twice the shuffles for everything, 1,200 games | 1,614 | 638 | 2.9 | 7.1 | 3.9 | 61, 10, 3 |
+| the curve's 16 shuffles alone | 1,256 | 632 | 3.3 | 5.7 | 3.8 | 61, 8, 3 |
+| stopped after 16 showings, 1,200 games | 1,288 | 668 | 3.6 | 8.1 | 4.4 | 58, 4, 2 |
+| **1,500 games, 16 shuffles at first, 64 for the move, loss and luck, 16 for the curve** (now) | 1,924 | 736 | 3.1 | 7.0 | 3.3 | 61, 10, 3 |
+| the same with 2,000 games | 1,984 | 757 | 2.9 | | 2.9 | 61, 10, 3 |
+
+With one suit (16 games made so by `order.mjs make 1`, games to the end):
+the network is 8.9 points out; the search before with its games put in 4.9
+(2,706 games), now (6,000 games, 256 shuffles for the move, the loss and the
+luck, 64 for the curve) 2.9 (6,374 games), finding 23 of 27 mistakes for
+22. The search finds no more mistakes with more games: it settles its
+candidates well before they run out, and what it misses is too near to call.
+So the time went where it changes what is shown: the curve, now some three
+points from the truth where it was nine, and the losses shown, whose ±
+is now a third narrower. (2,000 games cover the last few candidates too,
+but where the games run out, as in a person's game with many candidates,
+they cost a third more again.) What is left of the error with games is
+most of it the stopped games' own (they end in the network's value) and the
+search's choosing where to play. The ways of putting the games in differ
+little: each position by its own games alone is as good where there are
+games, the smoother better between them (7.0 for 9.6 points); the numbers
+of `BLEND` changed by half or double move the error by a tenth of a point.
+
+The whole analysis, one core, eight at once: the owner's four-suit game of
+293 moves 194 s for 101 (2,352 games for 592, and 512 for the luck for
+256), a cheap player's two-suit game 84 for 30, three-suit 157 for 84,
+`bench.html`'s 238 for 161, one suit 73 for 52. In headless Chrome on
+sixteen cores the four-suit game takes 33 s for 12.
 
 ## FreeCell
 
