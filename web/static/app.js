@@ -1273,6 +1273,7 @@ function renderStatus() {
 
 function render() {
   if (view !== 'game') return renderPage();
+  if (!g.isWon()) $('#dangler').hidden = true; // the win's spider goes once the board is no longer won (undo, the undo tree, play from here)
   tree?.update();
   if (g.freecell) return renderFreecell();
   if (review) return renderReview();
