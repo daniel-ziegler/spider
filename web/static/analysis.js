@@ -109,10 +109,11 @@ const points = x => `${x < -0.005 ? '−' : x > 0.005 ? '+' : ''}${Math.abs(Math
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 // Open the analysis of the moves of a deal: ctx is {suits, seed, moves,
-// undos, lost, cardName, render, close} (lost: the game is over and not won:
-// it can no longer be won, or nothing is left to play). Returns what app.js draws and asks of it:
-// shown (the position on the board), mark (cards to outline), info (the
-// header's line), key(event), destroy().
+// undos, lost, cardName, render, close, play} (lost: the game is over and not won:
+// it can no longer be won, or nothing is left to play; play: the game is to
+// be played on from the position on the board). Returns what app.js draws and asks of it:
+// shown (the position on the board), line (the moves from the deal to it),
+// mark (cards to outline), info (the header's line), key(event), destroy().
 export function open(ctx) {
   const { suits, seed, moves } = ctx, N = moves.length;
   const data = prepare(suits, seed, moves);
@@ -150,6 +151,7 @@ export function open(ctx) {
       <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button><button data-ask title="Show at every position what the computer would play there (? or C)">?<span class="long"> Computer's move</span></button></span>
       <span class="rv-move"></span>
       <span class="rv-status"><span class="rv-bar"><i></i></span><span class="rv-text"></span></span>
+      <button data-play title="Play on from the position on the board: back to it in the game, as undoing would be, or on along the other line it is on (P)">Play<span class="long"> from here</span></button>
       <button class="primary" data-close title="Close the analysis (Esc)">Back<span class="long"> to the game</span></button>
     </div>
     <div class="rv-body">
@@ -524,6 +526,7 @@ export function open(ctx) {
     const b = e.target.closest('button');
     if (!b) return;
     if ('close' in b.dataset) ctx.close();
+    else if ('play' in b.dataset) ctx.play();
     else if (b.dataset.key) pick(+b.dataset.key);
     else if (b.dataset.view) view(b.dataset.view);
     else if (b.dataset.along) along(+b.dataset.along);
@@ -558,6 +561,7 @@ export function open(ctx) {
     else if (k === 'Home') setStep(0);
     else if (k === 'End') setStep(N);
     else if (k === 'Escape') ctx.close();
+    else if (k === 'p') ctx.play();
     else if (k === ',' || k === '<') along(-1);
     else if (k === '.' || k === '>') along(1);
     else if (k === 'a' && m) view('before');
@@ -659,6 +663,7 @@ export function open(ctx) {
   };
   const review = {
     get shown() { return alt >= 0 ? cur().alt.snaps[alt] : data.snaps[step]; },
+    get line() { return alt >= 0 ? [...moves.slice(0, cur().from), ...cur().line.slice(0, alt)] : moves.slice(0, step); },
     // The cards the last move put down: {col, count}.
     get mark() {
       const snaps = alt >= 0 ? cur().alt.snaps : data.snaps, i = alt >= 0 ? alt : step;

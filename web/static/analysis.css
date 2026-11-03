@@ -131,7 +131,8 @@ body[data-review] { --rv-you: #ff7b72; --rv-better: #6ee7a8; }
 @media (max-width: 640px) {
   .rv-title, .rv-head .long { display: none; }
   .rv-head { gap: 6px; }
-  .rv-head button.primary { margin-left: auto; }
+  .rv-head button.primary, .rv-head [data-play] { margin-left: auto; }
+  .rv-head [data-play] + button.primary { margin-left: 0; }
   .rv-move { flex-basis: 100%; order: 5; }
   .rv-bar { width: 44px; }
   .rv-status { font-size: 12px; min-width: 0; overflow: hidden; }
