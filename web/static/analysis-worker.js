@@ -6,6 +6,8 @@
 //   {net: ArrayBuffer, suits}        the network's file and the game's number of suits, first
 //   {id, value: [enc, ...]}          positions, encoded (vnet.js); answers {id, values: [p, ...]}
 //   {id, roll: {...}}                games played out in some worlds; answers {id, rolls: Float32Array}
+//   {id, next: {suits, columns, faceDown, completed, stock}}
+//                                    the line player's next moves there (see nextMoves); answers {id, next: [...]}
 //   {id, track: [{suits, columns, faceDown, completed, stock, moves}, ...]}
 //                                    for each position and the moves played from it up to the first that showed
 //                                    cards: where they leave the line player's own (see track); answers {id, tracks: [...]}
@@ -359,6 +361,15 @@ export function track({ suits, columns, faceDown, completed, stock, moves }, who
   return whole ? { cuts, line: first } : cuts;
 }
 
+// The line player's moves from a position, up to its first that shows cards
+// (none if it has nothing to play, or a column is too long for it).
+export function nextMoves({ suits, columns, faceDown, completed, stock }) {
+  if (columns.some(c => c.length > MAXC)) return [];
+  const moves = [];
+  playOut(makeState(columns, faceDown, completed), Uint8Array.from(stock), analysisConfig(suits), moves, true);
+  return moves;
+}
+
 if (typeof WorkerGlobalScope !== 'undefined') {
   // (Messages wait for the engine; they are still taken in order.)
   const ready = loadWasm().then(useEngine, () => {});
@@ -369,6 +380,7 @@ if (typeof WorkerGlobalScope !== 'undefined') {
     else if (data.track) postMessage({ id: data.id, tracks: data.track.map(job => track(job)) });
     else if (data.ask) postMessage({ id: data.id, asked: track(data.ask, true) });
     else if (data.roll) postMessage({ id: data.id, rolls: roll(data.roll) });
+    else if (data.next) postMessage({ id: data.id, next: nextMoves(data.next) });
     else if (data.engine) postMessage({ id: data.id, engine: engine ? 'wasm' : 'js' });
   };
 }

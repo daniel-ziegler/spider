@@ -849,6 +849,51 @@ the line. A rerun could use the times to tell what had really been seen when, an
 to keep decisions made before a card was seen on a branch that came later; this
 does not do so yet.
 
+## Comparing attempts
+
+The menu, the win dialog and the analysis have **Compare**: two attempts at a
+deal side by side, the game on the board against the computer's game, a
+friend's, or another win of the player's own (`static/compare.js`,
+`compare-core.js`, `test/compare.mjs`).
+
+Lines are lined up by the positions they share, not by their moves. Attempts
+at a deal have the same cards in the same places, so two positions are the same
+if each column with cards face down has the same cards face up in the same
+place, and the columns with none hold the same cards in any order (the
+`positionKey`; positions with nothing left hidden are not counted, since every
+win ends on the same empty board). The moves between two shared positions are moves in another
+order, or moves back to where a line was, and count for nothing. So only the
+last position shared is a real choice, and there is one per pair of lines. Each
+side's moves up to the next card they show are played out from it in the same
+shuffles of the cards not seen there (as a mistake is measured), so nothing
+either line turned up later is used.
+
+That is mostly all exact positions can say: of 30 pairs from real games (20 of
+two players, 10 of a player and the computer) most shared nothing after the
+first few moves, and by the first deal 4 to 10 of the 10 columns differed in 25
+of them. After the split the lines are compared deal by deal, which is what they
+have in common: what stood at each deal, and how far each part moved the gap
+between their chances of winning by the network. The parts that moved it most are
+picked out, each with that side's worst stretch to look at. They are pointers and
+not measurements, and part of what moves the gap is the cards. (Splitting each
+part into what the moves did and what the cards did, as the curve does, was tried
+and dropped: over a part the two came out large and opposite, up to moves −102
+and cards +63 on a real game. The gap adds those back together.)
+
+Free columns are interchangeable only until the next deal, which puts a card on
+each by its place: if both lines deal from one position with such columns in
+different places, the same choice gets different cards, and the page says there
+was no choice there.
+
+The computer plays as the analysis's games do, from one card shown to the next,
+seeing only what is face up, in a worker, and the game is kept in the browser
+(30 of them). There is no chance in it, so it is the one game it plays on those
+cards. A game still being played asks first, since this shows the cards to come.
+
+`GET /api/attempts/{game}/{suits}/{seed}` gives others' lines only to a player
+who has finished the deal, by winning it or having a game of it marked as lost:
+everyone's best win and others' lost games. A game in progress is never given.
+
 ## Offline, and as an app on a phone
 
 A service worker (`static/sw.js`) keeps the whole site in the browser, so

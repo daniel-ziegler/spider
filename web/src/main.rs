@@ -395,6 +395,62 @@ async fn get_results(State(app): AppState, headers: HeaderMap, Path((game, suits
     results(&app, &user, &game, suits, seed).map(Json)
 }
 
+/// The finished attempts at a deal that a player may look at, line by line:
+/// everyone's best win, others' games given up as lost, and the player's own
+/// other wins. Only for a player who has finished the deal, by winning it or
+/// by having a game of it marked as lost: until then these would give it away,
+/// and nobody's game in progress is ever shown. None if the player has not.
+fn attempts_of(db: &Connection, user: i64, game: &str, suits: u8, seed: i64) -> rusqlite::Result<Option<Value>> {
+    let finished: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM wins WHERE user_id = ?1 AND game = ?2 AND suits = ?3 AND seed = ?4)
+             OR EXISTS (SELECT 1 FROM games WHERE user_id = ?1 AND game = ?2 AND suits = ?3 AND seed = ?4 AND json_extract(state, '$.lost'))",
+        params![user, game, suits, seed],
+        |r| r.get(0),
+    )?;
+    if !finished {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    let mut stmt = db.prepare(
+        "SELECT u.username, w.move_list, w.real_undos, w.created_at, w.user_id = ?1
+         FROM wins w JOIN users u ON u.id = w.user_id
+         WHERE w.game = ?2 AND w.suits = ?3 AND w.seed = ?4
+           AND (w.user_id = ?1 OR w.id = (SELECT b.id FROM wins b WHERE b.user_id = w.user_id AND b.game = ?2 AND b.suits = ?3 AND b.seed = ?4
+                                          ORDER BY b.real_undos, b.moves, b.id LIMIT 1))
+         ORDER BY w.user_id = ?1, w.real_undos, w.moves, w.created_at",
+    )?;
+    for row in stmt.query_map(params![user, game, suits, seed], |r| {
+        Ok(json!({
+            "username": r.get::<_, String>(0)?,
+            "moves": r.get::<_, String>(1)?,
+            "real_undos": r.get::<_, i64>(2)?,
+            "at": r.get::<_, i64>(3)?,
+            "mine": r.get::<_, bool>(4)?,
+            "won": true,
+        }))
+    })? {
+        out.push(row?);
+    }
+    let mut stmt = db.prepare(
+        "SELECT u.username, json_extract(g.state, '$.moves'), g.updated_at
+         FROM games g JOIN users u ON u.id = g.user_id
+         WHERE g.user_id != ?1 AND g.game = ?2 AND g.suits = ?3 AND g.seed = ?4 AND json_extract(g.state, '$.lost') AND json_extract(g.state, '$.moves') != ''
+           AND NOT EXISTS (SELECT 1 FROM wins w WHERE w.user_id = g.user_id AND w.game = ?2 AND w.suits = ?3 AND w.seed = ?4)",
+    )?;
+    for row in stmt.query_map(params![user, game, suits, seed], |r| {
+        Ok(json!({ "username": r.get::<_, String>(0)?, "moves": r.get::<_, String>(1)?, "at": r.get::<_, i64>(2)?, "mine": false, "won": false }))
+    })? {
+        out.push(row?);
+    }
+    Ok(Some(json!({ "attempts": out })))
+}
+
+async fn get_attempts(State(app): AppState, headers: HeaderMap, Path((game, suits, seed)): Path<(String, u8, u64)>) -> ApiResult<Json<Value>> {
+    let user = require_user(&app, &headers)?;
+    let found = attempts_of(&app.db.lock().unwrap(), user.id, &game, suits, seed as i64)?;
+    found.map(Json).ok_or_else(|| ApiError(StatusCode::FORBIDDEN, "finish this deal to see the other attempts".into()))
+}
+
 /// A page from before the moves had times sends a game without them: the
 /// ones the server has stay (they say which moves they mean; the next page
 /// that merges the game takes those that still apply).
@@ -577,6 +633,7 @@ async fn main() {
         .route("/settings", put(put_settings))
         .route("/wins", post(record_win))
         .route("/results/{game}/{suits}/{seed}", get(get_results))
+        .route("/attempts/{game}/{suits}/{seed}", get(get_attempts))
         .route("/games/{game}/{suits}/{seed}", get(get_game).put(put_game))
         .route("/dailies", get(dailies))
         .with_state(app);
@@ -691,6 +748,42 @@ mod tests {
     fn tree_times() {
         let out = std::process::Command::new("node").arg("test/trees.mjs").output().expect("node is needed for this test");
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// test/compare.mjs: lining up two attempts at a deal.
+    #[test]
+    fn comparing_attempts() {
+        let out = std::process::Command::new("node").arg("test/compare.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Others' lines only once the deal is finished, and never a game in progress.
+    #[test]
+    fn attempts_are_hidden_until_the_deal_is_finished() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        for (id, name) in [(1, "a"), (2, "b"), (3, "c"), (4, "d")] {
+            db.execute("INSERT INTO users (id, username, pw_hash) VALUES (?1, ?2, '')", params![id, name]).unwrap();
+        }
+        let game = |user: i64, state: &str| {
+            db.execute("INSERT INTO games (user_id, game, suits, seed, state) VALUES (?1, 'spider', 4, 7, ?2)", params![user, state]).unwrap();
+        };
+        game(1, r#"{"moves":"0>1:1"}"#); // in progress
+        game(2, r#"{"moves":"d","lost":true}"#);
+        game(3, r#"{"moves":"0>2:1"}"#); // in progress
+        db.execute("INSERT INTO wins (user_id, game, suits, seed, moves, real_undos, undos, move_list) VALUES (4, 'spider', 4, 7, 2, 0, 0, 'd,d')", []).unwrap();
+        // Unfinished: nothing.
+        assert!(attempts_of(&db, 1, "spider", 4, 7).unwrap().is_none());
+        assert!(attempts_of(&db, 3, "spider", 4, 7).unwrap().is_none());
+        // Lost: the win and no game in progress, and not its own.
+        let seen = attempts_of(&db, 2, "spider", 4, 7).unwrap().unwrap();
+        let names: Vec<_> = seen["attempts"].as_array().unwrap().iter().map(|a| a["username"].as_str().unwrap()).collect();
+        assert_eq!(names, ["d"]);
+        // Won: the lost game and its own win.
+        let seen = attempts_of(&db, 4, "spider", 4, 7).unwrap().unwrap();
+        let names: Vec<_> = seen["attempts"].as_array().unwrap().iter().map(|a| a["username"].as_str().unwrap()).collect();
+        assert_eq!(names, ["d", "b"]);
+        assert_eq!(seen["attempts"][1]["won"], false);
     }
 
     /// A game sent without times keeps the ones on the server; times sent win.

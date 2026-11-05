@@ -68,6 +68,7 @@ let keyboardUsed = store.get('spider:keyboard', false); // then columns show the
 let finish = null; // once every card is dealt and face up: {key, line}, line being a winning line once one is found
 let finishing = false; // while auto-complete plays its line
 let L; // layout, see computeLayout
+let comparing = null; // while two attempts at the deal are being compared (compare.js), in the place of the board
 let review = null; // while the game is being analysed (analysis.js): the board shows its positions and is not played on
 let tree = null; // the undo tree, while it is open (tree.js)
 
@@ -170,7 +171,7 @@ function sync(leaving = false) {
   unsynced = false;
   syncedAt = Date.now();
   const body = JSON.stringify(snapshot());
-  fetch(`/api/games/${apiPath(g)}`, {
+  return fetch(`/api/games/${apiPath(g)}`, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body,
     keepalive: leaving && body.length < 60000, // browsers refuse to keep bigger requests alive
   }).then(res => { if (!res.ok && res.status !== 401) unsynced = true; }, () => { unsynced = true; }); // the next change tries again
@@ -578,6 +579,7 @@ function warnLost() {
 // position it is looking at (review.shown), and the game is not played on.
 async function analyze() {
   if (review || view !== 'game' || g.freecell || finishing || !g.history.length) return;
+  closeCompare();
   if (dialog.open) dialog.close();
   const deal = { game: g.game, suits: g.suits, seed: g.seed }, moves = g.moves();
   let open;
@@ -589,10 +591,51 @@ async function analyze() {
   $('#dangler').hidden = true;
   // (Over and not won: marked as no longer to be won, or with nothing left to play.)
   const lost = !g.isWon() && (!$('#fate').hidden || !g.hintMoves().length);
-  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview, play: playFromReview });
+  review = open({ suits: g.suits, seed: g.seed, moves, undos: undoCount(), lost, cardName, render, close: closeReview, play: playFromReview, compare: compareAttempts });
   document.body.dataset.review = '';
   computeLayout(); // (the board is lower with the review under it)
   render();
+}
+
+// Two attempts at this deal side by side (compare.js), in the place of the
+// board. The computer's game shows the cards to come, so a game still being
+// played asks first; friends' games are the server's to give (main.rs: attempts_of).
+async function compareAttempts() {
+  if (comparing || view !== 'game' || g.freecell || finishing || !g.history.length) return;
+  if (dialog.open) dialog.close();
+  const over = g.isWon() ? 'won' : !$('#fate').hidden || lostOnce || !g.hintMoves().length ? 'lost' : '';
+  if (!over && !await confirmDialog('Compare this game?', 'It shows the computer\'s whole game of this deal, and with it the cards still to come in yours.', 'Compare', ['c'])) return;
+  let open;
+  try { ({ open } = await import('./compare.js')); } catch { return flash('Could not load the comparison'); }
+  if (comparing || view !== 'game') return;
+  closeReview();
+  endDrag();
+  press = sel = hint = null;
+  clearFlash();
+  $('#dangler').hidden = true;
+  const deal = apiPath(g);
+  comparing = open({
+    suits: g.suits, seed: g.seed, store, cardName,
+    mine: { moves: g.moves(), undos: realUndoCount(), over },
+    attempts: async () => {
+      if (!me) return { why: 'Log in for friends\' games' };
+      try {
+        await sync();
+        return await api('GET', `/attempts/${deal}`);
+      } catch (e) { return { why: e.status === 403 ? 'Finish this deal for friends\' games' : 'Friends\' games need the network' }; }
+    },
+    close: closeCompare,
+    analyze: () => { closeCompare(); analyze(); },
+  });
+  document.body.dataset.compare = '';
+}
+
+function closeCompare() {
+  if (!comparing) return;
+  comparing.destroy();
+  comparing = null;
+  delete document.body.dataset.compare;
+  if (view === 'game') { computeLayout(); render(); }
 }
 
 // The undo tree, beside the board or under it (tree.js).
@@ -614,6 +657,7 @@ async function toggleTree() {
 }
 
 function closeReview() {
+  closeCompare();
   if (!review) return;
   review.destroy();
   review = null;
@@ -706,10 +750,11 @@ function showWinDialog(win, body) {
       <b>${plural(win.moves.split(',').length, 'move')}</b> ·
       <b>${plural(win.real_undos, 'undo')}</b>${win.game === 'spider' ? ` <span class="dim">(${plural(win.undos - win.real_undos, 'free undo')})</span>` : ''}</p>
     <div>${body}</div>
-    <div class="row"><button data-close>Look at the board</button>${win.game === 'spider' ? '<button data-analyze>Analyze</button>' : ''}<button class="primary" data-home>More games</button></div>`,
+    <div class="row"><button data-close>Look at the board</button>${win.game === 'spider' ? '<button data-analyze>Analyze</button><button data-compare>Compare</button>' : ''}<button class="primary" data-home>More games</button></div>`,
   e => {
     if (e.target.closest('[data-home]')) showPage('home', true);
     if (e.target.closest('[data-analyze]')) analyze();
+    if (e.target.closest('[data-compare]')) compareAttempts();
     if (e.target.closest('[data-login]')) accountDialog('login');
   });
 }
@@ -1096,6 +1141,7 @@ function menuDialog() {
     ['restart', 'Restart this deal', playing && g.canUndo()],
     ['results', 'Results for this deal', playing && g.isWon()],
     ['analyze', 'Analyze this game', playing && !g.freecell && g.history.length > 0 && !review],
+    ['compare', 'Compare attempts at this deal', playing && !g.freecell && g.history.length > 0 && !comparing],
     ['tree', tree ? 'Hide the undo tree' : 'Undo tree: every line played', playing && !review],
     ['link', 'Copy link to this deal', playing],
     ['settings', 'Settings', true],
@@ -1114,6 +1160,7 @@ function menuDialog() {
       case 'restart': return restart();
       case 'results': return onWin();
       case 'analyze': return analyze();
+      case 'compare': return compareAttempts();
       case 'tree': return toggleTree();
       case 'link': return copyLink();
       case 'settings': return settingsDialog();
@@ -1545,6 +1592,7 @@ function changeCount(d) {
 document.addEventListener('keydown', e => {
   if (dialog.open || finishing || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
+  if (comparing) return comparing.key(e);
   if (review) return review.key(e);
   if (view !== 'game') {
     if (e.target.closest?.('input, select')) return;

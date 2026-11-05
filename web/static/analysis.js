@@ -35,7 +35,7 @@ const VALUES = 6; // positions valued in one piece of work
 const ROLL_WEIGHT = 3; // a game played out (to the end, or as far as it is and then valued) against a position's valuing, for the progress bar
 
 let fetched = null; // the promise of the network's bytes (one network for every number of suits)
-function fetchNet() {
+export function fetchNet() {
   if (!fetched) {
     fetched = fetch(`/nets/value.bin?${NET_VERSION}`).then(res => {
       if (!res.ok) throw new Error(res.statusText);
@@ -47,7 +47,7 @@ function fetchNet() {
 }
 
 // Workers that take one piece of work at a time, in the order given.
-class Pool {
+export class Pool {
   constructor(n, net, suits, onError) {
     this.queue = [];
     this.jobs = new Map();
@@ -109,7 +109,7 @@ const points = x => `${x < -0.005 ? '−' : x > 0.005 ? '+' : ''}${Math.abs(Math
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 // Open the analysis of the moves of a deal: ctx is {suits, seed, moves,
-// undos, lost, cardName, render, close, play} (lost: the game is over and not won:
+// undos, lost, cardName, render, close, play, compare} (lost: the game is over and not won:
 // it can no longer be won, or nothing is left to play; play: the game is to
 // be played on from the position on the board). Returns what app.js draws and asks of it:
 // shown (the position on the board), line (the moves from the deal to it),
@@ -151,6 +151,7 @@ export function open(ctx) {
       <span class="rv-nav"><button data-go="start" title="The deal (Home)">⏮&#xFE0E;</button><button data-go="-1" title="Back a move (←)">◀&#xFE0E;</button><button data-go="1" title="On a move (→)">▶&#xFE0E;</button><button data-go="end" title="The end (End)">⏭&#xFE0E;</button><button data-ask title="Show at every position what the computer would play there (? or C)">?<span class="long"> Computer's move</span></button></span>
       <span class="rv-move"></span>
       <span class="rv-status"><span class="rv-bar"><i></i></span><span class="rv-text"></span></span>
+      <button data-compare title="Side by side with another attempt at this deal: the computer's, or a friend's">Compare</button>
       <button data-play title="Play on from the position on the board: back to it in the game, as undoing would be, or on along the other line it is on (P)">Play<span class="long"> from here</span></button>
       <button class="primary" data-close title="Close the analysis (Esc)">Back<span class="long"> to the game</span></button>
     </div>
@@ -526,6 +527,7 @@ export function open(ctx) {
     const b = e.target.closest('button');
     if (!b) return;
     if ('close' in b.dataset) ctx.close();
+    else if ('compare' in b.dataset) ctx.compare();
     else if ('play' in b.dataset) ctx.play();
     else if (b.dataset.key) pick(+b.dataset.key);
     else if (b.dataset.view) view(b.dataset.view);
