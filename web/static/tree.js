@@ -32,6 +32,15 @@ const GUTTER = 40; // for the move numbers
 
 // What a move does, said before and after it is played on `copy` (a game of
 // the same deal, walked over the tree).
+// When a move was first played (node.t, tenths of a second), as a person says it.
+function ago(t) {
+  const s = Date.now() / 1000 - t / 10, unit = (n, name) => `${n} ${name}${n === 1 ? '' : 's'} ago`;
+  if (s < 60) return 'just now';
+  if (s < 3600) return unit(Math.floor(s / 60), 'minute');
+  if (s < 86400) return unit(Math.floor(s / 3600), 'hour');
+  return unit(Math.floor(s / 86400), 'day');
+}
+
 function describe(copy, mv, cardName) {
   if (mv.deal) return 'Deal';
   if (copy.freecell) {
@@ -155,6 +164,7 @@ export function open(ctx) {
     if (i.lost) bits.push('<span class="k-lost">no moves left</span>');
     if (n.children.length > 1) bits.push(`${n.children.length} lines from here`);
     bits.push(here ? 'on the board' : onLine ? 'played' : 'undone');
+    if (n.t) bits.push(ago(n.t));
     infoLine.innerHTML = bits.join(' · ');
   }
 

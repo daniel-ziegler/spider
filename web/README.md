@@ -19,6 +19,22 @@ number of **real undos**: undos that took back a card turned over or a deal.
 Restarting a deal counts as undoing every move back to the start. Results for
 a deal are shown only to players who have won it.
 
+Since 2026-11-04 the tree also keeps when each move was **first played**, for
+looking at how a game went (what had been seen by a decision; the order lines
+were tried in; how long a move took). A saved game's `times` is a second tree
+beside `tree`, in the same form but with only the moves that have a time and
+those on the way to them, each with `@` and its time in tenths of a second
+since 1970 by the player's clock, less the time of the nearest move above it
+that has one (so it can be negative if the clock went back):
+`5>6:1@17931234567,2>5:3@42(d@80|1>2:1@1500)`. It is a separate field because
+a page from before it, which may still be open, would take `@` in `tree` for
+a bad save; it names its moves, rather than following `tree`'s order, so that
+it holds for a tree that has changed since. Going back into a move keeps its
+first time, games played before have no times, and merging two copies keeps a
+move's earlier time. Such a page sends games without `times`, and the server
+keeps the ones it has (`keep_times`). Nothing about the rules, undos or wins
+reads the times.
+
 The **undo tree** (menu, or <kbd>t</kbd>; `static/tree.js`, `tree.css`,
 loaded when opened) draws that tree beside the board, or under it on a
 narrow screen: a row per move, each node's longest branch going straight on

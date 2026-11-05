@@ -8,7 +8,7 @@
 //
 // A deal is {game: 'spider' or 'freecell', suits, seed} (FreeCell always has
 // 4 suits): g is one, and so are a win and a daily challenge.
-import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves, parseTree, mergeTree, treeText } from './game.js';
+import { Game, NUM_COLS, DEAL, suitOf, rankOf, encodeMoves, parseMoves, parseTree, mergeTree, treeText, timesText, addTimes } from './game.js';
 import { FreeCell, COLS, HOME, MAX_DEAL, follows } from './freecell.js';
 
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -106,7 +106,8 @@ const realUndoCount = () => base[1] + g.realUndos;
 // The game as saved here and on the server: the tree of every move played,
 // and the line of it that is on the board.
 function snapshot() {
-  return { tree: g.treeText(), moves: encodeMoves(g.moves()), base, recorded, at: changedAt, ...(lostOnce && { lost: true }) };
+  const times = timesText(g.root);
+  return { tree: g.treeText(), ...(times && { times }), moves: encodeMoves(g.moves()), base, recorded, at: changedAt, ...(lostOnce && { lost: true }) };
 }
 
 // Set up g from a snapshot (or nothing, for a new game).
@@ -119,13 +120,13 @@ function restore(deal, s) {
   if (!s) return;
   try {
     if (typeof s.tree === 'string') {
-      g.adopt(parseTree(s.tree));
-      for (const mv of parseMoves(s.moves)) if (g.apply(mv)) throw new Error('bad save');
+      g.adopt(addTimes(parseTree(s.tree), s.times));
+      for (const mv of parseMoves(s.moves)) if (g.apply(mv, 0)) throw new Error('bad save');
       base = [s.base?.[0] | 0, s.base?.[1] | 0];
     } else {
       // A save from before the tree: one line of moves, the undone ones last.
       const redo = parseMoves(s.redo);
-      for (const mv of [...parseMoves(s.moves), ...redo]) if (g.apply(mv)) throw new Error('bad save');
+      for (const mv of [...parseMoves(s.moves), ...redo]) if (g.apply(mv, 0)) throw new Error('bad save');
       for (const _ of redo) g.undo();
       base = [Math.max(0, (s.undos | 0) - g.undos), Math.max(0, (s.realUndos | 0) - g.realUndos)];
     }
@@ -188,16 +189,17 @@ async function pull() {
     if (local.tree) queueSync();
     return;
   }
-  if (remote.tree === local.tree && remote.moves === local.moves) return;
+  if (remote.tree === local.tree && remote.moves === local.moves && (remote.times ?? '') === (local.times ?? '')) return;
   try {
     const theirs = changedAt === was && remote.at > local.at; // else a move was made here meanwhile, or last
     const [a, b] = theirs ? [remote, local] : [local, remote];
-    const tree = treeText(mergeTree(parseTree(a.tree), parseTree(b.tree)));
-    if (!theirs && tree === local.tree) return queueSync(); // nothing new there
+    const merged = mergeTree(addTimes(parseTree(a.tree), a.times), addTimes(parseTree(b.tree), b.times));
+    const tree = treeText(merged), times = timesText(merged);
+    if (!theirs && tree === local.tree && times === (local.times ?? '')) return queueSync(); // nothing new there
     endDrag();
     press = sel = hint = null;
     restore(deal, {
-      tree, moves: a.moves, recorded: a.recorded || b.recorded, lost: a.lost || b.lost,
+      tree, times, moves: a.moves, recorded: a.recorded || b.recorded, lost: a.lost || b.lost,
       base: [0, 1].map(i => Math.max(a.base?.[i] | 0, b.base?.[i] | 0)), at: Math.max(a.at || 0, b.at || 0),
     });
   } catch {

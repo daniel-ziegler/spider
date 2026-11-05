@@ -40,8 +40,11 @@ export function parseMoves(s) {
 
 // A node of the tree of moves played from a deal: its move, whether it has
 // ever been undone, whether it turned a card over or dealt (known once it has
-// been played), and the moves played after it. The root has only children.
-const newNode = (mv, undone = false) => ({ mv, key: encodeMove(mv), undone, real: false, children: [] });
+// been played), when it was first played (t: tenths of a second since 1970 by
+// the player's clock, 0 if not known: played before the times were kept), and
+// the moves played after it. The root has only children.
+const newNode = (mv, undone = false, t = 0) => ({ mv, key: encodeMove(mv), undone, real: false, t, children: [] });
+const tick = () => Math.round(Date.now() / 100);
 
 // A tree as text. A move is followed by "!" if it has been undone, then by
 // what was played after it: ",move" if one thing, "(a|b)" if several.
@@ -52,42 +55,78 @@ export function treeText(root) {
   return siblings(root);
 }
 
+// The times of a tree as text, apart from treeText's (which an older page
+// could not read, and may still be open, or come back): the moves that have a
+// time and those on the way to them, each followed by "@" and its time less
+// that of the nearest move above it with one. It says which moves it means,
+// so it still holds for a tree that has since changed. parseTree reads it.
+export function timesText(root) {
+  const siblings = (n, t) => n.children.map(c => branch(c, t)).filter(Boolean);
+  const branch = (n, above) => {
+    const kids = siblings(n, n.t || above);
+    if (!n.t && !kids.length) return '';
+    return n.key + (n.t ? `@${n.t - above}` : '')
+      + (kids.length > 1 ? `(${kids.join('|')})` : kids.length ? `,${kids[0]}` : '');
+  };
+  return siblings(root, 0).join('|');
+}
+
 export function parseTree(text) {
   let i = 0;
-  const siblings = () => {
-    const out = [branch()];
-    while (text[i] === '|') { i++; out.push(branch()); }
+  const siblings = above => {
+    const out = [branch(above)];
+    while (text[i] === '|') { i++; out.push(branch(above)); }
     return out;
   };
-  const branch = () => {
-    const re = /(d|\d+>\d+:\d+)(!?)/y;
+  const branch = above => {
+    const re = /(d|\d+>\d+:\d+)(!?)(?:@(-?\d+))?/y;
     re.lastIndex = i;
     const m = re.exec(text);
     if (!m) throw new Error(`bad tree at ${i}`);
     i = re.lastIndex;
-    const node = newNode(parseMoves(m[1])[0], !!m[2]);
-    if (text[i] === ',') { i++; node.children = [branch()]; }
+    const t = m[3] ? above + +m[3] : 0;
+    const node = newNode(parseMoves(m[1])[0], !!m[2], t);
+    if (text[i] === ',') { i++; node.children = [branch(t || above)]; }
     else if (text[i] === '(') {
       i++;
-      node.children = siblings();
+      node.children = siblings(t || above);
       if (text[i++] !== ')') throw new Error(`bad tree at ${i - 1}`);
     }
     return node;
   };
-  const children = text ? siblings() : [];
+  const children = text ? siblings(0) : [];
   if (i !== text.length) throw new Error(`bad tree at ${i}`);
   return mergeTree({ children: [] }, { children }); // merges any repeated moves
 }
 
-// Add the moves of the tree `from` to the tree `into`.
+const earlier = (a, b) => (a && b ? Math.min(a, b) : a || b);
+
+// Add the moves of the tree `from` to the tree `into`; a move in both keeps
+// the earlier time.
 export function mergeTree(into, from) {
   for (const n of from.children) {
     let mine = into.children.find(m => m.key === n.key);
     if (!mine) into.children.push(mine = newNode(n.mv));
     mine.undone ||= n.undone;
+    mine.t = earlier(mine.t, n.t);
     mergeTree(mine, n);
   }
   return into;
+}
+
+// Give the moves of a tree their times from timesText's text (moves it has
+// that the tree has not are left out). Times that cannot be read are no times.
+export function addTimes(root, text) {
+  const walk = (into, from) => {
+    for (const n of from.children) {
+      const mine = into.children.find(m => m.key === n.key);
+      if (!mine) continue;
+      mine.t = earlier(mine.t, n.t);
+      walk(mine, n);
+    }
+  };
+  try { if (text) walk(root, parseTree(text)); } catch { /* no times */ }
+  return root;
 }
 
 // Longest same-suit descending run at the top of col, above the face-down cards.
@@ -130,13 +169,14 @@ export class Played {
   }
 
   // Apply a move; returns an error message, or null. A move already in the
-  // tree here goes down that branch, so what followed it can be redone.
-  apply(mv) {
+  // tree here goes down that branch, so what followed it can be redone. (`at`:
+  // when a move new to the tree was played; 0 when replaying a save.)
+  apply(mv, at = tick()) {
     const err = this.check(mv);
     if (err) return err;
     const here = this.line.at(-1), key = encodeMove(mv);
     let node = here.children.find(n => n.key === key);
-    if (!node) here.children.push(node = newNode(mv));
+    if (!node) here.children.push(node = newNode(mv, false, at));
     this.enter(node);
     return null;
   }

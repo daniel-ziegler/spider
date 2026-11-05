@@ -8,9 +8,9 @@
 // "The chance of winning" is that of a computer player that sees only the
 // cards face up and takes nothing back (the line player, lineplayer.js); the
 // game analysed is the line of moves on the board, as if it had been played
-// straight through (moves taken back are not looked at: the saved tree does
-// not say when in the game they were played, so what the player had seen of
-// the face-down cards by then is not known).
+// straight through (moves taken back are not looked at: what the player had
+// seen of the face-down cards by then is known only where the tree keeps the
+// moves' times, and this does not use them).
 //
 // It comes in two passes, both in workers (analysis-worker.js) and both shown
 // as they arrive:

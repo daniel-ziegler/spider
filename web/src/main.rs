@@ -395,6 +395,19 @@ async fn get_results(State(app): AppState, headers: HeaderMap, Path((game, suits
     results(&app, &user, &game, suits, seed).map(Json)
 }
 
+/// A page from before the moves had times sends a game without them: the
+/// ones the server has stay (they say which moves they mean; the next page
+/// that merges the game takes those that still apply).
+fn keep_times(state: &mut Value, old: Option<&str>) {
+    if state.get("times").is_some() {
+        return;
+    }
+    let times = old.and_then(|o| serde_json::from_str::<Value>(o).ok()).and_then(|mut o| o.get_mut("times").map(Value::take));
+    if let (Some(times), Some(state)) = (times, state.as_object_mut()) {
+        state.insert("times".into(), times);
+    }
+}
+
 async fn put_game(
     State(app): AppState,
     headers: HeaderMap,
@@ -402,11 +415,24 @@ async fn put_game(
     Json(state): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let user = require_user(&app, &headers)?;
-    let text = state.to_string();
-    if !is_deal(&game, suits, seed) || !state.is_object() || text.len() > MAX_GAME_STATE {
+    let mut state = state;
+    if !is_deal(&game, suits, seed) || !state.is_object() {
         return Err(bad("not a game"));
     }
-    app.db.lock().unwrap().execute(
+    let db = app.db.lock().unwrap();
+    let old: Option<String> = db
+        .query_row(
+            "SELECT state FROM games WHERE user_id = ?1 AND game = ?2 AND suits = ?3 AND seed = ?4",
+            params![user.id, game, suits, seed as i64],
+            |r| r.get(0),
+        )
+        .optional()?;
+    keep_times(&mut state, old.as_deref());
+    let text = state.to_string();
+    if text.len() > MAX_GAME_STATE {
+        return Err(bad("not a game"));
+    }
+    db.execute(
         "INSERT INTO games (user_id, game, suits, seed, state) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (user_id, game, suits, seed) DO UPDATE SET state = excluded.state, updated_at = unixepoch()",
         params![user.id, game, suits, seed as i64, text],
@@ -657,6 +683,31 @@ mod tests {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let n: Vec<u32> = String::from_utf8(out.stdout).unwrap().split_whitespace().map(|n| n.parse().unwrap()).collect();
         assert!(n[0] >= 100 && n[1] >= 100, "too few positions judged: {n:?}");
+    }
+
+    /// test/trees.mjs: the times of a tree of moves, saved, merged and read
+    /// by a page that does not know them.
+    #[test]
+    fn tree_times() {
+        let out = std::process::Command::new("node").arg("test/trees.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A game sent without times keeps the ones on the server; times sent win.
+    #[test]
+    fn a_page_without_times_does_not_wipe_them() {
+        let old = r#"{"tree":"d","times":"d@1"}"#;
+        let mut s = json!({"tree": "d,d"});
+        keep_times(&mut s, Some(old));
+        assert_eq!(s, json!({"tree": "d,d", "times": "d@1"}));
+        let mut s = json!({"tree": "d", "times": "d@2"});
+        keep_times(&mut s, Some(old));
+        assert_eq!(s["times"], "d@2");
+        let mut s = json!({"tree": "d"});
+        keep_times(&mut s, None);
+        assert_eq!(s, json!({"tree": "d"}));
+        keep_times(&mut s, Some("{}"));
+        assert_eq!(s, json!({"tree": "d"}));
     }
 
     /// A database from before deals had a game keeps its wins and saved games.
