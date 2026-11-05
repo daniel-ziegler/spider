@@ -788,7 +788,7 @@ function confirmDialog(title, text, ok, keys = []) {
     openDialog(`<h2>${title}</h2><p>${text}</p>
       <div class="row"><button data-close>Cancel</button><button class="primary" data-ok>${ok}</button></div>`,
     e => { if (e.target.closest('[data-ok]')) done(true); });
-    dialog.onclose = () => resolve(false);
+    dialog.onclose = () => { if (!dialog.open) resolve(false); }; // (not the close of the dialog before this one, which comes late)
     dialog.onkeydown = e => { if (keys.includes(e.key)) { e.preventDefault(); done(true); } };
     dialog.querySelector('[data-ok]').focus();
   });
