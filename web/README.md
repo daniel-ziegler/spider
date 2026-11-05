@@ -815,6 +815,40 @@ cd web/tools/dailies && cargo run --release -- medium 2027-01-01 2027-03-31
 kept). `cargo test` fails once today is past the end of the medium
 ones too.
 
+## Playstyle: what two players do wrong over many decisions
+
+`tools/playstyle/` looks for what a player does systematically wrong, on
+all of their saved games. The analysis's mistake cards show single large
+errors; this adds up many small ones. To run it on fresh data:
+
+```
+web/tools/playstyle/run.sh DIR
+```
+
+(the live database, then steps 1 and 2, the fit, the tables and `DIR/index.html`;
+`DIR/findings.html`, if present, is put at the page's head). Steps 1 and 2 took
+22 minutes on a rented 30-vCPU box, where `vm.max_map_count` must be raised
+(`sudo sysctl -w vm.max_map_count=2000000`) or thirty worker threads run out of
+memory maps; `check.mjs DB` compares `board.mjs` with the game's rules.
+
+A decision is a stretch, as in the analysis. The tests are T1, the rate of
+finding a line to a clean turn, a suit or an empty column, by its length and
+kind (`board.mjs`: `reach`), against the line player on the same positions; T2,
+a conditional logit of the end chosen against a sample of those reachable
+(`fit.py`), with the weights compared with the line player's and with the
+network's choice; T3, every departure from the line player played out both
+ways; T4, named questions (`QUESTIONS`) with both moves played out; and T5, all
+of them on the line player with a flaw put in (`planted.mjs`), to see which of
+them can find one. Playouts are the analysis's: the same shuffles both ways,
+eight moves that show cards, then the network. The searches only ever see cards
+face up.
+
+Saved trees have had the time of each move only since 2026-11-04; before that a
+decision is set aside if a branch off its line had shown a card still hidden on
+the line. A rerun could use the times to tell what had really been seen when, and
+to keep decisions made before a card was seen on a branch that came later; this
+does not do so yet.
+
 ## Offline, and as an app on a phone
 
 A service worker (`static/sw.js`) keeps the whole site in the browser, so
