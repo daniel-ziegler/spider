@@ -21,8 +21,8 @@ import { Game } from './game.js';
 // games stopped after `stop` moves that show cards and valued by the network
 // (0: played to the end), as the analysis's are.
 export const strongParams = suits => (suits > 1
-  ? { most: 6, perCol: 2, deal: true, first: 16, max: 64, zDrop: 2, zKeep: 1, stop: 8 }
-  : { most: 6, perCol: 2, deal: true, first: 32, max: 128, zDrop: 2, zKeep: 1, stop: 0 });
+  ? { most: 3, perCol: 2, deal: true, first: 16, max: 64, zDrop: 2, zKeep: 1, stop: 8 }
+  : { most: 3, perCol: 2, deal: true, first: 32, max: 128, zDrop: 2, zKeep: 1, stop: 0 });
 
 // The seed of a choice's worlds: the analysis's for the same stretch of the game.
 export const worldSeed = (seed, turn) => (Number(BigInt(seed) % 1000003n) * 131 + turn) | 0;

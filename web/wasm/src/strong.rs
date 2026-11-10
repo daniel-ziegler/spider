@@ -45,9 +45,9 @@ impl Params {
     /// strong.js's `strongParams`.
     pub fn standard(suits: u8) -> Params {
         if suits > 1 {
-            Params { most: 6, per_col: 2, deal: true, first: 16, max: 64, z_drop: 2.0, z_keep: 1.0, stop: 8 }
+            Params { most: 3, per_col: 2, deal: true, first: 16, max: 64, z_drop: 2.0, z_keep: 1.0, stop: 8 }
         } else {
-            Params { most: 6, per_col: 2, deal: true, first: 32, max: 128, z_drop: 2.0, z_keep: 1.0, stop: 0 }
+            Params { most: 3, per_col: 2, deal: true, first: 32, max: 128, z_drop: 2.0, z_keep: 1.0, stop: 0 }
         }
     }
 }
