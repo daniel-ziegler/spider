@@ -765,6 +765,13 @@ mod tests {
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 
+    /// test/strong.mjs: the stronger computer player of the comparison.
+    #[test]
+    fn stronger_player() {
+        let out = std::process::Command::new("node").arg("test/strong.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
     /// Others' lines only once the deal is finished, and never a game in progress.
     #[test]
     fn attempts_are_hidden_until_the_deal_is_finished() {

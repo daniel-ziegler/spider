@@ -12,7 +12,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 pub const NUM_COLS: usize = 10;
 pub const MAXC: usize = 48;
-const BLANK: u8 = 255;
+pub const BLANK: u8 = 255;
 pub const LEN: usize = NUM_COLS * MAXC;
 pub const DOWN: usize = LEN + NUM_COLS;
 pub const DONE: usize = DOWN + NUM_COLS;
@@ -796,6 +796,41 @@ impl Search {
         out
     }
 
+    /// The lines from the position `root` that turn a card, as the search
+    /// with `cfg` finds them: the best `most` by the evaluation where they
+    /// end, `per_col` at most turning the card of one column. Each is its
+    /// moves, (from, to, count) bytes, up to the first that turns a card.
+    pub fn leaf_lines(&mut self, root: &[u8], deals_left: usize, cfg: &Config, most: usize, per_col: usize) -> Vec<Vec<u8>> {
+        self.search(root, cfg, cfg.splits, cfg.beam);
+        let mut leaves: Vec<(i32, usize)> = (1..self.count).filter(|&k| self.nodes[k].leaf).map(|k| (self.nodes[k].value(deals_left, cfg.empty), k)).filter(|&(v, _)| v > LOST).collect();
+        leaves.sort_unstable_by_key(|&(v, k)| (std::cmp::Reverse(v), k));
+        let mut taken = [0usize; NUM_COLS];
+        let mut out = Vec::new();
+        for (_, k) in leaves {
+            if out.len() >= most {
+                break;
+            }
+            let s = &self.nodes[k].s;
+            let Some(col) = (0..NUM_COLS).find(|&c| s[DOWN + c] < root[DOWN + c]) else { continue };
+            if taken[col] >= per_col {
+                continue;
+            }
+            taken[col] += 1;
+            let line = self.line_to(k).concat();
+            let mut t = [0u8; SIZE];
+            t.copy_from_slice(root);
+            let mut n = 0;
+            for mv in line.chunks_exact(3) {
+                n += 3;
+                if apply_move(&mut t, mv[0] as usize, mv[1] as usize, mv[2] as usize, Some(BLANK)) {
+                    break;
+                }
+            }
+            out.push(line[..n].to_vec());
+        }
+        out
+    }
+
     /// The steps of the line to node k.
     fn line_to(&self, mut k: usize) -> Vec<Vec<u8>> {
         let mut steps = Vec::new();
@@ -919,9 +954,15 @@ impl Search {
     /// first move that turns a card or deals. Returns whether it stopped at
     /// a card turned, and the positions looked at. `cfg` has the
     /// configuration for each number of deals left.
-    pub fn play_out(&mut self, s: &mut [u8], stock: &[u8], cfg: &[Config; 6], mut moves: Option<&mut Vec<u8>>, to_show: bool) -> (bool, u64) {
+    pub fn play_out(&mut self, s: &mut [u8], stock: &[u8], cfg: &[Config; 6], moves: Option<&mut Vec<u8>>, to_show: bool) -> (bool, u64) {
+        self.play_on(s, stock, cfg, moves, to_show, false)
+    }
+
+    /// The same; with `dealing` the player starts out about to deal (what it
+    /// does when no line is worth playing: it tidies up and deals).
+    pub fn play_on(&mut self, s: &mut [u8], stock: &[u8], cfg: &[Config; 6], mut moves: Option<&mut Vec<u8>>, to_show: bool, dealing: bool) -> (bool, u64) {
         let mut visited = Keys::default();
-        let mut tempo = Tempo::default();
+        let mut tempo = Tempo { dealing, ..Tempo::default() };
         let (mut left, mut played) = (stock.len(), 0);
         let progress = |s: &[u8], left: usize| (s[DOWN..DOWN + NUM_COLS].iter().map(|&d| d as usize).sum::<usize>(), left, s[DONE]);
         while s[DONE] < 8 && played < 5000 {

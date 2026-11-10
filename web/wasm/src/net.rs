@@ -97,6 +97,32 @@ fn linear(inp: &[f32], t_n: usize, from: usize, w: &[f32], b: &[f32], to: usize,
     }
 }
 
+/// e to the x, from the four operations alone, so that it comes out the
+/// same to the last bit wherever this is built (the platform's own differs
+/// between WebAssembly and elsewhere, and the stronger player's games must
+/// not): x less a multiple of ln 2 is within 0.35 of zero, where the series
+/// to the 13th power is exact to the last place or so.
+fn exp(x: f64) -> f64 {
+    if x < -745.0 {
+        return 0.0;
+    }
+    if x > 709.0 {
+        return f64::INFINITY;
+    }
+    let k = (x * std::f64::consts::LOG2_E + 0.5).floor();
+    let r = (x - k * 0.693_147_180_369_123_816_49) - k * 1.908_214_929_270_587_700_02e-10;
+    let mut p = 1.0;
+    let mut i = 13.0;
+    while i > 0.0 {
+        p = 1.0 + p * r / i;
+        i -= 1.0;
+    }
+    let k = k as i64;
+    // 2^k in two steps, for the results too small for one.
+    let half = k / 2;
+    p * f64::from_bits(((1023 + half) as u64) << 52) * f64::from_bits(((1023 + k - half) as u64) << 52)
+}
+
 fn layer_norm(inp: &[f32], t_n: usize, d: usize, w: &[f32], b: &[f32], out: &mut [f32]) {
     for t in 0..t_n {
         let o = t * d;
@@ -294,7 +320,7 @@ impl Net {
                 }
                 let mut sum = 0.0f64;
                 for j in 0..t_n {
-                    let e = (score[j] as f64 - max).exp();
+                    let e = exp(score[j] as f64 - max);
                     score[j] = e as f32;
                     sum += e;
                 }
@@ -340,6 +366,6 @@ impl Net {
         for k in 0..self.d {
             z += self.head_w[k] as f64 * self.n[k] as f64;
         }
-        1.0 / (1.0 + (-z).exp())
+        1.0 / (1.0 + exp(-z))
     }
 }

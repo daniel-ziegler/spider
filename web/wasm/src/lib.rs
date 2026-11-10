@@ -10,18 +10,25 @@
 //!
 //! Built with
 //!
-//!     cargo build --release --target wasm32-unknown-unknown
+//!     cargo build --release --lib --target wasm32-unknown-unknown
 //!     cp target/wasm32-unknown-unknown/release/spider_wasm.wasm ../static/spider.wasm
+//!
+//! It also has the stronger player's part (`strong.rs`; `static/strong.js`
+//! does its choosing over the workers): the choices in a position and what
+//! one is worth in some worlds. `--bin strong` is that player whole, built
+//! for the machine it runs on, for measuring it.
 //!
 //! The interface is plain exports over buffers in the module's memory (see
 //! wasm.js): positions in lineplayer.js's layout, moves as three bytes each.
 
 use spider::vnet::{next_kind, ENC, ROWS};
 
-mod player;
-mod net;
+pub mod net;
+pub mod player;
+pub mod strong;
 
 use player::{Config, Search, DONE, SIZE};
+use strong::{Params, Strong};
 
 struct Buffers {
     state: [u8; SIZE],
@@ -30,11 +37,13 @@ struct Buffers {
     work: u64,
     enc: [u8; ENC],
     file: Vec<u8>,
-    net: Option<net::Net>,
+    strong: Option<Box<Strong>>,
     search: Option<Box<Search>>,
+    cand: Vec<u8>,
+    worth: Vec<f32>,
 }
 
-static mut BUFFERS: Buffers = Buffers { state: [0; SIZE], stock: [0; 104], moves: Vec::new(), work: 0, enc: [0; ENC], file: Vec::new(), net: None, search: None };
+static mut BUFFERS: Buffers = Buffers { state: [0; SIZE], stock: [0; 104], moves: Vec::new(), work: 0, enc: [0; ENC], file: Vec::new(), strong: None, search: None, cand: Vec::new(), worth: Vec::new() };
 
 fn buffers() -> &'static mut Buffers {
     // SAFETY: WebAssembly here runs on one thread, and each export takes
@@ -107,9 +116,9 @@ pub extern "C" fn file_ptr(len: usize) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn net_load(suits: u8) -> u32 {
     let b = buffers();
-    b.net = net::Net::new(&b.file, suits);
+    b.strong = net::Net::new(&b.file, suits).map(|net| Box::new(Strong::new(net, suits)));
     b.file = Vec::new();
-    b.net.is_some() as u32
+    b.strong.is_some() as u32
 }
 
 /// The network's chance of winning from the position encoded in the
@@ -117,9 +126,51 @@ pub extern "C" fn net_load(suits: u8) -> u32 {
 #[no_mangle]
 pub extern "C" fn win_prob() -> f64 {
     let b = buffers();
-    let net = b.net.as_mut().expect("a network loaded");
+    let net = &mut b.strong.as_mut().expect("a network loaded").net;
     let next = next_kind(&b.enc, net.suits);
     net.win_prob(&b.enc, next)
+}
+
+/// The stronger player's choices (`strong.rs`: `candidates`) in the position
+/// in the state buffer with the stock's `stock_len` cards, for the game of
+/// the network loaded: the line player's own first, with `deal` what it
+/// would play about to deal, and the best `most` lines turning a card,
+/// `per_col` at most of one column. They are left in the moves buffer one
+/// after the other, each its number of moves in two bytes (the low first)
+/// and then its moves, three bytes each. Returns how many bytes that is.
+#[no_mangle]
+pub extern "C" fn strong_candidates(stock_len: usize, most: usize, per_col: usize, deal: u32) -> usize {
+    let b = buffers();
+    let strong = b.strong.as_mut().expect("a network loaded");
+    let p = Params { most, per_col, deal: deal != 0, ..Params::standard(strong.suits) };
+    b.moves.clear();
+    for cand in strong.candidates(&b.state, &b.stock[..stock_len], &p) {
+        let n = cand.len() / 3;
+        b.moves.extend([n as u8, (n >> 8) as u8]);
+        b.moves.extend(cand);
+    }
+    b.moves.len()
+}
+
+/// Room for a choice's moves, `len` bytes.
+#[no_mangle]
+pub extern "C" fn cand_ptr(len: usize) -> *mut u8 {
+    let b = buffers();
+    b.cand = vec![0; len];
+    b.cand.as_mut_ptr()
+}
+
+/// What the moves in the choice buffer are worth from the position in the
+/// state buffer (`strong.rs`: `worth`) in the worlds from..to of `seed`, the
+/// games stopped after `stop` moves that show cards (0: played to the end):
+/// a pointer to a 32-bit float for each world.
+#[no_mangle]
+pub extern "C" fn strong_worth(stock_len: usize, seed: u32, from: usize, to: usize, stop: usize) -> *const f32 {
+    let b = buffers();
+    let strong = b.strong.as_mut().expect("a network loaded");
+    b.worth.clear();
+    strong.worth(&b.state, &b.stock[..stock_len], &b.cand, seed, from, to, stop, &mut b.worth);
+    b.worth.as_ptr()
 }
 
 const _: () = assert!(ROWS == net::ROWS);

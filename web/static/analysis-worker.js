@@ -13,6 +13,12 @@
 //                                    cards: where they leave the line player's own (see track); answers {id, tracks: [...]}
 //   {id, ask: {the same}}            the same of one position, and the line player's own line from it; answers {id, asked: {cuts, line}}
 //
+//   {id, strong: {candidates: position, most, perCol, deal}}
+//                                    the stronger player's choices there (strong.js); answers {id, cands: [[move, ...], ...]}
+//   {id, strong: {worth: position, cand, seed, from, to, stop}}
+//                                    what one of them is worth in some worlds; answers {id, worth: Float32Array}
+//                                    (both only with the WebAssembly engine: {id, error} without)
+//
 // A roll is {suits, columns, faceDown, completed, stock, moves, seed, from, to, at, reveal, stop}:
 // a position with its real cards, moves played from it (the last of which
 // may turn cards over or deal), and the worlds to play, numbered from..to. A
@@ -361,6 +367,16 @@ export function track({ suits, columns, faceDown, completed, stock, moves }, who
   return whole ? { cuts, line: first } : cuts;
 }
 
+// The stronger player's work (strong.js): its choices in a position, or what
+// one is worth in some worlds. Null without the WebAssembly engine, which has it.
+export function strong(job) {
+  if (!engine) return null;
+  const p = job.candidates ?? job.worth;
+  if (p.columns.some(c => c.length > MAXC)) return job.candidates ? [] : new Float32Array(job.to - job.from);
+  const s = makeState(p.columns, p.faceDown, p.completed), stock = Uint8Array.from(p.stock);
+  return job.candidates ? engine.strong.candidates(s, stock, job.most, job.perCol, job.deal) : engine.strong.worth(s, stock, job.cand, job.seed, job.from, job.to, job.stop);
+}
+
 // The line player's moves from a position, up to its first that shows cards
 // (none if it has nothing to play, or a column is too long for it).
 export function nextMoves({ suits, columns, faceDown, completed, stock }) {
@@ -381,6 +397,10 @@ if (typeof WorkerGlobalScope !== 'undefined') {
     else if (data.ask) postMessage({ id: data.id, asked: track(data.ask, true) });
     else if (data.roll) postMessage({ id: data.id, rolls: roll(data.roll) });
     else if (data.next) postMessage({ id: data.id, next: nextMoves(data.next) });
+    else if (data.strong) {
+      const got = strong(data.strong);
+      postMessage(got === null ? { id: data.id, error: 'no engine' } : data.strong.candidates ? { id: data.id, cands: got } : { id: data.id, worth: got });
+    }
     else if (data.engine) postMessage({ id: data.id, engine: engine ? 'wasm' : 'js' });
   };
 }

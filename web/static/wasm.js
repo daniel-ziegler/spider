@@ -8,7 +8,7 @@
 import { playOut as jsPlayOut, fastConfig, rolloutConfig, analysisConfig, SIZE } from './lineplayer.js';
 import { ENC } from './vnet.js';
 
-// The engine from spider.wasm's bytes (fetched if not given): {playOut, net(bytes, suits)}.
+// The engine from spider.wasm's bytes (fetched if not given): {playOut, net(bytes, suits), strong}.
 export async function loadWasm(bytes) {
   bytes ??= await fetch('/spider.wasm').then(res => {
     if (!res.ok) throw new Error(res.statusText);
@@ -58,5 +58,36 @@ export async function loadWasm(bytes) {
     };
   }
 
-  return { playOut, net };
+  const bytesOf = moves => moves.flatMap(mv => (mv.deal ? [255, 255, 255] : [mv.from, mv.to, mv.count]));
+  const put = (s, stock) => {
+    view(ex.state_ptr(), SIZE).set(s);
+    view(ex.stock_ptr(), stock.length).set(stock);
+  };
+
+  // The stronger player's part here (strong.js; ../wasm/src/strong.rs), for
+  // the game of the network loaded last. candidates: its choices in a
+  // position, each its moves; worth: what the moves `cand` are worth there in
+  // the worlds from..to of `seed`, a number for each.
+  const strong = {
+    candidates(s, stock, most, perCol, deal) {
+      put(s, stock);
+      const n = ex.strong_candidates(stock.length, most, perCol, deal ? 1 : 0), m = view(ex.moves_ptr(), n), out = [];
+      for (let i = 0; i < n;) {
+        const k = m[i] | m[i + 1] << 8, moves = [];
+        i += 2;
+        for (let j = 0; j < k; j++, i += 3) moves.push(m[i] === 255 ? { deal: true } : { from: m[i], to: m[i + 1], count: m[i + 2] });
+        out.push(moves);
+      }
+      return out;
+    },
+    worth(s, stock, cand, seed, from, to, stop) {
+      put(s, stock);
+      const bytes = bytesOf(cand);
+      view(ex.cand_ptr(bytes.length), bytes.length).set(bytes);
+      const at = ex.strong_worth(stock.length, seed, from, to, stop);
+      return new Float32Array(ex.memory.buffer, at, to - from).slice();
+    },
+  };
+
+  return { playOut, net, strong };
 }
