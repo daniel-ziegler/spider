@@ -10,9 +10,15 @@ import { readLine, relate, nextShow, rows, keyRows, valueJobs, differing, comput
 import { Pool, fetchNet } from './analysis.js';
 import { paired, searchFor } from './analysis-core.js';
 import { parseMoves, encodeMoves, suitOf, rankOf } from './game.js';
+import { strongGame } from './strong.js';
 
 const VALUES = 6; // positions valued in one piece of work
-const CACHE = 'spider:computer:1', KEEP = 30; // the computer's games kept here (a new number when it plays differently)
+const CACHE = 'spider:computer:2', KEEP = 30; // the computer's games kept here (a new number when it plays differently)
+// The computer plays what the analysis rates best at every choice (strong.js),
+// which takes a pool of workers the better part of a minute; where that
+// would be minutes (few cores, or a phone) the line player's own game, there
+// at once, is what is shown unless the other is asked for or kept from before.
+const slow = () => (navigator.hardwareConcurrency || 4) < 8 || matchMedia('(pointer: coarse)').matches;
 
 let styled = null;
 function style() {
@@ -38,8 +44,8 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // Returns {key(event), destroy(), state}.
 export function open(ctx) {
   const { suits, seed, cardName, store } = ctx;
-  const choices = [{ id: 'mine', name: 'You', label: `This game (${plural(ctx.mine.moves.length, 'move')})`, ...ctx.mine }, { id: 'computer', name: 'Computer', label: 'The computer' }];
-  let aId = 'mine', bId = 'computer';
+  const choices = [{ id: 'mine', name: 'You', label: `This game (${plural(ctx.mine.moves.length, 'move')})`, ...ctx.mine }, { id: 'computer', name: 'Computer', label: slow() ? 'Strong computer (takes minutes here)' : 'The computer' }, { id: 'quick', name: 'Quick computer', label: 'Quick computer (weaker)' }];
+  let aId = 'mine', bId = slow() && !store.get(CACHE, {})[`${suits}/${seed}`] ? 'quick' : 'computer';
   let why = '', closed = false, failed = '', busy = '', token = 0;
   let pool = null, A = null, B = null, rel = null, all = [], keys = [], measured = null;
   let at = [0, 0], pick = null; // the two boards' positions, and what is picked out ('split', or a row's number)
@@ -179,36 +185,61 @@ export function open(ctx) {
     };
     $('.cp-table').innerHTML = `<table><tr><th>By the end of</th><th class="a">${esc(nameOf(aId))}</th><th class="b">${esc(nameOf(bId))}</th><th class="num" title="The first's chance of winning less the second's, by the network">Gap</th></tr>
       ${all.map(x => `<tr data-pick="${x.r}"${pick === x.r ? ' class="sel"' : ''}><th>${rowName(x.r, last).replace('Up to the first deal', 'First deal').replace(/^Deal \d+ to deal /, 'Deal ')}</th>${cell(A, x.a)}${cell(B, x.b)}<td class="num">${x.gap === null ? '' : points(x.gap)}</td></tr>`).join('')}</table>`;
-    $('.cp-note').innerHTML = `${aId === 'computer' || bId === 'computer' ? 'The computer sees only what is face up and takes nothing back; this is the one game it plays on these cards. ' : ''}Both lines are read as played straight through; moves taken back are left out, though the cards they showed may have helped (hence the undos above). What came up later in one line is not something the other player could have known. From deal to deal the numbers are the network\'s, a rough judge of any one position, and part of what moves them is the cards, which do not come up alike: they point at where to look, and only the choice where the lines part is played out. <span class="keys">Keys: ← → both boards a move · ↑ ↓ the moments · Esc back</span>`;
+    $('.cp-note').innerHTML = `${[aId, bId].includes('computer') ? 'The computer sees only what is face up and takes nothing back. At every choice it plays what the analysis rates best: its own lines played on in shuffles of the cards not seen, so the analysis finds next to no mistakes in its game; this is the one game it plays on these cards. ' : [aId, bId].includes('quick') ? 'The computer sees only what is face up and takes nothing back; at a glance it plays the line the analysis measures everything against, without weighing others. ' : ''}Both lines are read as played straight through; moves taken back are left out, though the cards they showed may have helped (hence the undos above). What came up later in one line is not something the other player could have known. From deal to deal the numbers are the network\'s, a rough judge of any one position, and part of what moves them is the cards, which do not come up alike: they point at where to look, and only the choice where the lines part is played out. <span class="keys">Keys: ← → both boards a move · ↑ ↓ the moments · Esc back</span>`;
   }
 
   const redraw = () => { if (!closed) draw(); };
 
   // ---- the work
 
-  function computer() {
-    const saved = store.get(CACHE, {}), key = `${suits}/${seed}`;
-    if (saved[key]) return Promise.resolve({ moves: parseMoves(saved[key].moves), won: saved[key].won });
-    let turns = 0;
-    return computerGame(suits, seed, position => pool.run({ next: position }).then(a => a.next), moves => {
-      busy = `The computer is playing: move ${moves.length}, card ${++turns}…`;
-      redraw();
-      return !closed;
-    }).then(game => {
-      const now = store.get(CACHE, {});
-      now[key] = { moves: encodeMoves(game.moves), won: game.won, t: Date.now() };
-      for (const k of Object.keys(now).sort((a, b) => now[b].t - now[a].t).slice(KEEP)) delete now[k];
-      store.set(CACHE, now);
-      return game;
+  // The computer's game of the deal: `quick`, the line player's own (thought
+  // out anew at each card, as the analysis's games are), else the stronger
+  // player's (strong.js), which is kept here once played, since it takes a
+  // while. Without the WebAssembly engine there is only the first.
+  let playing = null;
+  function computer(quick) {
+    const key = `${suits}/${seed}`, saved = store.get(CACHE, {})[key];
+    const said = text => { if (!A) { busy = text; redraw(); } }; // (while the lines are waited for)
+    if (quick) {
+      return computerGame(suits, seed, position => pool.run({ next: position }, true).then(a => a.next), moves => {
+        said(`The computer is playing: move ${moves.length}…`);
+        return !closed;
+      });
+    }
+    if (saved) return Promise.resolve({ moves: parseMoves(saved.moves), won: saved.won });
+    // (One game at a time, played on while the computer is still one of the two picked.)
+    if (playing) return playing;
+    let over = false; // given up, or done
+    const game = playing = pool.run({ engine: true }).then(({ engine }) => {
+      if (engine !== 'wasm') return computer(true);
+      return strongGame(suits, seed, job => pool.run({ strong: job }).then(a => a.cands ?? a.worth), {
+        step(moves, turns, g) {
+          said(`The computer is playing, weighing each choice: ${turns} made, ${g.faceDown.reduce((a, b) => a + b, 0) + g.stock.length} cards still to come…`);
+          if (!closed && [aId, bId].includes('computer')) return true;
+          over = true;
+          if (playing === game) playing = null;
+          return false;
+        },
+      }).then(played => {
+        if (over) return null;
+        if (playing === game) playing = null;
+        const now = store.get(CACHE, {});
+        now[key] = { moves: encodeMoves(played.moves), won: played.won, t: Date.now() };
+        for (const k of Object.keys(now).sort((a, b) => now[b].t - now[a].t).slice(KEEP)) delete now[k];
+        store.set(CACHE, now);
+        return played;
+      });
     });
+    return playing;
   }
 
   async function lineOf(id) {
     if (lines.has(id)) return lines.get(id);
     const c = choices.find(x => x.id === id);
     let line;
-    if (id === 'computer') {
-      const game = await computer();
+    if (id === 'computer' || id === 'quick') {
+      const game = await computer(id === 'quick');
+      if (!game) return null;
       line = readLine(suits, seed, game.moves, 'lost');
     } else line = readLine(suits, seed, c.moves, c.over);
     lines.set(id, line);
@@ -266,8 +297,10 @@ export function open(ctx) {
       const cores = navigator.hardwareConcurrency || 4;
       pool = new Pool(Math.max(1, Math.min(12, cores - 1)), net, suits, e => { failed = `The comparison failed: ${e.message || 'a worker stopped'}`; redraw(); });
     }
+    busy = 'Reading the games…';
+    redraw();
     const la = await lineOf(aId), lb = await lineOf(bId);
-    if (closed || mine !== token) return;
+    if (closed || mine !== token || !la || !lb) return;
     A = la;
     B = lb;
     rel = relate(A, B);
