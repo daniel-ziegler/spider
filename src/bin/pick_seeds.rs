@@ -17,10 +17,11 @@
 //! weak player wins fewer than SPIDER_W_FIRST_MIN of its first
 //! SPIDER_W_FIRST runs.
 //!
-//! The medium daily challenges (web/tools/dailies/picked3_medium.txt and
-//! picked4_medium.txt) are seeds kept with SPIDER_W_MIN=0.5
-//! SPIDER_W_MAX=0.8 SPIDER_W_RUNS=100 SPIDER_W_FIRST=20
-//! SPIDER_W_FIRST_MIN=7 SPIDER_S_MIN=0.89 SPIDER_S_RUNS=30.
+//! The medium daily challenges through 2026-11-10
+//! (web/tools/dailies/picked3_medium.txt and picked4_medium.txt) are seeds
+//! kept with SPIDER_W_MIN=0.5 SPIDER_W_MAX=0.8 SPIDER_W_RUNS=100
+//! SPIDER_W_FIRST=20 SPIDER_W_FIRST_MIN=7 SPIDER_S_MIN=0.89
+//! SPIDER_S_RUNS=30; the later ones are graded by `medium_rates`.
 use spider::game::Game;
 use spider::lines::{play, LineConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
