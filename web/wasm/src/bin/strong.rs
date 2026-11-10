@@ -4,9 +4,11 @@
 //!     cargo run --release --bin strong -- suits first count
 //!
 //! prints for each deal `seed line strong turns open changed rolls values ms
-//! hash` (whether each won; the stronger player's choices, those of more
+//! hash gain short` (whether each won; the stronger player's choices, those of more
 //! than one line and those not the line player's; games played on and
-//! positions valued; its time; a hash of its moves) and then the sums, with
+//! positions valued; its time; a hash of its moves; with `S_AUDIT=worlds`
+//! what its choices gained in so many other worlds, in points, played to
+//! the end and stopped: `strong::Played::gain`) and then the sums, with
 //! the difference in points of win rate and its standard error. `S_MOST`,
 //! `S_PER_COL`, `S_DEAL`, `S_FIRST`, `S_MAX`, `S_ZDROP`, `S_ZKEEP` and
 //! `S_STOP` set `strong::Params`; `S_ROLL` the player the worlds are played
@@ -45,6 +47,7 @@ fn main() {
     // S_STUDY=file: the line player's games with every choice played out
     // (`Strong::study`), in S_WORLDS worlds, S_FIRST of them for all.
     let study = std::env::var("S_STUDY").ok().map(|name| (Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(name).expect("S_STUDY")), p.first, get("S_WORLDS", 512usize)));
+    let audit: usize = get("S_AUDIT", 0);
     let next = AtomicU64::new(first);
     // line won, strong won, both, turns, open, changed, rolls, values, ms, lost with nothing hidden
     let sums = Mutex::new([0u64; 10]);
@@ -84,10 +87,10 @@ fn main() {
                     search.play_out(&mut t, &stock, &Config::analysis(suits), None, false);
                     let line = t[SIZE - 1] == 8;
                     let at = std::time::Instant::now();
-                    let r = strong.play_game(&mut s, &stock, seed, &p);
+                    let r = strong.play_game(&mut s, &stock, seed, &p, audit);
                     let ms = at.elapsed().as_millis() as u64;
                     let hash = r.moves.iter().fold(0x811C9DC5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x01000193));
-                    println!("{seed} {} {} {} {} {} {} {} {ms} {hash:08x}", line as u8, r.won as u8, r.turns, r.open, r.changed, r.rolls, r.values);
+                    println!("{seed} {} {} {} {} {} {} {} {ms} {hash:08x} {:.3} {:.3}", line as u8, r.won as u8, r.turns, r.open, r.changed, r.rolls, r.values, 100.0 * r.gain[0], 100.0 * r.gain[1]);
                     let mut sums = sums.lock().unwrap();
                     for (i, x) in [line as u64, r.won as u64, (line && r.won) as u64, r.turns as u64, r.open as u64, r.changed as u64, r.rolls, r.values, ms, r.lost_open as u64].into_iter().enumerate() {
                         sums[i] += x;

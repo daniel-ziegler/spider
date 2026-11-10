@@ -180,6 +180,15 @@ pub struct Played {
     pub values: u64,
     /// Whether it was lost with nothing left hidden.
     pub lost_open: bool,
+    /// With `audit` worlds: what its choices that were not the line
+    /// player's gained on the line player's own, summed over the game, in
+    /// worlds not used for choosing: the games played to the end, and stopped
+    /// and valued as they were for choosing. (The line player's chance of
+    /// winning from the start and these gains at the stronger player's
+    /// choices on the way add up to the stronger player's chance: so the
+    /// first is what it is stronger by, measured far more closely than by
+    /// counting wins, and the second is what the network makes of it.)
+    pub gain: [f64; 2],
 }
 
 pub struct Strong {
@@ -397,9 +406,9 @@ impl Strong {
     }
 
     /// Play a game from the position `s` with its stock (changing `s`).
-    pub fn play_game(&mut self, s: &mut [u8], stock: &[u8], seed: u64, p: &Params) -> Played {
-        let mut g = Played { won: false, moves: Vec::new(), turns: 0, open: 0, changed: 0, rolls: 0, values: 0, lost_open: false };
-        let (rolls, values) = (self.rolls, self.values);
+    pub fn play_game(&mut self, s: &mut [u8], stock: &[u8], seed: u64, p: &Params, audit: usize) -> Played {
+        let mut g = Played { won: false, moves: Vec::new(), turns: 0, open: 0, changed: 0, rolls: 0, values: 0, lost_open: false, gain: [0.0; 2] };
+        let (mut rolls, mut values) = (self.rolls, self.values);
         let mut left = stock.len();
         while s[DONE] < 8 {
             let before = (hidden(s), left);
@@ -416,6 +425,19 @@ impl Strong {
                     out
                 })
             };
+            if at != 0 && audit > 0 {
+                let ws = world_seed(seed, g.turns);
+                let before = (self.rolls, self.values);
+                for (k, stop) in [0, p.stop].into_iter().enumerate() {
+                    let (mut mine, mut line) = (Vec::new(), Vec::new());
+                    self.worth(s, &stock[..left], &cands[at], ws, 1_000_000, 1_000_000 + audit, stop, &mut mine);
+                    self.worth(s, &stock[..left], &cands[0], ws, 1_000_000, 1_000_000 + audit, stop, &mut line);
+                    g.gain[k] += ahead(&mine, &line).0;
+                }
+                // (not counted with the games the choosing took)
+                rolls += self.rolls - before.0;
+                values += self.values - before.1;
+            }
             g.turns += 1;
             g.changed += (at != 0) as usize;
             let Some(now) = play(s, stock, left, &cands[at]) else { break };
