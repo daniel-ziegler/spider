@@ -902,6 +902,57 @@ the line. A rerun could use the times to tell what had really been seen when, an
 to keep decisions made before a card was seen on a branch that came later; this
 does not do so yet.
 
+## Hardness: which deals are hard for a given player
+
+`tools/hardness/` asks whether what the playstyle analysis found of a player
+says which deals that player loses, better than the weak line player's win
+rate does (the measure the medium challenges are picked by). It does not, on
+the games there were (2026-11-10: 205 decided games of three and four suits,
+138 of one player and 67 of the other, on 147 deals):
+
+```
+node web/tools/hardness/outcomes.mjs DB DIR            # outcomes.json, played3.txt, played4.txt
+SPIDER_R_SEEDS=DIR/played4.txt cargo run --release --bin model_rates 4 200 > DIR/model4.out   # and 3
+node web/tools/hardness/compgames.mjs DIR              # the computer's game of each deal, as DIR/comp.db
+node web/tools/playstyle/step1.mjs DIR/comp.db DIR/comp --users=computer
+node web/tools/playstyle/step1.mjs DB DIR/ps           # the players' own games, for games.py
+python3 web/tools/hardness/fit.py DIR; python3 web/tools/hardness/games.py DIR
+```
+
+(some 40 minutes on 16 cores, most of it `model_rates` at 200 games a player and
+step 1.) `model_rates` (`src/bin/model_rates.rs`) plays line players made to
+miss lines as a person does: `capNN` sees one step of a line always and each
+further one with probability NN%, drawn anew whenever a card turns, a deal is
+made or a suit completes. The found rates of a clean turn by the moves it
+needs (`games.py`: 97-99% at one move for both players; at 2, 3, 4-5 and 6 or
+more, 83, 75, 55 and 36% for one and 90, 83, 75 and 71% for the other) are
+roughly those of `cap80` and of `cap90` to `cap95` (a step is often more than
+one move). `fit.py` judges a measure within a
+player's games of one number of suits: the AUC (how often a won deal has the
+higher measure than a lost one), the AUC less the weak player's with an
+interval from resampling deals, the slope beside the weak player's rate, and
+the log loss saved on deals left out.
+
+What it found. The weak player's rate has an AUC of 0.69 (0.62 to 0.77) over
+all deals; `cap80` 0.71, `cap95` 0.69, each player's own model 0.70 and the
+other's 0.69; none differs from the weak player by more than its interval, and
+they go with it at 0.85 to 0.94 across deals. Counts along the computer's game
+of the decisions whose clean turn needs four moves or more (2.2 a deal, from 0
+to 6), or an empty column, or has none, and the network's value at the start,
+are at 0.50 or below. Within the medium challenges nothing is above chance
+(weak 0.43, 61 games); within the hard ones `cap80` has 0.72 against the weak
+player's 0.62 (difference 0.01 to 0.20), one of some hundred comparisons and
+not to be relied on. How far a lost game got and the undos of the player who
+undoes go with every model as with the weak player (rank correlations 0.45 and
+0.22). On the 58 deals both played, the third of deals the models set furthest
+apart for the two went 14 of 20 and 4 of 20, the third they set nearest 12 of
+19 and 4 of 19. The two players' results on those deals correlate at 0.33
+(-0.05 to 0.99, as two cut normal variables), which would let a perfect
+measure of what the deal is to both reach about 0.76: the weak player's rate
+is near that already, and what a deal is to one player only cannot be told
+without that player playing it twice. So the misses are a cost on every deal
+alike, and not something a deal can be picked for.
+
 ## Comparing attempts
 
 The menu, the win dialog and the analysis have **Compare**: two attempts at a
