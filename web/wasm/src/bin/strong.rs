@@ -13,7 +13,11 @@
 //! `S_PER_COL`, `S_DEAL`, `S_FIRST`, `S_MAX`, `S_ZDROP`, `S_ZKEEP` and
 //! `S_STOP` set `strong::Params`; `S_ROLL` the player the worlds are played
 //! on with (as `play_out`'s `cfg`); `S_NET` the network's file; `S_THREADS`
-//! the threads. Build the page's module with `--lib`: this is not for it.
+//! the threads. With `S_SEEDS` (a file whose lines start with a seed, `seed
+//! N ...` too, `#` comments aside) those deals are played and not a range:
+//! the ones at `first..first + count` in the file, counting from 1 (to pick
+//! deals the stronger player wins: it plays here what the page plays). Build
+//! the page's module with `--lib`: this is not for it.
 use spider::game::Game;
 use spider_wasm::net::Net;
 use spider_wasm::player::{Config, Search, DOWN, LEN, MAXC, NUM_COLS, SIZE};
@@ -48,6 +52,10 @@ fn main() {
     // (`Strong::study`), in S_WORLDS worlds, S_FIRST of them for all.
     let study = std::env::var("S_STUDY").ok().map(|name| (Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(name).expect("S_STUDY")), p.first, get("S_WORLDS", 512usize)));
     let audit: usize = get("S_AUDIT", 0);
+    let listed: Option<Vec<u64>> = std::env::var("S_SEEDS").ok().map(|path| {
+        let text = std::fs::read_to_string(&path).expect("S_SEEDS");
+        text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(|l| l.trim_start_matches("seed ").split_whitespace().next().unwrap().parse().expect("a seed")).collect()
+    });
     let next = AtomicU64::new(first);
     // line won, strong won, both, turns, open, changed, rolls, values, ms, lost with nothing hidden
     let sums = Mutex::new([0u64; 10]);
@@ -60,10 +68,17 @@ fn main() {
                 }
                 let mut search = Search::default();
                 loop {
-                    let seed = next.fetch_add(1, Ordering::Relaxed);
-                    if seed >= first + count {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= first + count {
                         break;
                     }
+                    let seed = match &listed {
+                        Some(seeds) => match seeds.get(i as usize - 1) {
+                            Some(&seed) => seed,
+                            None => break,
+                        },
+                        None => i,
+                    };
                     let g = Game::new(suits, seed);
                     let mut s = [0u8; SIZE];
                     for c in 0..NUM_COLS {

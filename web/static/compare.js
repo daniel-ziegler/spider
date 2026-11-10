@@ -48,6 +48,7 @@ export function open(ctx) {
   let aId = 'mine', bId = slow() && !store.get(CACHE, {})[`${suits}/${seed}`] ? 'quick' : 'computer';
   let why = '', closed = false, failed = '', busy = '', token = 0;
   let pool = null, A = null, B = null, rel = null, all = [], keys = [], measured = null;
+  let quickWins = false; // the computer lost a deal that the quick computer wins
   let at = [0, 0], pick = null; // the two boards' positions, and what is picked out ('split', or a row's number)
   const lines = new Map(), valued = new Map(); // read lines and their values, by attempt
 
@@ -167,7 +168,7 @@ export function open(ctx) {
       sum = `${where}${never}`;
     }
     const ignored = [rel.reordered && plural(rel.reordered, 'stretch of moves').replace('stretchs', 'stretches') + ' in another order', rel.takenBack && plural(rel.takenBack, 'move back to a position')].filter(Boolean);
-    $('.cp-sum').innerHTML = `<b>${esc(nameOf(aId))}</b> ${result(A)}${undosOf(choices.find(c => c.id === aId))}; <b>${esc(nameOf(bId))}</b> ${result(B)}${undosOf(choices.find(c => c.id === bId))}. ${sum}${ignored.length ? ` <span class="dim">(Left out, as coming to the same: ${ignored.join(', ')}.)</span>` : ''}`;
+    $('.cp-sum').innerHTML = `<b>${esc(nameOf(aId))}</b> ${result(A)}${undosOf(choices.find(c => c.id === aId))}; <b>${esc(nameOf(bId))}</b> ${result(B)}${undosOf(choices.find(c => c.id === bId))}. ${sum}${quickWins ? ' <b>The quick computer wins this deal</b>: pick it above to see how.' : ''}${ignored.length ? ` <span class="dim">(Left out, as coming to the same: ${ignored.join(', ')}.)</span>` : ''}`;
     const shownKeys = keys.slice();
     if (typeof pick === 'number' && !shownKeys.some(x => x.r === pick) && all[pick]) shownKeys.push(all[pick]);
     const html = splitHtml() + (shownKeys.length ? shownKeys.map(rowHtml).join('') : '');
@@ -303,6 +304,11 @@ export function open(ctx) {
     if (closed || mine !== token || !la || !lb) return;
     A = la;
     B = lb;
+    // (The two computers' games of a deal are different games: one may win where the other loses.)
+    quickWins = false;
+    if ([aId, bId].includes('computer') && !lines.get('computer').won && ![aId, bId].includes('quick')) {
+      lineOf('quick').then(q => { if (q?.won && mine === token) { quickWins = true; redraw(); } });
+    }
     rel = relate(A, B);
     all = rows(A, B);
     const sp = rel.split;
