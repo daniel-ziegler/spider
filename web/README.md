@@ -938,10 +938,99 @@ each by its place: if both lines deal from one position with such columns in
 different places, the same choice gets different cards, and the page says there
 was no choice there.
 
-The computer plays as the analysis's games do, from one card shown to the next,
-seeing only what is face up, in a worker, and the game is kept in the browser
-(30 of them). There is no chance in it, so it is the one game it plays on those
-cards. A game still being played asks first, since this shows the cards to come.
+A game still being played asks first, since the computer's game shows the cards
+to come.
+
+### The computer's game
+
+The computer of the comparison is the analysis's own measure made a player
+(`static/strong.js`, `wasm/src/strong.rs`, `test/strong.mjs`): at every choice
+it plays what the analysis would rate best. A choice is from one move that
+shows cards to the next. The lines to choose from are the line player's own
+moves, what it would play if it were about to deal, and the three best other
+lines of its search that turn a card (two at most for a column). Each is
+played on as the analysis plays a mistake: in shuffles of the cards not seen,
+the line player playing, eight moves that show cards and then the network
+with two suits or more, to the end with one. All get the same 16 worlds, then
+32 and 64 (with one suit 32 to 128); a line two standard errors behind the best
+is dropped; and the best is played, the line player's own unless another is a
+standard error ahead of it (most lines are a point or two worse than the
+line player's and a few better, and with these few worlds the best of several
+by the games alone is mostly the luckiest: without that rule it loses). So it
+sees only what is face up, as the line player does, and takes nothing back.
+
+The worlds are numbered and made from the deal's seed, so it plays one game on
+a deal, the same in every browser, and the same as `wasm`'s `--bin strong`
+plays natively (the network's `exp` is written out in `wasm/src/net.rs` so that
+the two agree to the bit; `tools/analysis/strong.mjs play` and `test/strong.mjs`
+check that they do). They are also the analysis's own worlds for the same
+stretch of the game, so the analysis of its game finds what it chose by: in 23
+of its games (three to ten of each number of suits; `tools/analysis/strong.mjs
+analyze`) the page's search called nothing a mistake and listed nothing as
+perhaps one, 4 to 16 of each game's choices being its own and not the line
+player's.
+
+It is stronger than the line player by three to six points of win rate
+(`cargo run --release --bin strong` in `wasm/`, with `S_AUDIT=128`; a rented
+machine of thirty cores for three and a half hours):
+
+| suits | deals | line player won | stronger player won | gain, games played to the end | gain, stopped and valued | games played on a game |
+|-------|-------|-----------------|---------------------|-------------------------------|--------------------------|------------------------|
+| 4     | 320   | 31.9%           | 37.5% (+5.6 ± 3.1)  | +3.46 ± 0.69                  | +4.21 ± 0.47             | 4,900                  |
+| 3     | 160   | 44.4%           | 53.8% (+9.4 ± 4.8)  | +5.56 ± 1.04                  | +5.62 ± 0.82             | 5,500                  |
+| 2     | 60    | 73.3%           | 76.7% (+3.3 ± 5.8)  | +4.21 ± 1.25                  | +3.39 ± 0.94             | 6,500                  |
+| 1     | 60    | 86.7%           | 95.0% (+8.3 ± 4.9)  | +3.35 ± 0.97                  | (the same)               | 8,000                  |
+
+Wins counted say little: the two play different games of a deal from the
+first choice that differs (seven of some thirty in a four-suit game), and one
+wins where the other loses one deal in three with four suits (the stronger
+player wins 60% of the deals the line player wins with four suits, 69% with
+three, 89% with two, 96% with one, and 58 of the 60 medium challenges of the
+month from 2026-11-11, which are picked for the line player's win: the
+comparison says so when the computer lost a deal the quick computer wins). The
+gain is the closer measure: at each choice of its own, what that line is worth
+less the line player's, in 128 other worlds, summed over the game. The line
+player's chance at the start and these gains at the stronger player's choices
+add up to the stronger player's chance, exactly with the games played to the
+end. So the analysis's chances, which are the line player's, are low for the
+computer of the comparison by three to six points at the start of a game (it
+wins some 40%, 57%, 73% and 94% of deals with four suits to one where the
+line player wins 37%, 52%, 69% and 91%), and by less later.
+
+What more would buy was measured on the line player's own games first
+(`S_STUDY`, `tools/analysis/study.py`: 48 four-suit games, every choice's
+lines each played in the same 384 worlds; a rule picks by the first 128 and
+is judged by the rest, summed over a game, which is the gain to first order
+and by the network's measure):
+
+| other lines | worlds    | played instead of the line player's if | gain a game  | games played on |
+|-------------|-----------|----------------------------------------|--------------|-----------------|
+| none (only what it would play about to deal) | 16 to 64 | a standard error ahead | +0.0 ± 0.2 | 900 |
+| 2           | 16 to 64  | a standard error ahead                 | +2.0 ± 0.7   | 3,900           |
+| 3           | 8 to 32   | a standard error ahead                 | +2.1 ± 0.9   | 2,500           |
+| 3 (the page's) | 16 to 64 | a standard error ahead               | +3.8 ± 0.9   | 5,100           |
+| 4           | 16 to 64  | a standard error ahead                 | +3.9 ± 0.9   | 6,200           |
+| 6           | 16 to 64  | a standard error ahead                 | +3.8 ± 1.0   | 7,700           |
+| 6           | 16 to 64  | ahead at all / two standard errors     | +2.0 ± 1.3 / +2.4 ± 0.7 | 7,700 |
+| 6           | 16 to 32  | ahead at all                           | −1.7 ± 1.4   | 4,200           |
+| 3           | 16 to 128 | a standard error ahead                 | +4.6 ± 1.0   | 9,500           |
+| 4           | 32 to 128 | a standard error ahead                 | +5.2 ± 0.9   | 12,200          |
+| 6           | 32 to 128 | a standard error ahead                 | +5.3 ± 1.0   | 14,900          |
+
+More lines than three find nothing more, and twice the worlds a point and a
+half for more than twice the time. (The other lines are on average 0.3 to 2
+points worse than the line player's, with a spread of 1.5 to 3 between them:
+what there is to gain is the few that are better, and telling them from the
+lucky ones.)
+
+A long four-suit game takes 40 s on the twelve workers of a laptop with eight
+cores and one of two suits a minute (the games are a quarter of that on one
+core: twelve workers do the work of some three and a half), so it is kept in
+the browser once played (30 of them), and where it would take minutes (fewer than eight cores, or a touch
+screen) the comparison opens with the **quick computer**, the line player's
+own game (thought out anew at each card, as the analysis's games are), there at
+once, and the other is one of the choices. Without WebAssembly there is only
+the quick one.
 
 `GET /api/attempts/{game}/{suits}/{seed}` gives others' lines only to a player
 who has finished the deal, by winning it or having a game of it marked as lost:
