@@ -757,6 +757,14 @@ mod tests {
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 
+    /// test/medium.mjs: the computer wins the coming days' medium challenges
+    /// (they are picked for that; `tools/dailies/medium.sh` picks them again).
+    #[test]
+    fn the_computer_wins_the_medium_challenges() {
+        let out = std::process::Command::new("node").arg("test/medium.mjs").output().expect("node is needed for this test");
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
     /// Others' lines only once the deal is finished, and never a game in progress.
     #[test]
     fn attempts_are_hidden_until_the_deal_is_finished() {

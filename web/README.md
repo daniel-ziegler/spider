@@ -784,36 +784,89 @@ challenge beside the hard one. It is another deal, so both can be played and
 their wins and saved games are apart. The home page shows each medium one
 above its hard one, and the archive one of the two kinds at a time. They are
 listed in `medium-challenges.txt` (`date suits seed`, built into the server
-like the others) and taken, in shuffled order, from
-`tools/dailies/picked3_medium.txt` and `picked4_medium.txt`: seeds that the
-wavering line player wins at least 27 of 30 times and `pick_seeds`' weak
-player 50 to 79 of 100, so they are easy for it but not sure. That keeps 7.4%
-of three-suit seeds (85 of 100001–101147) and 3.0% of four-suit ones (88 of
-100001–102957); 79 of each are used, through 2026-12-31. Played again with
-other salts (`../src/bin/seed_rates.rs`: 12 games each by the line player and
-by it without expectimax or replanning, 50 by the weak one), against 40 of
-the hard deals of `picked3.txt` and `picked4_2026.txt`:
+like the others).
 
-| won                             | 3 suits, medium | hard | 4 suits, medium | hard |
-|---------------------------------|-----------------|------|-----------------|------|
-| line player                     | 95%             | 79%  | 93%             | 76%  |
-| without expectimax, replanning  | 92%             | 65%  | 83%             | 54%  |
-| weak player                     | 66%             | 26%  | 62%             | 31%  |
-| `human.rs` (deals it wins)      | 52%             | 18%  | 38%             | 18%  |
+From 2026-11-11 a medium deal is one that
 
-Of all deals the line player wins 54% and 39%, and the weak one about 22%
-and 17%. To extend the list, pick more seeds from where the files end (their
-first lines say), add the kept ones to them, and give the dates:
+* the computer wins: the game that compare mode shows of it, played as the
+  page plays it (`tools/dailies/computer.mjs`), so that a lost medium
+  challenge always has a won game beside it;
+* the computer wavering (a random line among those within 2 of the best)
+  wins at least 27 of 30 times;
+* `pick_seeds`' weak player (lines of 3 steps with three suits, of 4 with
+  four, no expectimax or replanning, wavering) wins 60% to 70% of 300 times
+  with three suits, 57% to 67% with four.
+
+`../src/bin/medium_rates.rs` grades seeds for it, dropping a seed as soon as
+it fails (the computer wins 52% of three-suit deals and 35% of four-suit
+ones; the weak player is asked 100 times first, and 200 more with other
+salts of the seeds within 10 points of the range that pass the rest), and the ones that come
+through are kept with their rates in `tools/dailies/medium3.txt` and
+`medium4.txt` (957 of the three-suit seeds 110001–123500, 561 of the
+four-suit seeds 110001–132500), so that the ranges (in
+`tools/dailies/src/main.rs`) can be moved without playing them again. 348
+and 202 of them are in the ranges, 2.6% and 0.9% of all seeds. Its computer
+plays a game through where the page plays it from one card shown to the
+next, and one deal in ten or twelve ends otherwise (25 of 300 with three
+suits, 30 with four), so the page's own game has the last word: it wins 337
+and 187 of them. 171 of each are used, through 2027-04-30.
+
+The ones before (through 2026-11-10, from `tools/dailies/picked3_medium.txt`
+and `picked4_medium.txt`) were seeds that the default line player, wavering,
+won at least 27 of 30 times and the weak player 50 to 79 of 100, measured
+once. Three things were wrong with that. The player asked was not the
+page's computer, which lost 2 of the 56 that came up and 6 of the 102 that
+were still to come. The 100 games were the ones the seeds were picked by:
+of 200 more with other salts the weak player won from 44% to 86% (64% and
+61% of them on average with three and four suits, with a standard deviation
+of 9 points, of which the 200 games' own chance is 3.4; the new ones, played
+200 times with salts they were not picked by either: 64% and 62%, a
+standard deviation of 5 points, from 49% to 80%; without the games' chance
+the deals' own spread is some 8.5 points before and 3.5 now). And some were deals that
+the computer itself often loses: wavering, it won 32 of 40 times or fewer
+on 7 of the 79 with three suits and on 13 with four.
+
+How much of this a player feels is less sure. Of everything measured on the
+deals that two players had won or lost by 2026-11-10 (205 games of three and
+four suits, 61 of them medium: the weak player's rate, the same with lines
+of 2 and of 8 steps, the wavering computer's, whether the computer wins,
+whether `human.rs` does), the weak player's rate says most about who wins
+(the area under the curve, among one player's games with one number of
+suits, is 0.71; a logit of it is worth 0.65 ± 0.18 of a logit in a player's
+odds, and nothing adds to it), which is why the range is still on it. By
+that fit the chance of someone who wins four medium deals in ten went up and
+down from deal to deal by 6 points (a standard deviation) under the old
+rule, and does by 2 under the new. But among the medium deals alone nothing measured says who
+won (0.49 for the weak player's rate, over 61 games), and on the 58 deals
+both played, medium or hard, the two had the same result 27 times where
+chance would have them agree 23.5 times: what the deal is like is a small
+part of who wins it. Most of how uneven the medium deals feel is then the
+game itself, which the picking cannot change: someone who wins four in ten
+of them loses three in a row one time in five.
+
+When the computer plays differently (a new player, a new network) it may
+lose deals picked here; `cargo test` plays the coming days' ones
+(`test/medium.mjs`). To pick the days from a date on again, with
+`static/spider.wasm` built:
 
 ```
-cd ../.. && SPIDER_W_MIN=0.5 SPIDER_W_MAX=0.8 SPIDER_W_RUNS=100 SPIDER_W_FIRST=20 SPIDER_W_FIRST_MIN=7 \
-    SPIDER_S_MIN=0.89 SPIDER_S_RUNS=30 cargo run --release --bin pick_seeds -- 4 102958 3000
-cd web/tools/dailies && cargo run --release -- medium 2027-01-01 2027-03-31
+tools/dailies/medium.sh 2026-12-01 2027-04-30
 ```
 
-(about 50 games of the line player, two minutes of one core, for each seed
-kept). `cargo test` fails once today is past the end of the medium
-ones too.
+(the page's computer plays every graded seed, a minute on eight cores, and
+`dailies medium` gives each day the next medium deal that it wins; the days
+before the first date are kept, and it must be after today). 16 four-suit
+deals are spare, and 166 three-suit ones. To grade more seeds, from where
+the files end (their first lines say), and extend the list:
+
+```
+cd .. && cargo run --release --bin medium_rates -- 4 132501 20000 | grep again >> web/tools/dailies/medium4.txt
+web/tools/dailies/medium.sh 2027-05-01 2027-09-30
+```
+
+(20000 four-suit seeds took 32 minutes on a rented box of 30 cores and gave
+some 165 deals; 12000 three-suit ones 27 minutes, some 300). `cargo test`
+fails once today is past the end of the medium ones too.
 
 ## Playstyle: what two players do wrong over many decisions
 
